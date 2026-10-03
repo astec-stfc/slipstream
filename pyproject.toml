@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-sdds = ["sdds"]
+sdds = ["soliday.sdds"]
 cuda = ["warp-lang"]
 
 [tool.setuptools.packages.find]
@@ -29,3 +29,8 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
+
+[tool.ruff.lint]
+# ponytail: explicit rules so new ruff releases do not change what CI enforces
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E731"]

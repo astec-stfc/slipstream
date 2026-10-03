@@ -38,7 +38,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import slipstream._compile_env
+import slipstream._compile_env  # noqa: F401
 
 import numpy as np
 import torch

@@ -22,6 +22,7 @@ import torch
 import torch._dynamo
 
 from ...constants import C_LIGHT, EPS0_F_PER_M
+from . import warp_kernels
 
 _Z0_OHM = 1.0 / (EPS0_F_PER_M * C_LIGHT)  # vacuum impedance
 
@@ -47,6 +48,13 @@ def _kde_window(n: int, k: float = 4.0) -> int:
 # (each row's result is independent of chunk grouping) -- see
 # docs/tracking_native.md.
 _CHUNK_TARGET_ELEMENTS = 2**21
+
+# The Warp CSR kernel removes the materialised row-block, but has the same
+# O(N^2) work.  Below this size its launch/setup cost is not consistently
+# recovered.  Float64 CSR deliberately stays on the PyTorch path: on the
+# supported consumer GPU its Warp kernel is slower, while the Warp wrapper
+# still exposes float64 for explicit benchmarking and opt-in callers.
+_CSR_WARP_MIN_N = 32_768
 
 
 def _chunk_rows_for(n: int, cols: int) -> int:
@@ -103,14 +111,42 @@ def _get_compiled_csr_chunk_step():
     return _compiled_csr_chunk_step
 
 
+def _warp_collective_ready(primary: torch.Tensor, *others: torch.Tensor) -> bool:
+    """Return whether a forward-only optional Warp collective is safe here."""
+    if torch._dynamo.is_compiling() or not primary.is_cuda:
+        return False
+    if not warp_kernels.available(primary.device.type, primary.dtype):
+        return False
+    if primary.requires_grad or not primary.is_contiguous():
+        return False
+    for tensor in others:
+        if tensor.device != primary.device or tensor.requires_grad or not tensor.is_contiguous():
+            return False
+    return True
+
+
 def _csr_chunked_pairwise_sum(
     tau_m: torch.Tensor, score: torch.Tensor, softening_m: torch.Tensor, n: int, compile_chunks: bool = False,
-    _use_graph: bool = True,
+    _use_graph: bool = True, _use_warp: bool = True,
 ) -> torch.Tensor:
     """CSR's all-vs-all sum (no compact support to window against), row-
     chunked the same way as the KDE's windowed branch. ``compile_chunks``
     (default off) routes each chunk through the compiled step instead of
     eager."""
+    if (
+        _use_warp
+        and n >= _CSR_WARP_MIN_N
+        and tau_m.ndim == 1
+        and tau_m.dtype == torch.float32
+        and score.shape == tau_m.shape
+        and score.dtype == tau_m.dtype
+        and softening_m.numel() == 1
+        and softening_m.dtype == tau_m.dtype
+        and softening_m.device == tau_m.device
+        and _warp_collective_ready(tau_m, score, softening_m)
+    ):
+        return warp_kernels.csr_pairwise_sum(tau_m, score, softening_m)
+
     if _use_graph and compile_chunks and tau_m.is_cuda and tau_m.ndim == 1:
         graph = _get_csr_pairwise_graph(n, tau_m.dtype, tau_m.device)
         return graph.run(tau_m, score, softening_m)
@@ -139,7 +175,8 @@ class _CSRPairwiseGraph:
 
         def body():
             return _csr_chunked_pairwise_sum(
-                self._tau, self._score, self._softening, n, compile_chunks=True, _use_graph=False,
+                self._tau, self._score, self._softening, n, compile_chunks=True,
+                _use_graph=False, _use_warp=False,
             )
 
         warmup_stream = torch.cuda.Stream(device=device)
@@ -659,11 +696,32 @@ def _fixed_grid(
 
 def _bin_line_density(
     charge_per_particle_C: torch.Tensor | float, bin_idx: torch.Tensor, interp_w: torch.Tensor,
-    valid: torch.Tensor, n_bins: int, dtau: torch.Tensor,
+    valid: torch.Tensor, n_bins: int, dtau: torch.Tensor, _use_warp: bool = True,
 ) -> torch.Tensor:
     """CIC histogram of the line charge density ``lambda_k`` on the grid
     built by ``_fixed_grid``."""
     dtype, device = interp_w.dtype, interp_w.device
+
+    charge_tensor = charge_per_particle_C
+    if not isinstance(charge_tensor, torch.Tensor):
+        charge_tensor = torch.as_tensor(charge_tensor, dtype=dtype, device=device)
+    if (
+        _use_warp
+        and bin_idx.device == device
+        and bin_idx.dtype in (torch.int32, torch.int64)
+        and charge_tensor.numel() == 1
+        and charge_tensor.dtype == dtype
+        and _warp_collective_ready(interp_w, valid, charge_tensor, dtau)
+        and valid.dtype == torch.bool
+    ):
+        # _fixed_grid currently returns int64 indices for native torch
+        # scatter_add_.  Warp's compact index type is sufficient here and
+        # avoids changing the established CPU/reference representation.
+        bin_idx32 = bin_idx if bin_idx.dtype == torch.int32 else bin_idx.to(torch.int32)
+        return warp_kernels.cic_line_density(
+            bin_idx32.contiguous(), interp_w, valid, charge_tensor, n_bins, dtau,
+        )
+
     zero = torch.zeros((), dtype=dtype, device=device)
     left_w = torch.where(valid, 1.0 - interp_w, zero)
     lam = torch.zeros(n_bins, dtype=dtype, device=device)

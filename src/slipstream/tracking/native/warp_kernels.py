@@ -663,6 +663,196 @@ if _HAVE_WARP:
                             + [wp.float64] * 4 + [wp.array(dtype=wp.float64)] * 3)
 
 
+if _HAVE_WARP:
+
+    @wp.kernel
+    def _csr_pairwise_kernel(
+        tau: wp.array(dtype=Any), score: wp.array(dtype=Any), softening: wp.array(dtype=Any),
+        one: Any, weighted_sum: wp.array(dtype=Any),
+    ):
+        """Exact one-sided softened CSR sum, one thread per observer.
+
+        This is the same operation as ``collective._csr_chunk_step`` without
+        materialising a row-block ``(rows, N)`` temporary.  Every observer
+        still visits every source, so the algorithm remains O(N^2); Warp only
+        changes the memory traffic and reduction implementation.
+        """
+        i = wp.tid()
+        zero = one - one
+        six = one + one + one + one + one + one
+        ti = tau[i]
+        eps = softening[0]
+        total = zero
+        compensation = zero
+        for j in range(tau.shape[0]):
+            diff = ti - tau[j]
+            if diff < zero:
+                softened = diff * diff + eps * eps
+                # The reference reduction is a tree reduction while this
+                # kernel is source-serial per observer.  Compensated
+                # summation keeps float32 parity from degrading with N.
+                term = score[j] * wp.pow(softened, -one / six) - compensation
+                updated = total + term
+                compensation = (updated - total) - term
+                total = updated
+        weighted_sum[i] = total
+
+    _csr_pairwise_f32 = wp.overload(
+        _csr_pairwise_kernel,
+        [wp.array(dtype=wp.float32)] * 3 + [wp.float32] + [wp.array(dtype=wp.float32)],
+    )
+    _csr_pairwise_f64 = wp.overload(
+        _csr_pairwise_kernel,
+        [wp.array(dtype=wp.float64)] * 3 + [wp.float64] + [wp.array(dtype=wp.float64)],
+    )
+
+    @wp.kernel
+    def _cic_line_density_kernel(
+        bin_idx: wp.array(dtype=wp.int32), interp_w: wp.array(dtype=Any), valid: wp.array(dtype=wp.bool),
+        charge_per_particle: wp.array(dtype=Any), one: Any, line_charge: wp.array(dtype=Any),
+    ):
+        """Two-point CIC line-charge deposition for the fixed-grid LSC/CSR path."""
+        i = wp.tid()
+        if valid[i]:
+            w = interp_w[i]
+            q = charge_per_particle[0]
+            wp.atomic_add(line_charge, bin_idx[i], q * (one - w))
+            wp.atomic_add(line_charge, bin_idx[i] + 1, q * w)
+
+    _cic_line_density_f32 = wp.overload(
+        _cic_line_density_kernel,
+        [wp.array(dtype=wp.int32), wp.array(dtype=wp.float32), wp.array(dtype=wp.bool),
+         wp.array(dtype=wp.float32), wp.float32, wp.array(dtype=wp.float32)],
+    )
+    _cic_line_density_f64 = wp.overload(
+        _cic_line_density_kernel,
+        [wp.array(dtype=wp.int32), wp.array(dtype=wp.float64), wp.array(dtype=wp.bool),
+         wp.array(dtype=wp.float64), wp.float64, wp.array(dtype=wp.float64)],
+    )
+
+    @wp.kernel
+    def _histogram_kernel(
+        safe_idx: wp.array(dtype=wp.int32), one: Any, histogram: wp.array(dtype=Any),
+    ):
+        """Atomic unit-count histogram for a fixed-window short-range wake."""
+        i = wp.tid()
+        wp.atomic_add(histogram, safe_idx[i], one)
+
+    _histogram_f32 = wp.overload(
+        _histogram_kernel,
+        [wp.array(dtype=wp.int32), wp.float32, wp.array(dtype=wp.float32)],
+    )
+    _histogram_f64 = wp.overload(
+        _histogram_kernel,
+        [wp.array(dtype=wp.int32), wp.float64, wp.array(dtype=wp.float64)],
+    )
+
+
+def csr_pairwise_sum(
+    tau: torch.Tensor, score: torch.Tensor, softening: torch.Tensor,
+) -> torch.Tensor:
+    """Run the exact one-sided CSR pairwise sum with one Warp thread/observer.
+
+    ``tau`` and ``score`` are one-dimensional, same-dtype CUDA tensors;
+    ``softening`` is a scalar CUDA tensor.  The scalar remains device-side so
+    this wrapper does not introduce a host synchronization into a collective
+    kick.  This is an accelerator primitive, not a replacement for the
+    authoritative PyTorch/autograd path.
+    """
+    if not _HAVE_WARP:
+        raise RuntimeError("Warp is not installed")
+    if tau.device.type != "cuda" or tau.dtype not in (torch.float32, torch.float64):
+        raise ValueError("CSR Warp kernel requires a float32/float64 CUDA tensor")
+    if tau.ndim != 1 or score.shape != tau.shape or score.dtype != tau.dtype:
+        raise ValueError("tau and score must be matching one-dimensional tensors")
+    if softening.numel() != 1 or softening.dtype != tau.dtype or softening.device != tau.device:
+        raise ValueError("softening must be a same-device, same-dtype scalar tensor")
+    if not tau.is_contiguous() or not score.is_contiguous() or not softening.is_contiguous():
+        raise ValueError("CSR Warp inputs must be contiguous")
+
+    _ensure_init()
+    kernel = _csr_pairwise_f64 if tau.dtype == torch.float64 else _csr_pairwise_f32
+    scalar = wp.float64 if tau.dtype == torch.float64 else wp.float32
+    out = torch.empty_like(tau)
+    wp.launch(
+        kernel,
+        dim=tau.shape[0],
+        inputs=[_wp_arg(tau), _wp_arg(score), _wp_arg(softening.reshape(1)), scalar(1.0), _wp_arg(out)],
+        stream=_launch_stream(tau),
+    )
+    return out
+
+
+def cic_line_density(
+    bin_idx: torch.Tensor, interp_w: torch.Tensor, valid: torch.Tensor,
+    charge_per_particle: torch.Tensor, n_bins: int, dtau: torch.Tensor,
+) -> torch.Tensor:
+    """Deposit fixed-grid CIC line charge and return ``lambda = charge/dtau``.
+
+    The index/weight arrays are deliberately supplied by the caller: this is
+    the same split used by the existing fixed-grid implementation, and lets
+    the benchmark isolate the atomic deposition work from grid construction.
+    """
+    if not _HAVE_WARP:
+        raise RuntimeError("Warp is not installed")
+    if bin_idx.device.type != "cuda" or bin_idx.dtype != torch.int32:
+        raise ValueError("CIC Warp bin indices must be int32 CUDA tensors")
+    if interp_w.dtype not in (torch.float32, torch.float64) or interp_w.dtype != charge_per_particle.dtype:
+        raise ValueError("CIC weights and charge must share float32 or float64 dtype")
+    if interp_w.device != bin_idx.device or valid.device != bin_idx.device or charge_per_particle.device != bin_idx.device:
+        raise ValueError("CIC Warp inputs must share a CUDA device")
+    if valid.dtype != torch.bool:
+        raise ValueError("CIC valid mask must be bool")
+    if interp_w.shape != bin_idx.shape or valid.shape != bin_idx.shape or charge_per_particle.numel() != 1:
+        raise ValueError("CIC inputs have incompatible shapes")
+    if dtau.numel() != 1 or dtau.device != bin_idx.device or dtau.dtype != interp_w.dtype:
+        raise ValueError("dtau must be a same-device, same-dtype scalar tensor")
+    if not bin_idx.is_contiguous() or not interp_w.is_contiguous() or not valid.is_contiguous():
+        raise ValueError("CIC Warp particle inputs must be contiguous")
+
+    _ensure_init()
+    kernel = _cic_line_density_f64 if interp_w.dtype == torch.float64 else _cic_line_density_f32
+    scalar = wp.float64 if interp_w.dtype == torch.float64 else wp.float32
+    line_charge = torch.zeros(n_bins, dtype=interp_w.dtype, device=bin_idx.device)
+    wp.launch(
+        kernel,
+        dim=bin_idx.shape[0],
+        inputs=[
+            _wp_arg(bin_idx), _wp_arg(interp_w), _wp_arg(valid), _wp_arg(charge_per_particle.reshape(1)),
+            scalar(1.0), _wp_arg(line_charge),
+        ],
+        stream=_launch_stream(bin_idx),
+    )
+    return line_charge / dtau.reshape(())
+
+
+def wake_histogram(safe_idx: torch.Tensor, n_bins: int, dtype: torch.dtype) -> torch.Tensor:
+    """Deposit unit counts for the fixed-window short-range wake histogram.
+
+    ``safe_idx`` includes the extra trash-bin index used by
+    ``ShortRangeWake.voltage_at``.  It must already use the reference path's
+    rounding and clamping semantics; this kernel only replaces the atomic
+    histogram update.
+    """
+    if not _HAVE_WARP:
+        raise RuntimeError("Warp is not installed")
+    if safe_idx.device.type != "cuda" or safe_idx.dtype != torch.int32:
+        raise ValueError("wake histogram indices must be int32 CUDA tensors")
+    if dtype not in (torch.float32, torch.float64):
+        raise ValueError("wake histogram dtype must be float32 or float64")
+    _ensure_init()
+    kernel = _histogram_f64 if dtype == torch.float64 else _histogram_f32
+    scalar = wp.float64 if dtype == torch.float64 else wp.float32
+    histogram = torch.zeros(n_bins, dtype=dtype, device=safe_idx.device)
+    wp.launch(
+        kernel,
+        dim=safe_idx.shape[0],
+        inputs=[_wp_arg(safe_idx), scalar(1.0), _wp_arg(histogram)],
+        stream=_launch_stream(safe_idx),
+    )
+    return histogram
+
+
 def push(x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,
          Ex, Ey, Ez, Bx, By, Bz, qmdt2: float, dt: float, c2_inv: float):
     """Boris-push tail of ``injector._fused_step`` as one warp kernel

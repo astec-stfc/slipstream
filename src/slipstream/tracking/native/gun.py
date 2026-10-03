@@ -130,7 +130,6 @@ def boris_push(
         ux_new = ux_plus + qmdt2 * Ex
         uy_new = uy_plus + qmdt2 * Ey
         uz_new = uz_plus + qmdt2 * Ez
-        comp_new = None
     else:
         # Same update, assembled as an increment of small terms and added
         # once with compensation (see the docstring). `ux_plus` etc. are

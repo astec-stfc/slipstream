@@ -38,7 +38,7 @@ jobs:
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             torch
-          python -m pip install -e . pytest
+          python -m pip install -e ".[sdds]" pytest
 
       - name: Run tests
         run: python -m pytest

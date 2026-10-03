@@ -6,6 +6,8 @@ from .tracker import NativeTracker, NativeTrackResult
 
 __all__ = [
     "track_element",
+    "Injector",
+    "LinacTracker",
     "ElementSpec",
     "parse_elegant_lattice",
     "NativeTracker",

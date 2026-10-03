@@ -257,7 +257,6 @@ def _quad_table_field(x, y, z, place, payload):
     g, dg, d2g, z0, dz, ntab, zend, multipoles = payload
     xl, zl = to_local(x, z, place)
     g0, g1, g2 = lerp_tables(zl, z0, dz, ntab, zend, g, dg, d2g)
-    r2 = xl * xl + y * y
     bx_l = g0 * y - g2 * (3.0 * xl * xl * y + y * y * y) / 12.0
     by = g0 * xl - g2 * (xl * xl * xl + 3.0 * xl * y * y) / 12.0
     bz_l = g1 * xl * y

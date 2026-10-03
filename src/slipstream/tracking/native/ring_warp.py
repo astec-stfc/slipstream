@@ -74,7 +74,6 @@ def pack(params, device: torch.device, dtype: torch.dtype) -> PackedRing | None:
         if p.integration_order not in (4, 6, 8) or p.n_kicks < 1 or p.length <= 0.0:
             return None
 
-    n = len(params)
     order_tables = {
         4: (_DRIFT_FRAC4, _KICK_FRAC4),
         6: (_DRIFT_FRAC6, _KICK_FRAC6),
