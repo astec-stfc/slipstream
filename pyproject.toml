@@ -20,6 +20,8 @@ dependencies = [
 [project.optional-dependencies]
 sdds = ["soliday.sdds"]
 cuda = ["warp-lang"]
+optimise = ["cma>=4"]
+plot = ["matplotlib>=3.6"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -125,6 +125,10 @@ class _ElementParams(NamedTuple):
     csr_sg_halfwidth: int = 1
     csr_substeps: tuple = ()
     exact_dipole: bool = False
+    k3: float = 0.0
+    multipoles: tuple = ()
+    skew_multipoles: tuple = ()
+    integrated_multipoles: tuple = ()
     """``elements.track_element``'s ``exact_dipole`` -- only
     ``ring.RingMap`` sets it."""
 
@@ -177,6 +181,8 @@ def _build_params(
             csr_bins=s.csr_bins, csr_sg_halfwidth=s.csr_sg_halfwidth,
             csr_drift_rho_m=s.csr_drift_rho_m, csr_drift_start_m=s.csr_drift_start_m,
             exact_dipole=exact_dipole,
+            k3=s.k3, multipoles=s.multipoles, skew_multipoles=s.skew_multipoles,
+            integrated_multipoles=s.integrated_multipoles,
         ))
     return out
 
@@ -210,6 +216,8 @@ def _apply_one_element(
         n_kicks=p.n_kicks, integration_order=p.integration_order, dx=p.dx, dy=p.dy, tilt=p.tilt,
         hgap=p.hgap, fint=p.fint, edge_order=p.edge_order,
         edge1_effects=p.edge1_effects, edge2_effects=p.edge2_effects, exact_dipole=p.exact_dipole,
+        k3=p.k3, multipoles=p.multipoles, skew_multipoles=p.skew_multipoles,
+        integrated_multipoles=p.integrated_multipoles,
     ) - p.offset
     return state, energy_eV
 
@@ -632,7 +640,8 @@ class NativeTracker:
 
     def _track_fixed_energy(
         self, particles6: torch.Tensor, n_turns: int, sample_every: int, progress: bool = False,
-    ) -> tuple[torch.Tensor, NativeTrackResult]:
+        collect: bool = True,
+    ) -> tuple[torch.Tensor, NativeTrackResult | None]:
         samples: list[tuple] = []
 
         turns = range(n_turns)
@@ -662,12 +671,30 @@ class NativeTracker:
                 tau_y_eff_s=self._tau_y_ibs_eff if self.ibs else None,
                 skip_rf_kick=(self.rf == "per_element"),
             )
-            if turn % sample_every == 0 or turn == n_turns - 1:
+            if collect and (turn % sample_every == 0 or turn == n_turns - 1):
                 tau_s = particles6[..., 4] / C_LIGHT
                 samples.append((turn, self._energy_eV_t, particles6[..., 5], tau_s, particles6[..., 0], particles6[..., 2]))
 
         self._elapsed_turns += n_turns
-        return particles6, self._collect(samples)
+        return particles6, self._collect(samples) if collect else None
+
+    def advance(self, particles6: torch.Tensor, n_turns: int = 1) -> torch.Tensor:
+        """Advance fixed-energy native turns without collecting host diagnostics.
+
+        Uses the normal transport, RF, damping, noise and elapsed-turn state.
+        No turn records or scalar diagnostic reductions are performed. Ramp
+        tracking must use ``track`` because its time-dependent reference and
+        result collection are handled together by the ramp implementation.
+        """
+        if self.ramp is not None:
+            raise ValueError("advance requires a fixed-energy tracker; use track for ramps")
+        if n_turns < 1:
+            raise ValueError("n_turns must be positive")
+        particles6 = particles6.to(device=self.device, dtype=self.dtype)
+        if self.bunch_current_A != 0.0:
+            self._charge_per_particle_C.fill_(self.params.T0_s * self.bunch_current_A / particles6.shape[0])
+        state, _ = self._track_fixed_energy(particles6, n_turns, 1, collect=False)
+        return state
 
     def _init_ramp_overrides(self, dtype: torch.dtype, device: torch.device) -> None:
         names = ["Vrf_eff_V", "omega_rf_eff", "phi_s_eff", "E0_eff_eV", "tau_z_eff_s", "sigma_delta0_eff"]

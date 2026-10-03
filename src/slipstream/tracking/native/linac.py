@@ -238,6 +238,8 @@ def _track_dipole_subcycled(
             hgap=p.hgap, fint=p.fint, edge_order=p.edge_order,
             edge1_effects=p.edge1_effects if i == 0 else 0,
             edge2_effects=p.edge2_effects if i == n - 1 else 0,
+            k3=p.k3, multipoles=p.multipoles, skew_multipoles=p.skew_multipoles,
+            exact_dipole=p.exact_dipole,
         )
         particles6 = _apply_collective_kick(
             particles6, energy_eV, mc2_eV, charge_per_particle_C, sub_length,

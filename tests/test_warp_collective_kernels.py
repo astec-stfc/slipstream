@@ -14,7 +14,7 @@ _TEST_ROOT = Path(__file__).resolve().parents[1]
 os.environ["LOCALAPPDATA"] = str(_TEST_ROOT / ".cache" / "test-localappdata")
 os.environ["WARP_CACHE_PATH"] = str(_TEST_ROOT / ".cache" / "test-warp")
 
-from slipstream.tracking.native import collective, warp_kernels
+from slipstream.tracking.native import collective, warp_kernels  # noqa: E402 -- set optional kernel caches before import
 
 
 _CUDA_WARP = torch.cuda.is_available() and warp_kernels.available("cuda", torch.float32)

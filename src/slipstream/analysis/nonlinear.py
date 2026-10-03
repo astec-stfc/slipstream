@@ -83,9 +83,54 @@ def linear_optics(ring: RingMap, delta: float = 0.0, create_graph: bool = False)
     if ring.double_single:
         ring = ring.float64_reference()
     co, M = _closed_orbit_and_matrix(ring, delta, 8, create_graph)
+    if max(M[:2, 2:4].abs().max().item(), M[2:4, :2].abs().max().item()) > (1e-10 if M.dtype == torch.float64 else 1e-5):
+        raise ValueError("coupled transverse map: use coupled_optics and coupled_signals")
     Qx, bx, ax = _plane(M[0:2, 0:2])
     Qy, by, ay = _plane(M[2:4, 2:4])
     return LinearOptics(co, M, Qx, Qy, bx, ax, by, ay)
+
+
+class CoupledOptics(NamedTuple):
+    closed_orbit: torch.Tensor
+    M: torch.Tensor
+    tunes: torch.Tensor  # (2,), normal-mode fractional tunes
+    normalizer: torch.Tensor  # (4,4), symplectic normal coordinates -> lab
+
+
+def coupled_optics(ring: RingMap, delta: float = 0.0, create_graph: bool = False) -> CoupledOptics:
+    """Stable 4D normal modes from symplectically normalized eigenvectors.
+
+    Modes are sorted by fractional tune. Eigenvectors/gradients are ill-defined
+    at degenerate tunes; avoid crossings in differentiated objectives. This
+    frozen-energy API excludes longitudinal coupling and radiation damping.
+    """
+    if ring.double_single:
+        ring = ring.float64_reference()
+    co, M = _closed_orbit_and_matrix(ring, delta, 8, create_graph)
+    A = M[:4, :4]
+    J = A.new_tensor([[0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 0, 1], [0, 0, -1, 0]])
+    if not torch.allclose(A.T @ J @ A, J, atol=1e-7, rtol=1e-7):
+        raise ValueError("transverse map is not symplectic")
+    vals, vec = torch.linalg.eig(A)
+    if not torch.allclose(vals.abs(), torch.ones_like(vals.real), atol=1e-7, rtol=1e-7):
+        raise ValueError("linearly unstable transverse normal modes")
+    norm = (vec.conj() * (J.to(vec.dtype) @ vec)).sum(0).imag
+    selected = torch.nonzero(norm > 1e-8).flatten()
+    if selected.numel() != 2:
+        raise ValueError("normal modes degenerate or not symplectically normalizable")
+    q = torch.remainder(torch.angle(vals[selected]) / (2 * math.pi), 1)
+    order = q.argsort()
+    selected, q = selected[order], q[order]
+    v = vec[:, selected] * torch.sqrt(2 / norm[selected]).unsqueeze(0)
+    N = torch.stack((v[:, 0].real, v[:, 0].imag, v[:, 1].real, v[:, 1].imag), -1)
+    return CoupledOptics(co, M, q, N)
+
+
+def coupled_signals(tbt: torch.Tensor, opt: CoupledOptics) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normal-mode signals shaped ``(...,T)`` for recorded lab coordinates."""
+    u = tbt.double() - opt.closed_orbit[:4].to(tbt.device, torch.float64)
+    normal = u @ torch.linalg.inv(opt.normalizer.to(u)).T
+    return tuple(torch.complex(normal[..., i], -normal[..., i + 1]).movedim(0, -1) for i in (0, 2))
 
 
 def chromaticity(ring: RingMap, ddelta: float = 1e-4, create_graph: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
@@ -310,3 +355,38 @@ def frequency_map(
     nan = torch.tensor(math.nan, dtype=dt, device=dev)
     D = torch.where(lost, nan, 0.5 * torch.log10(dqx**2 + dqy**2 + 1e-300))
     return FrequencyMap(X, Y, torch.where(lost, nan, q[0]), torch.where(lost, nan, q[1]), D)
+
+
+def naff_harmonics(z: torch.Tensor, n_harmonics: int = 3, **naff_kw) -> tuple[torch.Tensor, torch.Tensor]:
+    """Successive NAFF lines and complex coefficients, shaped ``(..., H)``.
+
+    Each line is removed before finding the next. Coefficients are jointly
+    refitted by complex least squares, preserving phase and autograd. Lines
+    must be separated by several Fourier bins; nearly degenerate lines are
+    ill conditioned. Peak selection is discrete, so derivatives are local.
+    """
+    if n_harmonics < 1 or z.shape[-1] < 4 or not z.is_complex():
+        raise ValueError("need a complex signal with >=4 samples and positive harmonic count")
+    n = torch.arange(z.shape[-1], dtype=z.real.dtype, device=z.device)
+    residual = z - z.mean(-1, keepdim=True)
+    frequencies = []
+    for _ in range(n_harmonics):
+        q = naff(residual, **naff_kw)[0]
+        frequencies.append(q)
+        qs = torch.stack(frequencies, -1)
+        basis = torch.exp(2j * math.pi * n[:, None] * qs.unsqueeze(-2))
+        coefficients = torch.linalg.lstsq(basis, z.unsqueeze(-1)).solution.squeeze(-1)
+        residual = z - (basis @ coefficients.unsqueeze(-1)).squeeze(-1)
+    return qs, coefficients
+
+
+def spectral_lines(z: torch.Tensor, frequencies: torch.Tensor) -> torch.Tensor:
+    """Complex amplitudes at specified lines by a joint least-squares fit.
+
+    Frequencies broadcast as ``(..., H)``. For RDT studies supply known
+    combinations of the fundamental tunes; these amplitudes are spectral
+    observables, not convention-independent Hamiltonian RDT coefficients.
+    """
+    n = torch.arange(z.shape[-1], dtype=z.real.dtype, device=z.device)
+    basis = torch.exp(2j * math.pi * n[:, None] * frequencies.unsqueeze(-2))
+    return torch.linalg.lstsq(basis, z.unsqueeze(-1)).solution.squeeze(-1)

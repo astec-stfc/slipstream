@@ -270,3 +270,156 @@ def sample_field_errors(
             err = (nominal * rms * z).to(dtype=dtype, device=device)
             (k1 if param == "K1" else k2)[s.name] = torch.as_tensor(nominal, dtype=dtype, device=device) + err
     return k1, k2
+
+
+def action_growth_loss(tbt: torch.Tensor, opt: nl.LinearOptics, scale: float = 1.0) -> torch.Tensor:
+    """Smooth soft-survival surrogate: mean squared soft positive action growth.
+
+    Normalized action is ``|z|**2/2``; reference is the first recorded turn.
+    Keep every launch inside the aperture: this cannot differentiate losses.
+    ``scale`` sets the acceptable fractional action growth.
+    """
+    if scale <= 0:
+        raise ValueError("scale must be positive")
+    zx, zy = nl.normalized_signals(tbt, opt)
+    action = (zx.abs().square() + zy.abs().square()) / 2
+    reference = action[..., :1].clamp_min(torch.finfo(action.dtype).tiny)
+    growth = (action / reference - 1) / scale
+    # Smooth positive part; even constant action has a log(2)**2 baseline.
+    positive = torch.nn.functional.softplus(growth)
+    return positive.square().mean(-1)
+
+
+def joint_optics_loss(ring: RingMap, target: nl.LinearOptics, tune_scale: float = 1e-3,
+                      beta_scale: float = 0.01) -> torch.Tensor:
+    """Differentiable tune and fractional beta constraints for K1/K2 optimisation.
+
+    Add this dimensionless penalty to a footprint/detuning objective. Beta
+    constraints refer to the observation point, not an entire-ring envelope.
+    """
+    if tune_scale <= 0 or beta_scale <= 0:
+        raise ValueError("constraint scales must be positive")
+    opt = nl.linear_optics(ring, create_graph=True)
+    loss = torch.zeros((), dtype=ring.dtype, device=ring.device)
+    for q, q0 in ((opt.Qx, target.Qx), (opt.Qy, target.Qy)):
+        d = torch.remainder(q - q0 + 0.5, 1) - 0.5
+        loss = loss + (d / tune_scale).square()
+    for b, b0 in ((opt.beta_x, target.beta_x), (opt.beta_y, target.beta_y)):
+        loss = loss + ((b / b0 - 1) / beta_scale).square()
+    return loss
+
+
+@dataclasses.dataclass
+class SearchResult:
+    theta: torch.Tensor
+    loss: float
+    evaluations: int
+    method: str
+
+
+def gradient_free(objective, theta: torch.Tensor, bounds, method: str = "Powell",
+                  max_evaluations: int = 100, seed: int = 0) -> SearchResult:
+    """Bounded Powell, Nelder-Mead or differential-evolution baseline.
+
+    Objective accepts a tensor with theta's dtype/device. Each evaluation is
+    detached; hardware synchronization here is intentional optimiser control.
+    SciPy is a core package dependency. Budgets count objective calls.
+    """
+    import numpy as np
+    from scipy.optimize import differential_evolution, minimize
+    if method not in ("Powell", "Nelder-Mead", "differential_evolution", "CMA-ES"):
+        raise ValueError("unknown gradient-free method")
+    if theta.ndim != 1 or theta.numel() == 0:
+        raise ValueError("theta must be a nonempty vector")
+    limits = np.asarray(bounds, dtype=float)
+    if limits.shape != (theta.numel(), 2) or (not np.isfinite(limits).all()) or np.any(limits[:, 0] >= limits[:, 1]):
+        raise ValueError("bounds must contain one increasing pair per knob")
+    if max_evaluations < 1:
+        raise ValueError("max_evaluations must be positive")
+    best = [np.clip(theta.detach().cpu().numpy(), limits[:, 0], limits[:, 1]), float("inf")]
+    calls = 0
+
+    class BudgetExhausted(Exception):
+        pass
+
+    def evaluate(x):
+        nonlocal calls
+        if calls >= max_evaluations:
+            raise BudgetExhausted
+        calls += 1
+        with torch.no_grad():
+            value = float(objective(torch.as_tensor(x, dtype=theta.dtype, device=theta.device)))
+        if np.isfinite(value) and value < best[1]:
+            best[:] = [x.copy(), value]
+        return value if np.isfinite(value) else float("inf")
+
+    try:
+        evaluate(best[0])
+        if method == "CMA-ES":
+            try:
+                import cma
+            except ImportError as exc:
+                raise ImportError("CMA-ES requires the optional cma package") from exc
+            widths = limits[:, 1] - limits[:, 0]
+            strategy = cma.CMAEvolutionStrategy((best[0] - limits[:, 0]) / widths, 1 / 6, {
+                "bounds": [0, 1],
+                "seed": seed + 1, "verbose": -9, "maxfevals": max_evaluations})
+            while not strategy.stop():
+                population = strategy.ask()
+                values = [evaluate(limits[:, 0] + widths * x) for x in population]
+                strategy.tell(population, values)
+        elif method == "differential_evolution":
+            differential_evolution(evaluate, limits, seed=seed, polish=False,
+                                   maxiter=max_evaluations, popsize=5, x0=best[0])
+        else:
+            minimize(evaluate, best[0], method=method, bounds=limits,
+                     options={"maxfev": max_evaluations, "maxiter": max_evaluations})
+    except BudgetExhausted:
+        pass
+    return SearchResult(torch.as_tensor(best[0], dtype=theta.dtype, device=theta.device),
+                        best[1], calls, method)
+
+
+def multi_fidelity(smooth_objective, aperture_objective, theta: torch.Tensor, bounds,
+                   gradient_steps: int = 20, learning_rate: float = 1e-2,
+                   max_evaluations: int = 100, seed: int = 0,
+                   method: str = "differential_evolution") -> tuple[SearchResult, SearchResult]:
+    """Gradient screening followed by bounded gradient-free DA refinement.
+
+    Both objectives are minimised (use negative DA area for the second).
+    The high-fidelity objective must retrack with its own long survival run;
+    it receives only strengths, never a surrogate survival estimate. Returns
+    independently measured best candidates from both stages. This uses DE,
+    Powell, Nelder-Mead or optional CMA-ES (install ``cma``).
+    """
+    if gradient_steps < 1 or learning_rate <= 0:
+        raise ValueError("positive gradient_steps and learning_rate required")
+    if theta.ndim != 1 or theta.numel() == 0:
+        raise ValueError("theta must be a nonempty vector")
+    limits = torch.as_tensor(bounds, dtype=theta.dtype, device=theta.device)
+    if limits.shape != (theta.numel(), 2) or not bool(torch.isfinite(limits).all()) or bool((limits[:, 0] >= limits[:, 1]).any()):
+        raise ValueError("bounds must contain one increasing pair per knob")
+    candidate = theta.detach().clone().clamp(limits[:, 0], limits[:, 1]).requires_grad_(True)
+    optimizer = torch.optim.Adam([candidate], lr=learning_rate)
+    best_theta, best_loss = candidate.detach().clone(), float("inf")
+    for _ in range(gradient_steps):
+        optimizer.zero_grad()
+        loss = smooth_objective(candidate)
+        value = float(loss.detach())
+        if not math.isfinite(value):
+            raise ValueError("non-finite surrogate; reduce launch amplitudes")
+        if value < best_loss:
+            best_theta, best_loss = candidate.detach().clone(), value
+        loss.backward()
+        if candidate.grad is None or not bool(torch.isfinite(candidate.grad).all()):
+            raise ValueError("non-finite surrogate gradient; reduce launch amplitudes")
+        optimizer.step()
+        with torch.no_grad():
+            candidate.clamp_(limits[:, 0], limits[:, 1])
+    final_loss = float(smooth_objective(candidate).detach())
+    if math.isfinite(final_loss) and final_loss < best_loss:
+        best_theta, best_loss = candidate.detach().clone(), final_loss
+    screening = SearchResult(best_theta, best_loss, gradient_steps + 1, "Adam")
+    refinement = gradient_free(aperture_objective, best_theta, bounds, method,
+                               max_evaluations, seed)
+    return screening, refinement

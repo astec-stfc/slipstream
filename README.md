@@ -76,6 +76,11 @@ Particle states use the canonical `(x, px, y, py, tau, delta)` layout. See
 injector usage, and [`docs/formats.md`](docs/formats.md) for supported input
 formats.
 
+For frozen-energy ring maps, normal modes, loss locations, and spectral
+analysis, see [`docs/nonlinear_dynamics.md`](docs/nonlinear_dynamics.md).
+RF-on dynamic aperture, frequency maps, and sampled momentum acceptance are
+documented in [`docs/ring6d.md`](docs/ring6d.md).
+
 ## Scope
 
 - `NativeTracker` models ring transport and turn-by-turn effects.
@@ -84,3 +89,7 @@ formats.
   aperture transport.
 - `warp-lang` accelerates supported CUDA paths; it is not required for CPU
   execution.
+
+Ring reference tables and plots are described in
+[`docs/ring_outputs.md`](docs/ring_outputs.md). Install the optional
+`slipstream-accel[plot]` extra to render the figures.

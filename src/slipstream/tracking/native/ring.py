@@ -43,6 +43,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import functools
+import math
 
 import torch
 import torch._dynamo
@@ -66,6 +67,14 @@ class RingTrackResult(NamedTuple):
     tbt: torch.Tensor | None
     """``(n_records, ..., 4)`` ``(x, px, y, py)`` at the ring start, recorded
     after every ``record_every``-th turn -- ``None`` if not requested."""
+
+
+class RingLossMap(NamedTuple):
+    state: torch.Tensor
+    loss_turn: torch.Tensor
+    loss_element: torch.Tensor
+    loss_s_m: torch.Tensor
+    tbt: torch.Tensor | None
 
 
 class RingMap:
@@ -99,6 +108,8 @@ class RingMap:
         # rate (RTX 3050: 2 s vs 65 ms per 1e5-particle turn).
         self.dtype = torch.float32 if double_single else (dtype or (torch.float32 if self.device.type == "cuda" else torch.float64))
         self.double_single = double_single
+        if double_single and any(s.k3 != 0 or s.multipoles or s.skew_multipoles or s.integrated_multipoles for s in specs):
+            raise NotImplementedError("double_single: higher/skew multipoles not supported")
         self._kw = dict(
             energy_eV=energy_eV, mc2_eV=mc2_eV, n_kicks=n_kicks, n_kicks_bend=n_kicks_bend,
             integration_order=integration_order, exact_dipole=exact_dipole,
@@ -205,8 +216,46 @@ class RingMap:
         """Same lattice, slicing and strength overrides as a plain CPU
         float64 map (optics for a ``double_single`` map)."""
         ref = RingMap(self.specs, **self._kw, device="cpu", dtype=torch.float64)
-        as_t = lambda d: {n: torch.as_tensor(v, dtype=torch.float64) for n, v in d.items()}  # noqa: E731
-        return ref.with_strengths(k1=as_t(self._overrides[0]), k2=as_t(self._overrides[1]))
+        as_t = lambda d: {n: torch.as_tensor(v, dtype=torch.float64, device='cpu') for n, v in d.items()}  # noqa: E731
+        ref = ref.with_strengths(k1=as_t(self._overrides[0]), k2=as_t(self._overrides[1]))
+        # Copy the actual instance parameters, including occurrence-specific
+        # alignments, without grouping them back into family dictionaries.
+        ref.params = [q._replace(**{key: (v.to(device="cpu", dtype=torch.float64)
+                                         if isinstance(v, torch.Tensor) else v)
+                                    for key in ("dx", "dy", "tilt", "k3")
+                                    for v in (getattr(p, key),)},
+                                **{key: tuple((order, strength.to(device='cpu', dtype=torch.float64)
+                                              if isinstance(strength, torch.Tensor) else strength)
+                                             for order, strength in getattr(p, key))
+                                   for key in ('multipoles', 'skew_multipoles', 'integrated_multipoles')})
+                      for p, q in zip(self.params, ref.params)]
+        return ref
+
+    def with_alignments(
+        self, dx: dict[str, torch.Tensor] | None = None,
+        dy: dict[str, torch.Tensor] | None = None,
+        tilt: dict[str, torch.Tensor] | None = None,
+    ) -> "RingMap":
+        """Copy with absolute family offsets (metres) and rolls (radians).
+
+        Values broadcast over particle batch dimensions: ``(M, 1)`` errors
+        with ``(M, N, 6)`` states represent M machines. Tensor values retain
+        autograd. Alignment ensembles use the PyTorch path. Launch around
+        each machine's own closed orbit when estimating its dynamic aperture.
+        """
+        if self.double_single:
+            raise NotImplementedError("double_single: misalignments not supported")
+        fields = [{n.upper(): v for n, v in (d or {}).items()} for d in (dx, dy, tilt)]
+        unknown = set().union(*(set(d) for d in fields)) - {s.name.upper() for s in self.specs}
+        if unknown:
+            raise KeyError(f"no such element(s) in lattice: {sorted(unknown)}")
+        new = object.__new__(RingMap)
+        new.__dict__.update(self.__dict__)
+        new.params = [p._replace(**{key: d.get(s.name.upper(), getattr(p, key))
+                                   for key, d in zip(("dx", "dy", "tilt"), fields)})
+                      for s, p in zip(self.specs, self.params)]
+        new._warp_params = None
+        return new
 
     def turn(self, state: torch.Tensor, eager: bool = False) -> torch.Tensor:
         """One turn, no loss check -- differentiable. ``eager=True``
@@ -230,8 +279,50 @@ class RingMap:
 
     def _needs_grad(self, state: torch.Tensor) -> bool:
         return torch.is_grad_enabled() and (
-            state.requires_grad or any(isinstance(v, torch.Tensor) and v.requires_grad for p in self.params for v in (p.k1, p.k2))
+            state.requires_grad or any(isinstance(v, torch.Tensor) and v.requires_grad for p in self.params for v in (p.k1, p.k2, p.k3, p.dx, p.dy, p.tilt, *(v for _, v in p.multipoles + p.skew_multipoles + p.integrated_multipoles)))
         )
+
+    def track_loss_map(
+        self, state: torch.Tensor, n_turns: int, aperture: tuple[float, float] = (0.05, 0.05),
+        element_apertures: dict[str, tuple[float, float]] | None = None, record_every: int = 0,
+    ) -> "RingLossMap":
+        """Check losses at every element exit; first loss location is an element index.
+
+        Apertures are rectangular lab-frame half widths in metres. Named overrides
+        apply to every occurrence. This path uses PyTorch element transport, with
+        fixed particle slots; recording decimates observations at the ring start.
+        Double-single transport is currently unsupported on this optional path.
+        """
+        if self.double_single:
+            raise NotImplementedError("per-element loss maps require ordinary PyTorch transport")
+        if n_turns < 0 or record_every < 0:
+            raise ValueError("turn and recording counts must be nonnegative")
+        limits = {k.upper(): v for k, v in (element_apertures or {}).items()}
+        unknown = set(limits) - {s.name.upper() for s in self.specs}
+        if unknown:
+            raise KeyError(f"no such aperture element: {sorted(unknown)}")
+        if any(len(a) != 2 or any(v <= 0 or not math.isfinite(v) for v in a) for a in [aperture, *limits.values()]):
+            raise ValueError("aperture half widths must be finite and positive")
+        state = state.to(self.device, self.dtype)
+        loss_turn = torch.full(state.shape[:-1], -1, device=self.device, dtype=torch.int64)
+        loss_element = torch.full_like(loss_turn, -1)
+        records = []
+        for t in range(n_turns):
+            for i, (s, p) in enumerate(zip(self.specs, self.params)):
+                state = self._element(state, p, self._energy_t, self._mc2_t)[0]
+                ax, ay = limits.get(s.name.upper(), aperture)
+                bad = (~torch.isfinite(state).all(-1)) | (state[..., 0].abs() > ax) | (state[..., 2].abs() > ay)
+                first = bad & (loss_turn < 0)
+                loss_turn = torch.where(first, t, loss_turn)
+                loss_element = torch.where(first, i, loss_element)
+                state = torch.where((loss_turn >= 0).unsqueeze(-1), torch.zeros_like(state), state)
+            if record_every and (t + 1) % record_every == 0:
+                records.append(state[..., :4])
+        positions = state.new_tensor([sum(s.length for s in self.specs[:i + 1]) for i in range(len(self.specs))])
+        loss_s = torch.full_like(loss_turn, math.nan, dtype=self.dtype)
+        if self.specs:
+            loss_s = torch.where(loss_element >= 0, positions[loss_element.clamp_min(0)], loss_s)
+        return RingLossMap(state, loss_turn, loss_element, loss_s, torch.stack(records) if records else None)
 
     def track(
         self, state: torch.Tensor, n_turns: int, aperture: tuple[float, float] = (0.05, 0.05),

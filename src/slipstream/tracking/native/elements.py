@@ -227,14 +227,16 @@ def _exact_dipole_drift(
 def _multipole_kick(
     x: torch.Tensor, px: torch.Tensor, y: torch.Tensor, py: torch.Tensor,
     k1: float, k2: float, ds: float, h: float, dipole: bool = True,
+    k3: float = 0.0, multipoles: tuple = (), skew_multipoles: tuple = (),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """New ``(px, py)`` after the kick -- see ``_multipole_kick_increments``."""
-    dpx, dpy = _multipole_kick_increments(x, y, k1, k2, ds, h, dipole)
+    dpx, dpy = _multipole_kick_increments(x, y, k1, k2, ds, h, dipole, k3, multipoles, skew_multipoles)
     return px + dpx, py + dpy
 
 
 def _multipole_kick_increments(
     x: torch.Tensor, y: torch.Tensor, k1: float, k2: float, ds: float, h: float, dipole: bool = True,
+    k3: float = 0.0, multipoles: tuple = (), skew_multipoles: tuple = (),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``(dpx, dpy)`` of the canonical dipole+normal-quad+normal-sextupole kick over path-length
     ``ds``, with the curvature-path-length weight ``(1+h*x)`` real elegant
@@ -250,6 +252,17 @@ def _multipole_kick_increments(
     if dipole:  # False: the dipole term lives in _exact_dipole_drift instead
         fy = fy + h
     fx = k1 * y + k2 * x * y
+    if isinstance(k3, torch.Tensor) or k3 != 0.0:
+        fy = fy + k3 * (x**3 - 3 * x * y**2) / 6
+        fx = fx + k3 * (3 * x**2 * y - y**3) / 6
+    # Re/Im[(Kn+i*Ks)*(x+i*y)^n/n!]; scalar order loops, batched particles.
+    for terms, skew in ((multipoles, False), (skew_multipoles, True)):
+        for order, strength in terms:
+            real, imag = torch.ones_like(x), torch.zeros_like(y)
+            for j in range(1, order + 1):
+                real, imag = (real * x - imag * y) / j, (real * y + imag * x) / j
+            fy = fy + strength * (-imag if skew else real)
+            fx = fx + strength * (real if skew else imag)
     weight = ds * (1.0 + h * x)
     return -weight * fy, weight * fx
 
@@ -315,7 +328,7 @@ def _edge_kick(
 
 def _misalign(
     x: torch.Tensor, px: torch.Tensor, y: torch.Tensor, py: torch.Tensor,
-    dx: float, dy: float, tilt: float, entering: bool,
+    dx: float | torch.Tensor, dy: float | torch.Tensor, tilt: float | torch.Tensor, entering: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Enter (``entering=True``)/exit (``False``) misalignment coordinate
     transform, transcribed from ``multipole.c``'s call sequence around the
@@ -340,19 +353,23 @@ def _misalign(
     CSBEND simplifications are (``h*x ~ 1e-4`` for this repo's real
     bends). Revisit if a lattice with much larger bend curvature or
     particle amplitude needs the exact treatment."""
+    offset = isinstance(dx, torch.Tensor) or isinstance(dy, torch.Tensor) or dx != 0.0 or dy != 0.0
+    rotate = isinstance(tilt, torch.Tensor) or tilt != 0.0
+    if rotate:
+        cos_t = torch.cos(tilt) if isinstance(tilt, torch.Tensor) else math.cos(tilt)
+        sin_t = torch.sin(tilt) if isinstance(tilt, torch.Tensor) else math.sin(tilt)
     if entering:
-        if dx != 0.0 or dy != 0.0:
+        if offset:
             x, y = x - dx, y - dy
-        if tilt != 0.0:
-            cos_t, sin_t = math.cos(tilt), math.sin(tilt)
+        if rotate:
             x, y = x * cos_t + y * sin_t, -x * sin_t + y * cos_t
             px, py = px * cos_t + py * sin_t, -px * sin_t + py * cos_t
     else:
-        if tilt != 0.0:
-            cos_t, sin_t = math.cos(-tilt), math.sin(-tilt)
+        if rotate:
+            sin_t = -sin_t
             x, y = x * cos_t + y * sin_t, -x * sin_t + y * cos_t
             px, py = px * cos_t + py * sin_t, -px * sin_t + py * cos_t
-        if dx != 0.0 or dy != 0.0:
+        if offset:
             x, y = x + dx, y + dy
     return x, px, y, py
 
@@ -741,6 +758,8 @@ def track_element(
     integration_order: int = 4, dx: float = 0.0, dy: float = 0.0, tilt: float = 0.0,
     hgap: float = 0.0, fint: float = 0.5, edge_order: int = 1,
     edge1_effects: int = 1, edge2_effects: int = 1, exact_dipole: bool = False,
+    k3: float = 0.0, multipoles: tuple = (), skew_multipoles: tuple = (),
+    integrated_multipoles: tuple = (),
 ) -> torch.Tensor:
     """Track ``state6`` (``..., 6`` -- any leading batch shape) through one
     element: misalignment entry transform (if ``dx``/``dy``/``tilt``
@@ -772,8 +791,21 @@ def track_element(
     """
     if angle != 0.0 and (edge1_effects not in (0, 1) or edge2_effects not in (0, 1)):
         raise NotImplementedError("Only EDGE1/2_EFFECTS=0 or 1 are supported")
+    for terms in (multipoles, skew_multipoles, integrated_multipoles):
+        if any(not isinstance(order, int) or isinstance(order, bool) or order < 0 for order, _ in terms):
+            raise ValueError("multipole orders must be nonnegative integers")
+    if integrated_multipoles and (isinstance(length, torch.Tensor) or length != 0.0):
+        raise ValueError("integrated_multipoles require zero length")
+    if not isinstance(length, torch.Tensor) and length <= 0.0 and (isinstance(k3, torch.Tensor) or k3 != 0 or multipoles or skew_multipoles):
+        raise ValueError("distributed higher/skew multipoles require positive length")
     # A tensor length (RingMap's regional-compile promotion) is positive by
     # construction; testing it would sync the device and break CUDA-graph capture.
+    if not isinstance(length, torch.Tensor) and length <= 0.0 and integrated_multipoles:
+        x, px, y, py, tau, delta = state6.unbind(-1)
+        x, px, y, py = _misalign(x, px, y, py, dx, dy, tilt, entering=True)
+        px, py = _multipole_kick(x, px, y, py, 0.0, 0.0, 1.0, 0.0, False, multipoles=integrated_multipoles)
+        x, px, y, py = _misalign(x, px, y, py, dx, dy, tilt, entering=False)
+        return torch.stack((x, px, y, py, tau, delta), -1)
     if not isinstance(length, torch.Tensor) and length <= 0.0:
         return state6
     x, px, y, py, tau, delta = state6.unbind(-1)
@@ -784,7 +816,7 @@ def track_element(
         4: (_DRIFT_FRAC4, _KICK_FRAC4), 6: (_DRIFT_FRAC6, _KICK_FRAC6), 8: (_DRIFT_FRAC8, _KICK_FRAC8),
     }[integration_order]
 
-    if dx != 0.0 or dy != 0.0 or tilt != 0.0:
+    if any(isinstance(v, torch.Tensor) for v in (dx, dy, tilt)) or dx != 0.0 or dy != 0.0 or tilt != 0.0:
         x, px, y, py = _misalign(x, px, y, py, dx, dy, tilt, entering=True)
 
     if h != 0.0 and edge1_effects:
@@ -793,7 +825,7 @@ def track_element(
     # A tensor k1/k2 (autograd knob or a per-machine error-ensemble batch,
     # see tracking/native/ring.py) always takes the kick path.
     exact_dipole = exact_dipole and h != 0.0
-    no_multipole = not isinstance(k1, torch.Tensor) and not isinstance(k2, torch.Tensor) and k1 == 0.0 and k2 == 0.0
+    no_multipole = not any(isinstance(v, torch.Tensor) for v in (k1, k2, k3)) and k1 == 0.0 and k2 == 0.0 and k3 == 0.0 and not multipoles and not skew_multipoles
     if exact_dipole:
         # Exact dipole + K1/K2-only kicks.
         steps = [(length, 0.0)] if no_multipole else [
@@ -805,7 +837,7 @@ def track_element(
             x, y, px = x + ix, y + iy, px + ipx
             tau = tau + (arc_length / beta - dl / beta0)
             if kl != 0.0:
-                dpx, dpy = _multipole_kick_increments(x, y, k1, k2, kl, h, dipole=not exact_dipole)
+                dpx, dpy = _multipole_kick_increments(x, y, k1, k2, kl, h, dipole=not exact_dipole, k3=k3, multipoles=multipoles, skew_multipoles=skew_multipoles)
                 px, py = px + dpx, py + dpy
     elif no_multipole and h == 0.0:
         # Pure drift -- exact at any slice count, so skip the kick loop.
@@ -818,12 +850,12 @@ def track_element(
                 x, px, y, py, arc_length = _canonical_drift(x, px, y, py, delta, ds * df, h)
                 tau = tau + (arc_length / beta - ds * df / beta0)
                 if kf != 0.0:
-                    px, py = _multipole_kick(x, px, y, py, k1, k2, ds * kf, h)
+                    px, py = _multipole_kick(x, px, y, py, k1, k2, ds * kf, h, k3=k3, multipoles=multipoles, skew_multipoles=skew_multipoles)
 
     if h != 0.0 and edge2_effects:
         x, px, y, py = _edge_kick(x, px, y, py, delta, h, e2, hgap, fint, edge_order, 1, k1)
 
-    if dx != 0.0 or dy != 0.0 or tilt != 0.0:
+    if any(isinstance(v, torch.Tensor) for v in (dx, dy, tilt)) or dx != 0.0 or dy != 0.0 or tilt != 0.0:
         x, px, y, py = _misalign(x, px, y, py, dx, dy, tilt, entering=False)
 
     return torch.stack([x, px, y, py, tau, delta], dim=-1)

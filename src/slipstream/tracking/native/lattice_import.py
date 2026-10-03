@@ -161,6 +161,10 @@ class ElementSpec:
     csr_bins: int = 256
     csr_sg_halfwidth: int = 1
     csr_n_slices: int = 1
+    k3: float = 0.0
+    multipoles: tuple[tuple[int, float], ...] = ()
+    skew_multipoles: tuple[tuple[int, float], ...] = ()
+    integrated_multipoles: tuple[tuple[int, float], ...] = ()
 
 
 def _split_statements(text: str) -> list[tuple[str, str]]:
@@ -248,6 +252,26 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
             elements[name] = ElementSpec(name, "quad", length, k1=_float(params, "K1"))
         elif etype in _SEXT_TYPES:
             elements[name] = ElementSpec(name, "sext", length, k2=_float(params, "K2"))
+        elif etype == "KOCT":
+            elements[name] = ElementSpec(name, "oct", length, k3=_float(params, "K3"),
+                                         dx=_float(params, "DX"), dy=_float(params, "DY"), tilt=_float(params, "TILT"))
+        elif etype == "MULT":
+            # Official MULT definition: KNL is integrated strength, ORDER=1 is quad.
+            # https://ops.aps.anl.gov/manuals/elegant_latest/elegantsu213.html
+            order_raw = _float(params, "ORDER", 1)
+            if length < 0:
+                raise ValueError(f"{name}: MULT length must be nonnegative")
+            if order_raw < 0 or not order_raw.is_integer():
+                raise ValueError(f"{name}: MULT ORDER must be a nonnegative integer")
+            if _float(params, "BORE") or _float(params, "BTIPL") or _float(params, "DZ") or _float(params, "SYNCH_RAD"):
+                raise NotImplementedError(f"{name}: MULT pole-tip, longitudinal-offset and radiation options are unsupported")
+            knl = _float(params, "KNL") * _float(params, "FACTOR", 1)
+            terms = ((int(order_raw), knl / length if length > 0 else knl),)
+            elements[name] = ElementSpec(
+                name, "multipole", length, multipoles=terms if length > 0 else (),
+                integrated_multipoles=terms if length == 0 else (),
+                dx=_float(params, "DX"), dy=_float(params, "DY"), tilt=_float(params, "TILT"),
+            )
         elif etype in _RF_TYPES:
             # PHASE is degrees in real elegant -- convert once here.
             # WAKEFILE/TCOLUMN/W{X,Y,Z}COLUMN (RFCW only) are metadata

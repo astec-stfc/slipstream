@@ -1,11 +1,16 @@
 from pathlib import Path
 
 from slipstream import NativeTracker, parse_elegant_lattice
+import slipstream
 from slipstream.tracking.native.astra_io import read_astra_namelist
 
 
 def test_native_public_imports_are_available():
     assert NativeTracker is not None
+    for name in ("RingMap", "RingTrackResult", "RingLossMap", "CoupledOptics",
+                 "coupled_optics", "coupled_signals"):
+        assert name in slipstream.__all__
+        assert getattr(slipstream, name) is not None
 
 
 def test_elegant_lattice_reader_is_local(tmp_path: Path):
