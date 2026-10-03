@@ -34,6 +34,7 @@ from ...lattice.optics import TransverseOptics
 from ...lattice.ramp import RampProfile, scaled_lattice, scaled_optics
 from ...wakefields.shortrange import ShortRangeWake
 from ...wakefields.transverse import TransverseWake
+from ..pystable.tracker import SingleBunchTracker
 from .ring_physics import (
     damping_excitation,
     ibs_effective_taus,
@@ -41,7 +42,7 @@ from .ring_physics import (
     rms_emittance,
     transverse_damping_excitation,
 )
-from .elements import _rf_cavity_kick, reference_offset, track_element
+from .elements import _corrector_kick, _rf_cavity_kick, reference_offset, track_element
 from .errors import FiducialReference, SampledError, apply_errors, resolve_rf_errors
 from .lattice_import import ElementSpec
 from .optics import periodic_twiss_table
@@ -131,6 +132,18 @@ class _ElementParams(NamedTuple):
     integrated_multipoles: tuple = ()
     """``elements.track_element``'s ``exact_dipole`` -- only
     ``ring.RingMap`` sets it."""
+    is_kick: bool = False
+    """``ElementSpec.kind in ("hkick", "vkick")`` -- dispatches to
+    ``elements._corrector_kick`` instead of ``track_element``/``_rf_cavity_kick``."""
+    kick_plane: str = "x"
+    """``"x"`` (from ``kind="hkick"``) or ``"y"`` (``kind="vkick"``) --
+    fixed structurally at parse/build time, never inferred from
+    ``kick_value`` (which must stay well-defined, including as a
+    differentiable tensor, exactly at its nominal zero value)."""
+    kick_value: float | torch.Tensor = 0.0
+    """The corrector's own strength (``ElementSpec.kick_x``/``kick_y``,
+    whichever ``kick_plane`` selects) -- ``RingMap.with_strengths``'s
+    occurrence-safe override target."""
 
 
 def _build_params(
@@ -165,6 +178,14 @@ def _build_params(
                 wake=s.wake, transverse_wake_x=s.transverse_wake_x, transverse_wake_y=s.transverse_wake_y,
                 beta_wave=s.beta_wave,
                 end1_focus=s.end1_focus, end2_focus=s.end2_focus, body_focus_model=s.body_focus_model,
+            ))
+            continue
+        if s.kind in ("hkick", "vkick"):
+            plane = "x" if s.kind == "hkick" else "y"
+            out.append(_ElementParams(
+                s.length, 0.0, 0.0, 0.0, 0.0, 0.0, 1, integration_order,
+                torch.zeros(6, device=device, dtype=dtype),
+                is_kick=True, kick_plane=plane, kick_value=s.kick_x if plane == "x" else s.kick_y,
             ))
             continue
         nk = n_kicks_bend if s.angle != 0.0 else n_kicks
@@ -203,6 +224,8 @@ def _apply_one_element(
     ``compile_rf_sub_kicks`` (default ``False``) is threaded through to
     ``elements._rf_cavity_kick``'s own parameter of the same name -- only
     ``LinacTracker`` sets this."""
+    if p.is_kick:
+        return _corrector_kick(particles6, p.length, p.kick_value, p.kick_plane, energy_eV, mc2_eV), energy_eV
     if p.is_rf:
         return _rf_cavity_kick(
             particles6, p.length, p.voltage_V, p.phase_rad, p.omega_rf, energy_eV, mc2_eV, change_p0=p.change_p0,

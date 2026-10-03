@@ -267,6 +267,85 @@ def _multipole_kick_increments(
     return -weight * fy, weight * fx
 
 
+def _corrector_kick(
+    state6: torch.Tensor, length: float, kick: float | torch.Tensor, plane: str,
+    energy_eV: float | torch.Tensor, mc2_eV: float | torch.Tensor,
+) -> torch.Tensor:
+    """Real elegant ``HKICK``/``VKICK`` transport (``bend_matrix.c``'s
+    ``corrector_matrix``/zero-length branch, transcribed with ``B2=0`` and
+    no edge focusing -- this repo's real correctors set neither): a
+    genuine dipole kick of angle ``kick`` over path length ``length``.
+
+    Written entirely in ``sin(kick)`` (never ``1/kick``), so it stays
+    finite and differentiable exactly at ``kick=0`` -- LOCO's own nominal
+    operating point. This is deliberately **not** routed through
+    ``track_element``'s own ``angle``/``h=angle/length`` path: that path
+    computes ``math.cos(ds*h)``/``math.sin(ds*h)`` in plain Python,
+    built for a fixed, never-differentiated lattice curvature (see
+    plans/LOCO_PLAN.md's Phase-0/1 audit) -- a tensor ``h`` there would
+    either error or silently detach.
+
+    ``length<=0`` (zero-length corrector): elegant's own distinct
+    zero-length matrix -- the leading term is a plain slope addition
+    (``kick``, not ``sin(kick)``), elegant's own convention, confirmed
+    against a live ``elegant`` run (``tests/test_native_loco.py``).
+    Position is unchanged (no path to drift through).
+
+    ``length>0``: exact reproduction of elegant's own ``corrector_matrix``
+    at ``B2=0`` (every higher-order/edge term in that matrix carries a
+    ``B2`` factor and vanishes identically) -- not a small-angle
+    approximation, an exact closed form. ``tau`` gets the ordinary
+    (``h=0``) drift arc-length update; the ``O(kick^2)`` curvature
+    correction to arc length is dropped (real corrector kicks are
+    milliradian-scale, and this only feeds RF-phase bookkeeping, never a
+    LOCO-tapped BPM reading).
+
+    Elegant's own ``R``/``C`` matrix entries act on **slope** coordinates
+    (``x'``, ``y'``, its universal TRANSPORT-style matrix-method
+    convention -- unlike the kick-method integrator ``track_element`` uses
+    for CSBEND/KQUAD/KSEXT, which is canonical throughout), so this
+    function converts to slopes (``_slopes_from_canonical``), applies the
+    matrix, and converts back (``_canonical_from_slopes``) -- confirmed
+    necessary (not a no-op) by a live-elegant check that fails by ~20% on
+    ``xp``/``yp`` without it, see ``tests/test_native_loco.py``."""
+    x, px, y, py, tau, delta = state6.unbind(-1)
+    xp, yp, _ = _slopes_from_canonical(px, py, delta)
+    sin_k = torch.sin(kick) if isinstance(kick, torch.Tensor) else math.sin(kick)
+    if length <= 0.0:
+        dv = kick - sin_k * delta
+        if plane == "x":
+            xp = xp + dv
+        else:
+            yp = yp + dv
+        px, py = _canonical_from_slopes(xp, yp, delta)
+        return torch.stack([x, px, y, py, tau, delta], dim=-1)
+
+    xp0, yp0 = xp, yp  # entrance slopes -- this map is linear-optics-exact (elegant's matrix method)
+    # (1 - delta + delta^2): elegant's own order-2 (default_order>=2) Taylor truncation of the exact
+    # 1/(1+delta) momentum-dependence of a fixed-field kick's angle -- confirmed by a live-elegant
+    # check that a bare (1-delta) leaves an xp residual growing exactly as sin(kick)*delta^2
+    # (bend_matrix.c's corrector_matrix, T[1][5][5]=T[0][5][5]/(0.5*length)=K*length=sin(kick)).
+    delta_weight = 1.0 - delta + delta * delta
+    dv = sin_k * delta_weight
+    du = 0.5 * sin_k * length * delta_weight
+    if plane == "x":
+        x = x + xp0 * length + du
+        xp = xp + dv
+        y = y + yp0 * length  # the other (un-kicked) plane still drifts over `length`
+    else:
+        y = y + yp0 * length + du
+        yp = yp + dv
+        x = x + xp0 * length
+
+    beta0 = (energy_eV * energy_eV - mc2_eV * mc2_eV) ** 0.5 / energy_eV
+    beta = _beta_of(delta, energy_eV, mc2_eV)
+    pz_slope = torch.sqrt(1 + xp0 * xp0 + yp0 * yp0)  # 1/cos(entrance angle), for a slope-space arc length
+    arc_length = length * pz_slope
+    tau = tau + (arc_length / beta - length / beta0)
+    px, py = _canonical_from_slopes(xp, yp, delta)
+    return torch.stack([x, px, y, py, tau, delta], dim=-1)
+
+
 def _slopes_from_canonical(
     px: torch.Tensor, py: torch.Tensor, delta: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -352,7 +431,17 @@ def _misalign(
     approximation for CSBEND, bounded the same way this module's other
     CSBEND simplifications are (``h*x ~ 1e-4`` for this repo's real
     bends). Revisit if a lattice with much larger bend curvature or
-    particle amplitude needs the exact treatment."""
+    particle amplitude needs the exact treatment.
+
+    ``dx``/``dy``/``tilt`` may each be a 0-d tensor (LOCO's own alignment
+    fit needs gradients exactly at the nominal zero-misalignment point) --
+    ``_has_offset``/``_has_tilt`` (below) gate on ``isinstance`` first, not
+    on value, so a differentiable knob is never silently detached by a
+    plain-float ``!= 0.0`` branch the way a Python ``if`` alone would (see
+    ``elements._corrector_kick``'s own docstring for the same trap with
+    ``track_element``'s ``ANGLE``). ``torch.cos``/``torch.sin`` are used
+    whenever ``tilt`` is a tensor; ``math.cos``/``math.sin`` otherwise
+    (cheaper, and keeps every existing plain-float call site bit-identical)."""
     offset = isinstance(dx, torch.Tensor) or isinstance(dy, torch.Tensor) or dx != 0.0 or dy != 0.0
     rotate = isinstance(tilt, torch.Tensor) or tilt != 0.0
     if rotate:
@@ -816,7 +905,14 @@ def track_element(
         4: (_DRIFT_FRAC4, _KICK_FRAC4), 6: (_DRIFT_FRAC6, _KICK_FRAC6), 8: (_DRIFT_FRAC8, _KICK_FRAC8),
     }[integration_order]
 
-    if any(isinstance(v, torch.Tensor) for v in (dx, dy, tilt)) or dx != 0.0 or dy != 0.0 or tilt != 0.0:
+    # isinstance-gated (not just != 0.0) so a differentiable tensor
+    # dx/dy/tilt at its nominal zero value still routes through
+    # _misalign -- see _misalign's own docstring.
+    misaligned = (
+        isinstance(dx, torch.Tensor) or isinstance(dy, torch.Tensor) or isinstance(tilt, torch.Tensor)
+        or dx != 0.0 or dy != 0.0 or tilt != 0.0
+    )
+    if misaligned:
         x, px, y, py = _misalign(x, px, y, py, dx, dy, tilt, entering=True)
 
     if h != 0.0 and edge1_effects:
@@ -855,7 +951,7 @@ def track_element(
     if h != 0.0 and edge2_effects:
         x, px, y, py = _edge_kick(x, px, y, py, delta, h, e2, hgap, fint, edge_order, 1, k1)
 
-    if any(isinstance(v, torch.Tensor) for v in (dx, dy, tilt)) or dx != 0.0 or dy != 0.0 or tilt != 0.0:
+    if misaligned:
         x, px, y, py = _misalign(x, px, y, py, dx, dy, tilt, entering=False)
 
     return torch.stack([x, px, y, py, tau, delta], dim=-1)
