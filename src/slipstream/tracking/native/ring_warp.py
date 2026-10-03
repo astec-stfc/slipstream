@@ -66,9 +66,9 @@ def pack(params, device: torch.device, dtype: torch.dtype) -> PackedRing | None:
     if not params:
         return None
     for p in params:
-        if p.is_rf or p.edge_order not in (1, 2) or p.edge1_effects not in (0, 1) or p.edge2_effects not in (0, 1):
+        if p.is_rf or p.is_kick or p.edge_order not in (1, 2) or p.edge1_effects not in (0, 1) or p.edge2_effects not in (0, 1):
             return None
-        for strength in (p.k1, p.k2):
+        for strength in (p.k1, p.k2, p.dx, p.dy, p.tilt):
             if isinstance(strength, torch.Tensor) and (strength.ndim != 0 or strength.requires_grad):
                 return None
         if p.integration_order not in (4, 6, 8) or p.n_kicks < 1 or p.length <= 0.0:

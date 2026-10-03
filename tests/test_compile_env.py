@@ -66,6 +66,18 @@ def test_set_compile_cache_env_never_overrides_an_explicit_value(tmp_path: Path,
     assert os.environ["TRITON_CACHE_DIR"] == "/already/set/by/user/triton"
 
 
+def test_set_compile_cache_env_creates_explicit_paths_without_touching_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inductor = tmp_path / "inductor"
+    triton = tmp_path / "triton"
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(inductor))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(triton))
+
+    _compile_env.set_compile_cache_env()
+
+    assert inductor.is_dir()
+    assert triton.is_dir()
+
+
 def test_set_compile_cache_env_is_silent_after_torch_inductor_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``import slipstream`` already loads torch, so this is the only case
     an entry script ever sees -- and Inductor/Triton read the cache env

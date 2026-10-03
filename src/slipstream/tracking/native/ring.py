@@ -103,7 +103,7 @@ class RingMap:
             energy_eV=energy_eV, mc2_eV=mc2_eV, n_kicks=n_kicks, n_kicks_bend=n_kicks_bend,
             integration_order=integration_order, exact_dipole=exact_dipole,
         )
-        self._overrides: tuple[dict, dict] = ({}, {})
+        self._overrides: tuple[dict, dict, dict, dict, dict, dict, dict] = ({}, {}, {}, {}, {}, {}, {})
         # rf_mode="lumped" folds every RF cavity into a drift -- frozen energy.
         self.params = _build_params(
             specs, n_kicks, n_kicks_bend, energy_eV, mc2_eV, self.device, self.dtype,
@@ -178,24 +178,57 @@ class RingMap:
 
     def with_strengths(
         self, k1: dict[str, torch.Tensor] | None = None, k2: dict[str, torch.Tensor] | None = None,
+        kick_x: dict[str, torch.Tensor] | None = None, kick_y: dict[str, torch.Tensor] | None = None,
+        dx: dict[str, torch.Tensor] | None = None, dy: dict[str, torch.Tensor] | None = None,
+        tilt: dict[str, torch.Tensor] | None = None,
     ) -> "RingMap":
         """Copy of this map with every occurrence of each named element
-        family (case-insensitive) using the given tensor ``K1``/``K2``.
-        The per-element reference-orbit offset stays at its nominal value
-        (a discretization correction; its strength dependence is ~1e-12)."""
+        family (case-insensitive) using the given tensor ``K1``/``K2``/
+        ``kick_x``/``kick_y``/``dx``/``dy``/``tilt``. The per-element
+        reference-orbit offset stays at its nominal value (a
+        discretization correction; its strength dependence is ~1e-12,
+        and it is deliberately computed at the design axis regardless of
+        misalignment -- see ``tracker._ElementParams``'s own docstring).
+        ``kick_x``/``kick_y`` only apply to ``kind="hkick"``/``"vkick"``
+        elements respectively -- naming an H-plane corrector in
+        ``kick_y`` (or vice versa) is a no-op, not an error (mirrors
+        ``k1``/``k2`` naming a non-quad/sext family). ``dx``/``dy``/
+        ``tilt`` apply to any element (LOCO's own alignment fit, Phase 6)."""
         k1 = {n.upper(): v for n, v in (k1 or {}).items()}
         k2 = {n.upper(): v for n, v in (k2 or {}).items()}
-        unknown = (set(k1) | set(k2)) - {s.name.upper() for s in self.specs}
+        kick_x = {n.upper(): v for n, v in (kick_x or {}).items()}
+        kick_y = {n.upper(): v for n, v in (kick_y or {}).items()}
+        dx = {n.upper(): v for n, v in (dx or {}).items()}
+        dy = {n.upper(): v for n, v in (dy or {}).items()}
+        tilt = {n.upper(): v for n, v in (tilt or {}).items()}
+        unknown = (set(k1) | set(k2) | set(kick_x) | set(kick_y) | set(dx) | set(dy) | set(tilt)) - {s.name.upper() for s in self.specs}
         if unknown:
             raise KeyError(f"no such element(s) in lattice: {sorted(unknown)}")
-        if self.double_single:  # constants must be Python floats (split into hi/lo at trace time)
+        if self.double_single:
+            if any(float(v) != 0.0 for v in (*kick_x.values(), *kick_y.values())):
+                raise NotImplementedError("double_single: nonzero corrector kicks not supported")
+            if any(float(v) != 0.0 for v in (*dx.values(), *dy.values(), *tilt.values())):
+                raise NotImplementedError("double_single: misalignments not supported")
+            # constants must be Python floats (split into hi/lo at trace time)
             k1 = {n: float(v) for n, v in k1.items()}
             k2 = {n: float(v) for n, v in k2.items()}
         new = object.__new__(RingMap)
         new.__dict__.update(self.__dict__)
-        new._overrides = ({**self._overrides[0], **k1}, {**self._overrides[1], **k2})
+        new._overrides = (
+            {**self._overrides[0], **k1}, {**self._overrides[1], **k2},
+            {**self._overrides[2], **kick_x}, {**self._overrides[3], **kick_y},
+            {**self._overrides[4], **dx}, {**self._overrides[5], **dy}, {**self._overrides[6], **tilt},
+        )
         new.params = [
-            p._replace(k1=k1.get(s.name.upper(), p.k1), k2=k2.get(s.name.upper(), p.k2))
+            p._replace(
+                k1=k1.get(s.name.upper(), p.k1), k2=k2.get(s.name.upper(), p.k2),
+                kick_value=(
+                    (kick_x if p.kick_plane == "x" else kick_y).get(s.name.upper(), p.kick_value)
+                    if p.is_kick else p.kick_value
+                ),
+                dx=dx.get(s.name.upper(), p.dx), dy=dy.get(s.name.upper(), p.dy),
+                tilt=tilt.get(s.name.upper(), p.tilt),
+            )
             for s, p in zip(self.specs, self.params)
         ]
         new._set_warp_params()
@@ -206,7 +239,11 @@ class RingMap:
         float64 map (optics for a ``double_single`` map)."""
         ref = RingMap(self.specs, **self._kw, device="cpu", dtype=torch.float64)
         as_t = lambda d: {n: torch.as_tensor(v, dtype=torch.float64) for n, v in d.items()}  # noqa: E731
-        return ref.with_strengths(k1=as_t(self._overrides[0]), k2=as_t(self._overrides[1]))
+        return ref.with_strengths(
+            k1=as_t(self._overrides[0]), k2=as_t(self._overrides[1]),
+            kick_x=as_t(self._overrides[2]), kick_y=as_t(self._overrides[3]),
+            dx=as_t(self._overrides[4]), dy=as_t(self._overrides[5]), tilt=as_t(self._overrides[6]),
+        )
 
     def turn(self, state: torch.Tensor, eager: bool = False) -> torch.Tensor:
         """One turn, no loss check -- differentiable. ``eager=True``
@@ -228,9 +265,45 @@ class RingMap:
             state = element(state, p, self._energy_t, self._mc2_t)[0]
         return state
 
+    def turn_with_taps(self, state: torch.Tensor, tap_indices: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Eager per-element loop (same ``_apply_one_element`` as
+        ``turn(eager=True)``, always -- no ``compile``/Warp/CUDA-graph/
+        ``double_single`` path) that also returns the state at each of
+        ``tap_indices`` (0-based positions into ``self.params``/``self.specs``,
+        resolved by name in the LOCO layer -- see ``analysis.loco.
+        orbit_response_matrix``), stacked in the given order (shape
+        ``(..., n_taps, 6)``).
+
+        A tap is the state **exiting** that element (after its own
+        transport) -- for a BPM (a finite-length ``MONI``, parsed as a
+        plain ``kind="drift"`` spec, see plans/LOCO_PLAN.md's Phase 0
+        audit) this is numerically identical to tapping the entrance of
+        whatever follows, since a ``MONI`` transports exactly like a
+        drift; exit is simplest and matches elegant's own orbit/response
+        convention of reporting a device's reading at its own ``s``.
+
+        Duplicate indices are allowed (unused here, but harmless); every
+        entry of ``tap_indices`` must be a valid position. ``self.turn()``
+        pays no overhead from this method's existence -- it is a wholly
+        separate loop."""
+        if self.double_single:
+            raise NotImplementedError("turn_with_taps: double_single not supported")
+        captured: dict[int, torch.Tensor] = {}
+        want = set(tap_indices)
+        for i, p in enumerate(self.params):
+            state = _apply_one_element(state, p, self._energy_t, self._mc2_t)[0]
+            if i in want:
+                captured[i] = state
+        tapped = torch.stack([captured[i] for i in tap_indices], dim=-2)
+        return state, tapped
+
     def _needs_grad(self, state: torch.Tensor) -> bool:
         return torch.is_grad_enabled() and (
-            state.requires_grad or any(isinstance(v, torch.Tensor) and v.requires_grad for p in self.params for v in (p.k1, p.k2))
+            state.requires_grad
+            or any(
+                isinstance(v, torch.Tensor) and v.requires_grad
+                for p in self.params for v in (p.k1, p.k2, p.kick_value, p.dx, p.dy, p.tilt)
+            )
         )
 
     def track(

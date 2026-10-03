@@ -48,6 +48,8 @@ _LINE_TYPES = {"LINE"}
 # the same VOLT/PHASE/FREQ/CHANGE_P0 names as RFCA, so no extra extraction
 # code is needed beyond this set membership.
 _RF_TYPES = {"RFCA", "RFCW"}
+_HKICK_TYPES = {"HKICK"}
+_VKICK_TYPES = {"VKICK"}
 
 
 @dataclass(frozen=True)
@@ -161,6 +163,15 @@ class ElementSpec:
     csr_bins: int = 256
     csr_sg_halfwidth: int = 1
     csr_n_slices: int = 1
+    kick_x: float = 0.0
+    """``kind="hkick"`` only, elegant's ``HKICK``'s own ``KICK=`` (radians).
+    See ``elements._corrector_kick`` -- a real dipole kick, not folded
+    into ``angle``/``track_element`` (that path uses plain Python
+    ``math.cos``/``math.sin`` on a fixed lattice curvature, never meant to
+    be differentiated; LOCO needs a corrector's own strength
+    differentiable exactly at its nominal zero-kick operating point)."""
+    kick_y: float = 0.0
+    """``kind="vkick"`` only, elegant's ``VKICK``'s own ``KICK=``."""
 
 
 def _split_statements(text: str) -> list[tuple[str, str]]:
@@ -269,6 +280,10 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
                 end2_focus=_float(params, "END2_FOCUS") != 0.0,
                 body_focus_model=body_focus_model,
             )
+        elif etype in _HKICK_TYPES:
+            elements[name] = ElementSpec(name, "hkick", length, kick_x=_float(params, "KICK"))
+        elif etype in _VKICK_TYPES:
+            elements[name] = ElementSpec(name, "vkick", length, kick_y=_float(params, "KICK"))
         elif length != 0.0:
             elements[name] = ElementSpec(name, "drift", length)
         # else: zero-length no-op (MARK/WATCH/CHARGE/CLEAN/RF-with-no-L/etc) -- dropped.

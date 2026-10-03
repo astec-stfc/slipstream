@@ -38,13 +38,39 @@ class LinearOptics(NamedTuple):
 
 def _jacobian(ring: RingMap, x0: torch.Tensor, create_graph: bool) -> torch.Tensor:
     # vectorize=True: ~4x faster than 6 separate backward passes; forward
-    # mode would be faster still but can't create_graph (torch 2.14).
-    return torch.autograd.functional.jacobian(lambda u: ring.turn(u, eager=True), x0, create_graph=create_graph, vectorize=True)
+    # mode would be faster still but can't create_graph (torch 2.14). On the
+    # real booster, however, vectorized reverse-mode retains a multi-GB graph
+    # even when the result is not differentiable; keep ordinary closed-orbit
+    # probes bounded and retain vectorization for the higher-order path.
+    return torch.autograd.functional.jacobian(
+        lambda u: ring.turn(u, eager=True), x0, create_graph=create_graph, vectorize=create_graph,
+    )
 
 
 def _closed_orbit_and_matrix(
     ring: RingMap, delta: float, iters: int, create_graph: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Newton fixed point of the one-turn map, differentiable in any
+    tensor strength ``ring`` carries (``create_graph=True``).
+
+    The convergence check runs *after* the Newton update, not before --
+    deliberately, not merely for the usual "check what you just computed"
+    reason. At the LOCO operating point (correctors and K1 errors exactly
+    at their nominal value), the starting guess ``co=0`` already satisfies
+    ``ring.turn(0)[:4] == 0`` to machine precision (F(0)=0 for any purely
+    multipole ring with correctors at zero), so a check-then-update loop
+    would ``break`` on iteration 1 *before* ever computing an update --
+    returning the original ``torch.zeros(...)`` tensor completely
+    disconnected from the autograd graph (no ``grad_fn`` at all), silently
+    dropping the closed-orbit self-consistency (wraparound) term from
+    ``d(co)/d(any strength)`` -- exactly the derivative LOCO's ORM needs.
+    Running the update first, using the *symbolic* (graph-connected)
+    ``resid`` even when its *value* is exactly zero, reproduces the
+    correct implicit-function-theorem gradient
+    (``d(co)/d(theta) = -(J-I)^-1 @ d(resid)/d(theta)``) from the very
+    first iteration -- found via a real-booster story computing an exactly
+    zero d(ORM)/dK1 for a K1 knob upstream of every tapped corrector/BPM
+    pair, see plans/LOCO_PLAN.md."""
     tol = 1e-13 if ring.dtype == torch.float64 else 1e-6
     co = torch.zeros(6, dtype=ring.dtype, device=ring.device)
     co[5] = delta
@@ -52,9 +78,10 @@ def _closed_orbit_and_matrix(
     for _ in range(iters):
         J = _jacobian(ring, co, create_graph)
         resid = ring.turn(co, eager=True)[:4] - co[:4]
-        if resid.abs().max().item() < tol:
-            break
+        converged = resid.abs().max().item() < tol
         co = torch.cat([co[:4] - torch.linalg.solve(J[:4, :4] - eye, resid), co[4:]])
+        if converged:
+            break
     else:
         raise RuntimeError(f"closed orbit not converged at delta={delta}")
     return co, J
@@ -64,6 +91,18 @@ def closed_orbit(ring: RingMap, delta: float = 0.0, iters: int = 8, create_graph
     """Transverse fixed point ``(x, px, y, py)`` of the one-turn map at fixed
     ``delta`` by Newton iteration (converges to round-off in ~3 steps for
     a stable ring). Returns the full ``(6,)`` state (``tau=0``)."""
+    if not create_graph:
+        tol = 1e-13 if ring.dtype == torch.float64 else 1e-6
+        co = torch.zeros(6, dtype=ring.dtype, device=ring.device)
+        co[5] = delta
+        eye = torch.eye(4, dtype=ring.dtype, device=ring.device)
+        for _ in range(iters):
+            resid = ring.turn(co, eager=True)[:4] - co[:4]
+            if resid.abs().max().item() < tol:
+                return co
+            J = _jacobian(ring, co, create_graph=False)
+            co = torch.cat([co[:4] - torch.linalg.solve(J[:4, :4] - eye, resid), co[4:]])
+        raise RuntimeError(f"closed orbit not converged at delta={delta}")
     return _closed_orbit_and_matrix(ring, delta, iters, create_graph)[0]
 
 
