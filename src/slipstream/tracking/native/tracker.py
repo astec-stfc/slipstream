@@ -1,0 +1,789 @@
+"""Native slipstream elegant-convention tracker: real per-element transverse/
+bend transport via ``elements.track_element`` (pure PyTorch, zero external hybrid backend --
+see ``plans/NATIVE_TRACKER_PLAN.md``), with ``pystable``'s own longitudinal
+RF-kick + synchrotron-radiation-damping physics applied as an external
+per-turn kick -- same division of responsibility as
+``tracking.external hybrid backend.tracker.external hybrid backendHybridTracker`` and the previous
+external hybrid backend-based ``NativeTracker``, reusing ``rf_kick``/``damping_excitation``/
+``transverse_damping_excitation`` completely unmodified.
+
+Particle state here is a plain ``(N, 6)`` tensor, columns ``(x, px, y, py,
+tau, delta)`` -- see ``elements.py``'s module docstring for the exact
+convention (``px``/``py`` canonical transverse momenta; ``tau`` a
+path-length-like coordinate, ``tau/C_LIGHT`` = time-of-flight surplus,
+converted to seconds only at the ``rf_kick``/``damping_excitation`` call
+site, same boundary the previous implementation used).
+
+Every element is exactly integrated every turn via ``elements.track_element``
+-- no precomputed 2nd-order Taylor map, no two-path split by element type
+(see ``elements.py``'s module docstring for why the old two-path design
+existed and why this rewrite doesn't need it).
+"""
+from __future__ import annotations
+
+import math
+from typing import NamedTuple
+
+import numpy as np
+import torch
+
+from ... import ibs as ibs_module
+from ...constants import C_LIGHT, E_CHARGE_C, R_E_M
+from ...lattice.lattice import Lattice
+from ...lattice.optics import TransverseOptics
+from ...lattice.ramp import RampProfile, scaled_lattice, scaled_optics
+from ...wakefields.shortrange import ShortRangeWake
+from ...wakefields.transverse import TransverseWake
+from .ring_physics import (
+    damping_excitation,
+    ibs_effective_taus,
+    rf_kick,
+    rms_emittance,
+    transverse_damping_excitation,
+)
+from .elements import _rf_cavity_kick, reference_offset, track_element
+from .errors import FiducialReference, SampledError, apply_errors, resolve_rf_errors
+from .lattice_import import ElementSpec
+from .optics import periodic_twiss_table
+
+
+class NativeTrackResult(NamedTuple):
+    """Per-sample diagnostics from ``NativeTracker.track`` -- same shape as
+    ``tracking.external hybrid backend.tracker.HybridTrackResult``."""
+
+    turn: np.ndarray
+    E0_eV: np.ndarray
+    sigma_delta: np.ndarray
+    sigma_tau_s: np.ndarray
+    sigma_x_m: np.ndarray
+    sigma_y_m: np.ndarray
+
+
+class _ElementParams(NamedTuple):
+    """One element's plain-float transport parameters -- a fixed
+    Python-level property per element (never particle data), so looping
+    over this list and branching per-element inside
+    ``elements.track_element`` costs ``torch.compile`` nothing (resolved
+    at trace time).
+
+    ``offset`` is ``elements.reference_offset``'s own (6,) tensor for this
+    element's exact params, subtracted from every particle's output in
+    ``_apply_elements``: elegant's own default kick counts leave the
+    on-axis reference orbit at a real, nonzero fixed point for a bend with
+    real K1+K2, which compounds into a many-turn instability if
+    uncorrected.
+
+    ``dx``/``dy``/``tilt`` (misalignment) are deliberately **excluded**
+    from ``offset``'s own computation (always computed at the design axis,
+    ``dx=dy=tilt=0``, even with a real misalignment error present):
+    ``reference_offset`` cancels a *discretization* artifact of the ideal
+    element, not the orbit distortion a real DX/DY/TILT error is supposed
+    to produce. K1/K2/ANGLE field errors, by contrast, correctly *do* flow
+    into ``offset`` (a field error legitimately shifts the closed orbit)."""
+
+    length: float
+    angle: float
+    k1: float
+    k2: float
+    e1: float
+    e2: float
+    n_kicks: int
+    """Magnetic element: Yoshida sub-step count. RF-kind element
+    (``is_rf=True``): the cavity's own real physical cell count."""
+    integration_order: int
+    offset: torch.Tensor
+    dx: float = 0.0
+    dy: float = 0.0
+    tilt: float = 0.0
+    is_rf: bool = False
+    voltage_V: float = 0.0
+    phase_rad: float = 0.0
+    omega_rf: float = 0.0
+    change_p0: bool = False
+    wake: ShortRangeWake | None = None
+    transverse_wake_x: TransverseWake | None = None
+    transverse_wake_y: TransverseWake | None = None
+    beta_wave: float = 1.0
+    end1_focus: bool = False
+    end2_focus: bool = False
+    body_focus_model: str = "none"
+    csr: bool = False
+    """``ElementSpec.csr``, threaded through unchanged -- only read by
+    ``LinacTracker``'s own collective-effects loop; ``NativeTracker``
+    itself never reads this field."""
+    csr_drift_rho_m: float | None = None
+    csr_drift_start_m: float = 0.0
+    """``ElementSpec.csr_drift_rho_m``/``csr_drift_start_m``, threaded
+    through unchanged -- same ``LinacTracker``-only readership as ``csr``
+    above."""
+    hgap: float = 0.0
+    fint: float = 0.5
+    edge_order: int = 1
+    edge1_effects: int = 1
+    edge2_effects: int = 1
+    csr_bins: int = 256
+    csr_sg_halfwidth: int = 1
+    csr_substeps: tuple = ()
+    exact_dipole: bool = False
+    """``elements.track_element``'s ``exact_dipole`` -- only
+    ``ring.RingMap`` sets it."""
+
+
+def _build_params(
+    specs: list[ElementSpec], n_kicks: int, n_kicks_bend: int,
+    energy_eV: float, mc2_eV: float, device: torch.device, dtype: torch.dtype,
+    integration_order: int = 4, rf_mode: str = "lumped", change_p0_override: bool | None = None,
+    exact_dipole: bool = False,
+) -> list[_ElementParams]:
+    """``rf_mode="lumped"`` (default): an ``ElementSpec(kind="rf")`` is
+    folded into a plain drift of the same length, its VOLT/PHASE/FREQ
+    ignored -- a drift-shaped ``_ElementParams`` is what every non-bend/
+    quad/sext ``ElementSpec`` already produces regardless of ``kind``.
+    ``rf_mode="per_element"`` instead builds a real RF-kind
+    ``_ElementParams`` for every ``kind="rf"`` spec -- see
+    ``NativeTracker``'s own ``rf=`` docstring.
+
+    ``change_p0_override`` (default ``None``): when not ``None``,
+    overrides every RF-kind element's own ``ElementSpec.change_p0`` --
+    used by ``LinacTracker(always_change_p0=True)`` to force ``False`` on
+    every cavity's own per-element recentering, since its per-element loop
+    already recenters after *every* element (avoiding a redundant double
+    ``do_match_energy`` call right after the cavity's own)."""
+    out = []
+    for s in specs:
+        if s.kind == "rf" and rf_mode == "per_element":
+            change_p0 = s.change_p0 if change_p0_override is None else change_p0_override
+            out.append(_ElementParams(
+                s.length, 0.0, 0.0, 0.0, 0.0, 0.0, s.n_kicks, integration_order,
+                torch.zeros(6, device=device, dtype=dtype),
+                is_rf=True, voltage_V=s.voltage_V, phase_rad=s.phase_rad,
+                omega_rf=2.0 * math.pi * s.frequency_Hz, change_p0=change_p0,
+                wake=s.wake, transverse_wake_x=s.transverse_wake_x, transverse_wake_y=s.transverse_wake_y,
+                beta_wave=s.beta_wave,
+                end1_focus=s.end1_focus, end2_focus=s.end2_focus, body_focus_model=s.body_focus_model,
+            ))
+            continue
+        nk = n_kicks_bend if s.angle != 0.0 else n_kicks
+        # dx=dy=tilt=0 always -- see _ElementParams's own docstring.
+        offset = reference_offset(
+            s.length, s.angle, s.k1, s.k2, s.e1, s.e2, energy_eV, mc2_eV, nk, integration_order,
+            s.hgap, s.fint, s.edge_order, s.edge1_effects, s.edge2_effects, exact_dipole,
+        )
+        out.append(_ElementParams(
+            s.length, s.angle, s.k1, s.k2, s.e1, s.e2, nk, integration_order,
+            offset.to(device=device, dtype=dtype), dx=s.dx, dy=s.dy, tilt=s.tilt, csr=s.csr,
+            hgap=s.hgap, fint=s.fint, edge_order=s.edge_order,
+            edge1_effects=s.edge1_effects, edge2_effects=s.edge2_effects,
+            csr_bins=s.csr_bins, csr_sg_halfwidth=s.csr_sg_halfwidth,
+            csr_drift_rho_m=s.csr_drift_rho_m, csr_drift_start_m=s.csr_drift_start_m,
+            exact_dipole=exact_dipole,
+        ))
+    return out
+
+
+def _apply_one_element(
+    particles6: torch.Tensor, p: _ElementParams, energy_eV: torch.Tensor, mc2_eV: torch.Tensor,
+    charge_per_particle_C: torch.Tensor | float = 0.0, compile_rf_sub_kicks: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch a single element -- RF-kind params go through
+    ``elements._rf_cavity_kick`` (which can change ``energy_eV``);
+    everything else through ``elements.track_element`` (``energy_eV``
+    passed through unchanged). Shared by ``_apply_elements`` (the per-turn
+    hot path) and ``fiducialize()``'s own per-element loop, so RF-kind
+    elements can't be mishandled by one call site diverging from the other.
+
+    ``charge_per_particle_C`` (default ``0.0``, a no-op) is only read when
+    ``p`` carries a wake (an ``RFCW``-equivalent).
+    ``compile_rf_sub_kicks`` (default ``False``) is threaded through to
+    ``elements._rf_cavity_kick``'s own parameter of the same name -- only
+    ``LinacTracker`` sets this."""
+    if p.is_rf:
+        return _rf_cavity_kick(
+            particles6, p.length, p.voltage_V, p.phase_rad, p.omega_rf, energy_eV, mc2_eV, change_p0=p.change_p0,
+            wake=p.wake, transverse_wake_x=p.transverse_wake_x, transverse_wake_y=p.transverse_wake_y,
+            charge_per_particle_C=charge_per_particle_C, n_kicks=p.n_kicks, beta_wave=p.beta_wave,
+            end1_focus=p.end1_focus, end2_focus=p.end2_focus, body_focus_model=p.body_focus_model,
+            compile_sub_kicks=compile_rf_sub_kicks,
+        )
+    state = track_element(
+        particles6, p.length, p.angle, p.k1, p.k2, p.e1, p.e2, energy_eV, mc2_eV,
+        n_kicks=p.n_kicks, integration_order=p.integration_order, dx=p.dx, dy=p.dy, tilt=p.tilt,
+        hgap=p.hgap, fint=p.fint, edge_order=p.edge_order,
+        edge1_effects=p.edge1_effects, edge2_effects=p.edge2_effects, exact_dipole=p.exact_dipole,
+    ) - p.offset
+    return state, energy_eV
+
+
+def _apply_elements(
+    particles6: torch.Tensor, params: list[_ElementParams], energy_eV: torch.Tensor, mc2_eV: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply every element's transport in sequence -- a plain Python loop
+    over a fixed-length list, ``torch.compile``-friendly (no object
+    construction, no ``.item()`` calls). ``energy_eV``/``mc2_eV`` are 0-d
+    tensors, not plain floats, since ramped tracking changes ``energy_eV``
+    every turn (a Python float there would force a recompile every turn).
+    Returns the (possibly cavity-updated) exit ``energy_eV`` alongside the
+    transported particles."""
+    for p in params:
+        particles6, energy_eV = _apply_one_element(particles6, p, energy_eV, mc2_eV)
+    return particles6, energy_eV
+
+
+def _rf_and_damping(
+    particles6: torch.Tensor, params: Lattice, noise_delta: torch.Tensor,
+    Vrf_eff_V: torch.Tensor | None = None, omega_rf_eff: torch.Tensor | None = None,
+    phi_s_eff: torch.Tensor | None = None, E0_eff_eV: torch.Tensor | None = None,
+    tau_z_eff_s: torch.Tensor | None = None, sigma_delta0_eff: torch.Tensor | None = None,
+    optics: TransverseOptics | None = None,
+    noise_xp: torch.Tensor | None = None, noise_yp: torch.Tensor | None = None,
+    tau_x_eff_s: torch.Tensor | None = None, tau_y_eff_s: torch.Tensor | None = None,
+    epsx_eff_m: torch.Tensor | None = None, epsy_eff_m: torch.Tensor | None = None,
+    wake: ShortRangeWake | None = None,
+    transverse_wake_x: TransverseWake | None = None, transverse_wake_y: TransverseWake | None = None,
+    charge_per_particle_C: torch.Tensor | float = 0.0,
+    skip_rf_kick: bool = False,
+) -> torch.Tensor:
+    """``pystable``'s ``rf_kick`` + short-range wake kick(s) +
+    ``damping_excitation`` on the delta column, and (if ``optics`` is
+    given) transverse dipole-wake kick + ``transverse_damping_excitation``
+    on px/py -- same ordering as ``tracking.pystable.tracker._turn_step``/
+    ``_turn_step_6d`` (rf kick, then wake kick(s) at the same tau/x/y,
+    then damping/excitation). ``wake`` (longitudinal) works with or
+    without ``optics``; ``transverse_wake_x``/``_y`` need ``optics``.
+
+    ``skip_rf_kick`` (fixed per tracker instance) skips the lumped
+    ``rf_kick`` call -- used by ``NativeTracker(rf="per_element")``, where
+    every RF-kind element already applied its own kick inline during
+    ``_apply_elements``, so the lumped once-per-turn kick would otherwise
+    double-count on top of the per-cavity ones."""
+    tau_s = particles6[..., 4] / C_LIGHT
+    E0_for_wake = E0_eff_eV if E0_eff_eV is not None else params.E0_eV
+    if skip_rf_kick:
+        delta_kicked = particles6[..., 5]
+    else:
+        delta_kicked = particles6[..., 5] + rf_kick(tau_s, params, Vrf_eff_V, omega_rf_eff, phi_s_eff, E0_eff_eV)
+    if wake is not None:
+        delta_kicked = delta_kicked - wake.voltage_at(tau_s, charge_per_particle_C) / E0_for_wake
+    delta = damping_excitation(
+        delta_kicked, params, tau_z_eff_s=tau_z_eff_s, sigma_delta0_eff=sigma_delta0_eff, noise=noise_delta,
+    )
+    if optics is None:
+        return torch.cat([particles6[..., :5], delta.unsqueeze(-1)], dim=-1)
+
+    px_kicked, py_kicked = particles6[..., 1], particles6[..., 3]
+    if transverse_wake_x is not None:
+        px_kicked = px_kicked + transverse_wake_x.kick_at(tau_s, particles6[..., 0], charge_per_particle_C) / E0_for_wake
+    if transverse_wake_y is not None:
+        py_kicked = py_kicked + transverse_wake_y.kick_at(tau_s, particles6[..., 2], charge_per_particle_C) / E0_for_wake
+
+    px = transverse_damping_excitation(
+        px_kicked, optics.tau_x_s, optics.epsx_m, optics.beta_x_m, optics.alpha_x, params.T0_s,
+        tau_eff_s=tau_x_eff_s, eps_eff_m=epsx_eff_m, noise=noise_xp,
+    )
+    py = transverse_damping_excitation(
+        py_kicked, optics.tau_y_s, optics.epsy_m, optics.beta_y_m, optics.alpha_y, params.T0_s,
+        tau_eff_s=tau_y_eff_s, eps_eff_m=epsy_eff_m, noise=noise_yp,
+    )
+    return torch.cat([
+        particles6[..., 0:1], px.unsqueeze(-1), particles6[..., 2:3], py.unsqueeze(-1),
+        particles6[..., 4:5], delta.unsqueeze(-1),
+    ], dim=-1)
+
+
+def _step(
+    particles6: torch.Tensor, params: list[_ElementParams], energy_eV: torch.Tensor, mc2_eV: torch.Tensor,
+    lattice: Lattice, noise_delta: torch.Tensor,
+    Vrf_eff_V: torch.Tensor | None = None, omega_rf_eff: torch.Tensor | None = None,
+    phi_s_eff: torch.Tensor | None = None, E0_eff_eV: torch.Tensor | None = None,
+    tau_z_eff_s: torch.Tensor | None = None, sigma_delta0_eff: torch.Tensor | None = None,
+    optics: TransverseOptics | None = None,
+    noise_xp: torch.Tensor | None = None, noise_yp: torch.Tensor | None = None,
+    tau_x_eff_s: torch.Tensor | None = None, tau_y_eff_s: torch.Tensor | None = None,
+    epsx_eff_m: torch.Tensor | None = None, epsy_eff_m: torch.Tensor | None = None,
+    wake: ShortRangeWake | None = None,
+    transverse_wake_x: TransverseWake | None = None, transverse_wake_y: TransverseWake | None = None,
+    charge_per_particle_C: torch.Tensor | float = 0.0,
+    skip_rf_kick: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One turn: transport via every element in sequence (``_apply_elements``,
+    which may update the reference energy if any element is an RF-kind
+    cavity with ``change_p0=True``), then ``_rf_and_damping`` -- factored
+    out so it can be wrapped in ``torch.compile`` (``NativeTracker``'s
+    ``compile=``). When ``skip_rf_kick`` (``rf="per_element"``), the
+    just-updated ``energy_eV`` is also used as the wake-normalization
+    reference (``E0_eff_eV``), since that's the tracker's actual current
+    reference at this point in the turn."""
+    particles6, energy_eV = _apply_elements(particles6, params, energy_eV, mc2_eV)
+    particles6 = _rf_and_damping(
+        particles6, lattice, noise_delta,
+        Vrf_eff_V=Vrf_eff_V, omega_rf_eff=omega_rf_eff, phi_s_eff=phi_s_eff,
+        E0_eff_eV=energy_eV if skip_rf_kick else E0_eff_eV,
+        tau_z_eff_s=tau_z_eff_s, sigma_delta0_eff=sigma_delta0_eff, optics=optics,
+        noise_xp=noise_xp, noise_yp=noise_yp, tau_x_eff_s=tau_x_eff_s, tau_y_eff_s=tau_y_eff_s,
+        epsx_eff_m=epsx_eff_m, epsy_eff_m=epsy_eff_m,
+        wake=wake, transverse_wake_x=transverse_wake_x, transverse_wake_y=transverse_wake_y,
+        charge_per_particle_C=charge_per_particle_C, skip_rf_kick=skip_rf_kick,
+    )
+    return particles6, energy_eV
+
+
+class NativeTracker:
+    """Tracks a plain ``(N, 6)`` particle tensor (columns ``x, px, y, py,
+    tau, delta`` -- see ``elements.py``'s module docstring for the
+    convention) for ``n_turns`` through ``specs``
+    (``lattice_import.parse_elegant_lattice``'s output), applying
+    ``pystable``'s ``rf_kick``/``damping_excitation`` (and, with ``optics=``,
+    ``transverse_damping_excitation``) once per turn.
+
+    ``optics``/``ramp``/``generator``/``compile``/``compile_mode`` all mirror
+    ``tracking.external hybrid backend.tracker.external hybrid backendHybridTracker``'s own constructor
+    parameters.
+
+    ``n_kicks`` (default 1) is the per-slice count for every non-bend
+    element (KQUAD/KSEXT/DRIFT); ``n_kicks_bend`` (default 4) is used
+    instead for any element with ``angle != 0`` (CSBEND) -- matching real
+    elegant's own per-element-type ``N_SLICES`` defaults exactly, each
+    combined with the 4-stage Yoshida splitting in
+    ``elements.track_element``. ``integration_order`` (default 4, matching
+    elegant's own default; ``6`` opt-in is elegant's own optional
+    6th-order splitting; ``8`` is a **native-only** extension elegant
+    doesn't support, built by recursively extending elegant's own order-6
+    splitting one more level, ``elements._yoshida_extend``) selects the
+    Yoshida splitting order, applied uniformly to every element. See
+    plans/DONE/NATIVE_TRACKER_PLAN.md for what accuracy/cost each buys.
+
+    ``wake``/``transverse_wake_x``/``transverse_wake_y``/``bunch_current_A``
+    mirror ``tracking.pystable.tracker.SingleBunchTracker``'s own
+    constructor parameters exactly -- same generic ``ShortRangeWake``/
+    ``TransverseWake`` objects, same ``charge_per_particle_C = T0_s *
+    bunch_current_A / n_particles`` convention (computed lazily in
+    ``track()``, since ``NativeTracker`` doesn't generate its own
+    particles at construction time), same per-turn ordering (see
+    ``_rf_and_damping``). ``transverse_wake_x``/``_y`` need ``optics=``.
+
+    ``errors`` (a pre-sampled/loaded ``list[errors.SampledError]``, see
+    ``errors.sample_errors``/``tracking.elegant.errors_io``) applies
+    magnetic/alignment errors (``K1``/``K2``/``ANGLE``/``DX``/``DY``/
+    ``TILT``) onto ``specs`` once, at construction (``self.specs`` keeps
+    the original, unperturbed list for a later ``fiducialize()`` call on a
+    nominal sibling tracker), and folds any RF errors (``PHASE``/``VOLT``/
+    ``FREQ``) into a **fixed** ``Vrf_eff_V``/``omega_rf_eff``/``phi_s_eff``
+    override for the whole realization -- one error draw per shot/ramp,
+    not turn-varying.
+
+    ``fiducial`` (an ``errors.FiducialReference``, from a different,
+    unperturbed sibling tracker's own ``fiducialize()`` call) freezes the
+    RF phase reference this tracker measures against, instead of the
+    default ``tau=0`` design reference -- ``phi_s_eff`` gets an additional
+    ``-omega_rf*fiducial.t_ref_s`` term, matching elegant's own
+    ``t_fiducial``/``phase_fiducial`` persistent-reference behavior. See
+    plans/PHYSICS.md's "Errors and fiducialization" section for the full
+    derivation.
+
+    ``rf`` (``"lumped"`` default, or ``"per_element"``) picks between the
+    two RF models this tracker supports -- see plans/PHYSICS.md's
+    "Per-cavity RF" section:
+
+    - ``"lumped"`` (default): one ``rf_kick`` applied once per turn, after
+      every element's magnetic transport, using ``params.Vrf_V``/
+      ``f_rf_Hz``/``phi_s`` (or, during a ramp, this turn's
+      ``RampProfile.at()`` values). Exact for ILMATRIX-style ring modeling
+      where the RF program is ring-averaged -- a first-class permanent
+      option, including for a ring with real per-cavity RFCA elements in
+      ``specs`` (any ``kind="rf"`` spec is simply folded into a plain
+      drift under this mode).
+    - ``"per_element"``: every ``kind="rf"`` element in ``specs`` (elegant
+      ``RFCA`` only, not ``RAMPRF``) gets its own inline
+      ``drift(L/2)->kick->drift(L/2)`` kick at its actual ``s``-position
+      (``elements._rf_cavity_kick``), and the per-turn lumped ``rf_kick``
+      is skipped entirely. What a linac-based FEL needs, and what makes
+      higher-harmonic-cavity placement in a ring physically meaningful
+      (two cavities at different ``s`` see genuinely different ``tau`` if
+      there's real ``R56`` between them). Reference-energy change is
+      per-cavity too, gated by each element's own ``CHANGE_P0``
+      (``ElementSpec.change_p0``, default ``False``, matching elegant's
+      own RFCA default). An explicit, orthogonal tracker-level choice, not
+      inferred from lattice content: a lattice with real RFCA elements can
+      still use ``rf="lumped"``; ``rf="per_element"`` on a lattice with no
+      RF-kind elements applies no longitudinal kick at all (no lumped
+      fallback). Radiation damping/quantum excitation stay
+      ring-turn-oriented regardless of this switch. Combining ramping
+      (``ramp=``) with ``rf="per_element"`` is out of scope (``_track_ramped``
+      always overwrites the reference energy from the ramp table every
+      turn, discarding whatever a per-cavity ``change_p0`` kick computed
+      in between).
+
+    ``exact_dipole`` (default ``False`` = elegant's own splitting, what
+    every live-elegant comparison needs): ``True`` integrates bends with
+    the exact pure-dipole map + K1/K2-only kicks
+    (``elements._exact_dipole_drift``) -- same Hamiltonian, same converged
+    result, but a pure dipole is exact in one step, the reference orbit is
+    an exact fixed point (no ``reference_offset`` residual), and float32
+    is far more robust (br14 float32 DA: 1% vs elegant instead of 8%). See
+    plans/RING_NONLINEAR_DYNAMICS_PLAN.md.
+    """
+
+    def __init__(
+        self, specs: list[ElementSpec], params: Lattice,
+        optics: TransverseOptics | None = None,
+        ramp: RampProfile | None = None,
+        generator: torch.Generator | None = None,
+        mc2_eV: float | None = None,
+        device: str | torch.device | None = None,
+        dtype: torch.dtype = torch.float64,
+        n_kicks: int = 1,
+        n_kicks_bend: int = 4,
+        integration_order: int = 4,
+        compile: bool = False,
+        compile_mode: str | None = None,
+        wake: ShortRangeWake | None = None,
+        transverse_wake_x: TransverseWake | None = None,
+        transverse_wake_y: TransverseWake | None = None,
+        bunch_current_A: float = 0.0,
+        ibs: bool = False,
+        ibs_recompute_every: int = 50,
+        ibs_coulomb_log: float | None = None,
+        ibs_model: str = "bane",
+        ibs_particle_radius_m: float = R_E_M,
+        errors: list[SampledError] | None = None,
+        fiducial: FiducialReference | None = None,
+        rf: str = "lumped",
+        exact_dipole: bool = False,
+    ):
+        if rf not in ("lumped", "per_element"):
+            raise ValueError(f"rf must be 'lumped' or 'per_element', got {rf!r}")
+        if ibs and optics is None:
+            raise ValueError("ibs=True needs optics= (IBS growth rates need beta/dispersion/emittance)")
+        if ibs_model not in ("bane", "bjorken-mtingwa"):
+            raise ValueError(f"ibs_model must be 'bane' or 'bjorken-mtingwa', got {ibs_model!r}")
+        if ibs_model == "bjorken-mtingwa" and ibs_coulomb_log is None:
+            # bjorken_mtingwa_growth_rates has no ultra-relativistic-beam-
+            # size auto-default the way bane_growth_rates does -- don't
+            # silently invent one.
+            raise ValueError("ibs_model='bjorken-mtingwa' needs an explicit ibs_coulomb_log=")
+        self.specs = specs  # the ORIGINAL, unperturbed list -- see fiducialize()
+        self.params = params
+        self.optics = optics
+        self.ramp = ramp
+        self.generator = generator
+        self.mc2_eV = mc2_eV if mc2_eV is not None else params.rest_mass_eV
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.dtype = dtype
+        self.n_kicks = n_kicks
+        self.n_kicks_bend = n_kicks_bend
+        self.integration_order = integration_order
+        self._elapsed_turns = 0
+        self._ramp_E0_prev = ramp.at(0.0).E0_eV if ramp is not None else None
+        self.errors = errors
+        self.fiducial = fiducial
+        self.rf = rf
+        self.exact_dipole = exact_dipole
+        effective_specs = apply_errors(specs, errors) if errors else specs
+        self._element_params = _build_params(
+            effective_specs, n_kicks, n_kicks_bend, params.E0_eV, self.mc2_eV, self.device, dtype,
+            integration_order=integration_order, rf_mode=rf, exact_dipole=exact_dipole,
+        )
+        self._step = torch.compile(_step, mode=compile_mode) if compile else _step
+        self._ramp_overrides: dict[str, torch.Tensor] | None = None
+
+        # RF errors + fiducialization: both need explicit Vrf_eff_V/
+        # omega_rf_eff/phi_s_eff overrides even for fixed-energy tracking
+        # (which otherwise falls back to params.Vrf_V/omega_rf/phi_s).
+        # Computed once as fixed 0-d tensors -- one error draw per
+        # realization, not turn-varying. During a ramp these are added on
+        # top of that turn's own ramp-scaled values instead (_track_ramped).
+        self._rf_error_delta = resolve_rf_errors(errors) if errors else {"phi_s": 0.0, "Vrf_V": 0.0, "omega_rf": 0.0}
+        self._fiducial_t_ref_s = fiducial.t_ref_s if fiducial is not None else 0.0
+        self._has_rf_overrides = bool(errors) or fiducial is not None
+        if self._has_rf_overrides:
+            omega_rf_fixed = params.omega_rf + self._rf_error_delta["omega_rf"]
+            # -omega_rf*t_ref_s measures phase relative to the fiducial
+            # pass's own frozen arrival time instead of the tau=0 design reference.
+            phi_s_fixed = params.phi_s - omega_rf_fixed * self._fiducial_t_ref_s + self._rf_error_delta["phi_s"]
+            self._Vrf_eff_t = torch.tensor(params.Vrf_V + self._rf_error_delta["Vrf_V"], dtype=dtype, device=self.device)
+            self._omega_rf_eff_t = torch.tensor(omega_rf_fixed, dtype=dtype, device=self.device)
+            self._phi_s_eff_t = torch.tensor(phi_s_fixed, dtype=dtype, device=self.device)
+        # 0-d tensors, not plain floats, for recompile avoidance -- see docs/tracking_native.md's
+        # "torch.compile discipline". Ramped tracking refills via .fill_() each turn.
+        self._energy_eV_t = torch.tensor(params.E0_eV, dtype=dtype, device=self.device)
+        self._mc2_eV_t = torch.tensor(self.mc2_eV, dtype=dtype, device=self.device)
+
+        self.bunch_current_A = bunch_current_A
+        self.wake = wake if bunch_current_A != 0.0 else None
+        if self.wake is not None:
+            self.wake.prepare(self.dtype, self.device)
+        self.transverse_wake_x = transverse_wake_x if bunch_current_A != 0.0 else None
+        self.transverse_wake_y = transverse_wake_y if bunch_current_A != 0.0 else None
+        if self.transverse_wake_x is not None:
+            self.transverse_wake_x.prepare(self.dtype, self.device)
+        if self.transverse_wake_y is not None:
+            self.transverse_wake_y.prepare(self.dtype, self.device)
+        # Same recompile-avoidance reason as energy_eV above; filled in once track() knows n_particles.
+        self._charge_per_particle_C = torch.zeros((), dtype=dtype, device=self.device)
+
+        self.ibs = ibs
+        self.ibs_recompute_every = ibs_recompute_every
+        self.ibs_coulomb_log = ibs_coulomb_log
+        self.ibs_model = ibs_model
+        self.ibs_particle_radius_m = ibs_particle_radius_m
+        # Real (not macroparticle) bunch population -- ibs.bane_growth_rates's
+        # own n_particles_bunch -- same formula as SingleBunchTracker's own
+        # self._n_bunch. Depends only on bunch_current_A (already required
+        # for the wake machinery above), not on n_particles, so this can be
+        # computed once here rather than lazily in track().
+        self._n_bunch = bunch_current_A * params.T0_s / E_CHARGE_C
+        self._ibs_twiss_table = None
+        self._ibs_rates: ibs_module.IBSGrowthRates | None = None
+        if self.ibs:
+            # Computed once at the injection-energy reference, never
+            # re-Twissed during a ramp -- beta/alpha/dispersion are fixed
+            # lattice properties in this codebase's convention. n_kicks/
+            # n_kicks_bend here intentionally do NOT reuse self.n_kicks/
+            # self.n_kicks_bend -- periodic_twiss_table's own much higher
+            # defaults are needed for accurate tune/beta extraction.
+            self._ibs_twiss_table, _, _ = periodic_twiss_table(specs, params.E0_eV, self.mc2_eV)
+            self._tau_z_ibs_eff = torch.tensor(params.tau_z_s, dtype=dtype, device=self.device)
+            self._tau_x_ibs_eff = torch.tensor(optics.tau_x_s, dtype=dtype, device=self.device)
+            self._tau_y_ibs_eff = torch.tensor(optics.tau_y_s, dtype=dtype, device=self.device)
+
+    def _recompute_ibs_rates(self, particles6: torch.Tensor, energy_eV: float) -> None:
+        """Real per-element-averaged IBS growth rates
+        (``ibs.element_averaged_growth_rates``, fed this tracker's own
+        ``periodic_twiss_table`` -- a real accuracy improvement over the
+        single-averaged-point approximation ``pystable``'s own IBS
+        integration uses) from the live beam at the reference (``s=0``)
+        point. Dispersion is subtracted from the raw ``x``/``y`` before
+        computing emittance -- the growth-rate formulas want the pure
+        betatron emittance, and this tracker's real per-element transport
+        genuinely disperses the beam (unlike ``pystable``'s dispersion-free
+        6D model)."""
+        table = self._ibs_twiss_table
+        x, px, y, py, tau, delta = particles6.unbind(-1)
+        D_x, Dp_x = float(table.D_x_m[0]), float(table.Dp_x[0])
+        D_y, Dp_y = float(table.D_y_m[0]), float(table.Dp_y[0])
+        epsx_m = rms_emittance(x - D_x * delta, px - Dp_x * delta)
+        epsy_m = rms_emittance(y - D_y * delta, py - Dp_y * delta)
+        sigma_p = delta.std().item()
+        sigma_z_m = particles6[..., 4].std().item()  # native tau is already path-length-like (meters)
+        gamma = energy_eV / self.mc2_eV
+        common = dict(
+            gamma=gamma, n_particles_bunch=self._n_bunch, sigma_z_m=sigma_z_m, sigma_p=sigma_p,
+            epsx_m=epsx_m, epsy_m=epsy_m, coulomb_log_value=self.ibs_coulomb_log,
+        )
+        if self.ibs_model == "bane":
+            self._ibs_rates = ibs_module.element_averaged_growth_rates(table, model="bane", **common)
+        else:
+            beta_rel = math.sqrt(1.0 - 1.0 / gamma**2)
+            self._ibs_rates = ibs_module.element_averaged_growth_rates(
+                table, model="bjorken-mtingwa", beta_rel=beta_rel,
+                particle_radius_m=self.ibs_particle_radius_m, **common,
+            )
+
+    def _draw_noise(self, particles6: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        # Outside self._step (and thus outside torch.compile if compile=True)
+        # -- an explicit generator= inside a compiled region graph-breaks
+        # dynamo, see tracking.external hybrid backend.tracker's identical pattern.
+        shape, dtype, device = particles6.shape[:-1], particles6.dtype, particles6.device
+        noise_delta = torch.randn(shape, generator=self.generator, dtype=dtype, device=device)
+        if self.optics is None:
+            return noise_delta, None, None
+        noise_xp = torch.randn(shape, generator=self.generator, dtype=dtype, device=device)
+        noise_yp = torch.randn(shape, generator=self.generator, dtype=dtype, device=device)
+        return noise_delta, noise_xp, noise_yp
+
+    def fiducialize(self, particles0: torch.Tensor) -> FiducialReference:
+        """Establish the nominal reference this tracker's current
+        lattice/RF produces, for a different, error-perturbed tracker to
+        freeze against (pass the result as that tracker's own
+        ``fiducial=`` -- see plans/PHYSICS.md's "Errors and
+        fiducialization" section). Call this on a tracker built without
+        ``errors=`` (the nominal lattice).
+
+        Tracks ``particles0`` through one pass via the same per-element
+        dispatch ``_apply_elements`` uses (no lumped RF/damping/wake,
+        matching elegant's own fiducialization pass -- a real per-cavity
+        kick under ``rf="per_element"`` is still applied, as part of the
+        beamline's own transport, not the once-per-turn lumped
+        mechanism), recording the state entering every element (index 0 is
+        ``particles0`` itself, index -1 the ring exit) and this pass's own
+        mean arrival time (``tau/C_LIGHT``, seconds) as the frozen timing
+        reference."""
+        particles0 = particles0.to(device=self.device, dtype=self.dtype)
+        trajectory = [particles0]
+        state = particles0
+        energy_eV = self._energy_eV_t
+        for p in self._element_params:
+            state, energy_eV = _apply_one_element(state, p, energy_eV, self._mc2_eV_t)
+            trajectory.append(state)
+        t_ref_s = (state[..., 4] / C_LIGHT).mean().item()
+        return FiducialReference(trajectory=torch.stack(trajectory, dim=0), t_ref_s=t_ref_s)
+
+    def track(
+        self, particles6: torch.Tensor, n_turns: int, sample_every: int = 1, progress: bool = False,
+    ) -> tuple[torch.Tensor, NativeTrackResult]:
+        """``progress=True`` shows a ``tqdm`` bar over the per-turn loop."""
+        particles6 = particles6.to(device=self.device, dtype=self.dtype)
+        if self.bunch_current_A != 0.0:
+            n_particles = particles6.shape[0]
+            self._charge_per_particle_C.fill_(self.params.T0_s * self.bunch_current_A / n_particles)
+        if self.ramp is None:
+            return self._track_fixed_energy(particles6, n_turns, sample_every, progress)
+        return self._track_ramped(particles6, n_turns, sample_every, progress)
+
+    def _track_fixed_energy(
+        self, particles6: torch.Tensor, n_turns: int, sample_every: int, progress: bool = False,
+    ) -> tuple[torch.Tensor, NativeTrackResult]:
+        samples: list[tuple] = []
+
+        turns = range(n_turns)
+        if progress:
+            from tqdm import tqdm
+            turns = tqdm(turns, unit="turn", desc="tracking", total=n_turns)
+        for turn in turns:
+            if self.ibs and turn % self.ibs_recompute_every == 0:
+                self._recompute_ibs_rates(particles6, self.params.E0_eV)
+                tau_z, tau_x, tau_y = ibs_effective_taus(
+                    self.params.tau_z_s, self.optics.tau_x_s, self.optics.tau_y_s, self._ibs_rates,
+                )
+                self._tau_z_ibs_eff.fill_(tau_z)
+                self._tau_x_ibs_eff.fill_(tau_x)
+                self._tau_y_ibs_eff.fill_(tau_y)
+            noise_delta, noise_xp, noise_yp = self._draw_noise(particles6)
+            particles6, self._energy_eV_t = self._step(
+                particles6, self._element_params, self._energy_eV_t, self._mc2_eV_t, self.params, noise_delta,
+                Vrf_eff_V=self._Vrf_eff_t if self._has_rf_overrides else None,
+                omega_rf_eff=self._omega_rf_eff_t if self._has_rf_overrides else None,
+                phi_s_eff=self._phi_s_eff_t if self._has_rf_overrides else None,
+                optics=self.optics, noise_xp=noise_xp, noise_yp=noise_yp,
+                wake=self.wake, transverse_wake_x=self.transverse_wake_x, transverse_wake_y=self.transverse_wake_y,
+                charge_per_particle_C=self._charge_per_particle_C,
+                tau_z_eff_s=self._tau_z_ibs_eff if self.ibs else None,
+                tau_x_eff_s=self._tau_x_ibs_eff if self.ibs else None,
+                tau_y_eff_s=self._tau_y_ibs_eff if self.ibs else None,
+                skip_rf_kick=(self.rf == "per_element"),
+            )
+            if turn % sample_every == 0 or turn == n_turns - 1:
+                tau_s = particles6[..., 4] / C_LIGHT
+                samples.append((turn, self._energy_eV_t, particles6[..., 5], tau_s, particles6[..., 0], particles6[..., 2]))
+
+        self._elapsed_turns += n_turns
+        return particles6, self._collect(samples)
+
+    def _init_ramp_overrides(self, dtype: torch.dtype, device: torch.device) -> None:
+        names = ["Vrf_eff_V", "omega_rf_eff", "phi_s_eff", "E0_eff_eV", "tau_z_eff_s", "sigma_delta0_eff"]
+        if self.optics is not None:
+            names += ["tau_x_eff_s", "tau_y_eff_s", "epsx_eff_m", "epsy_eff_m"]
+        self._ramp_overrides = {name: torch.zeros((), dtype=dtype, device=device) for name in names}
+
+    def _track_ramped(
+        self, particles6: torch.Tensor, n_turns: int, sample_every: int, progress: bool = False,
+    ) -> tuple[torch.Tensor, NativeTrackResult]:
+        if self._ramp_overrides is None:
+            self._init_ramp_overrides(particles6.dtype, particles6.device)
+        ov = self._ramp_overrides
+        samples: list[tuple] = []
+
+        turns = range(n_turns)
+        if progress:
+            from tqdm import tqdm
+            turns = tqdm(turns, unit="turn", desc="tracking", total=n_turns)
+        for _ in turns:
+            t_now = self._elapsed_turns * self.params.T0_s
+            state = self.ramp.at(t_now)
+            gamma_now = state.E0_eV / self.params.rest_mass_eV
+            ratio = gamma_now / self.params.gamma
+            scaled = scaled_lattice(self.params, gamma_now)
+
+            # Adiabatic damping -- same formula/ordering as
+            # external hybrid backendHybridTracker._track_ramped: applied before transport,
+            # every ramped turn.
+            E0_ratio = self._ramp_E0_prev / state.E0_eV
+            new_delta = particles6[..., 5] * E0_ratio + (E0_ratio - 1.0)
+            new_px = particles6[..., 1] * E0_ratio
+            new_py = particles6[..., 3] * E0_ratio
+            particles6 = torch.cat([
+                particles6[..., 0:1], new_px.unsqueeze(-1), particles6[..., 2:3], new_py.unsqueeze(-1),
+                particles6[..., 4:5], new_delta.unsqueeze(-1),
+            ], dim=-1)
+
+            self._energy_eV_t.fill_(state.E0_eV)
+            # RF errors add a fixed offset on top of this turn's own
+            # ramp-scaled values -- one error draw per whole ramp, not
+            # turn-varying. phi_s_eff's own -omega_rf*t_ref_s term matches
+            # __init__'s fixed-energy derivation, using this turn's own
+            # (possibly error-shifted) omega_rf instead of a fixed nominal one.
+            omega_rf_this_turn = 2 * math.pi * state.f_rf_Hz + self._rf_error_delta["omega_rf"]
+            ov["Vrf_eff_V"].fill_(state.Vrf_V + self._rf_error_delta["Vrf_V"])
+            ov["omega_rf_eff"].fill_(omega_rf_this_turn)
+            ov["phi_s_eff"].fill_(
+                state.phi_rf_rad - omega_rf_this_turn * self._fiducial_t_ref_s + self._rf_error_delta["phi_s"]
+            )
+            ov["E0_eff_eV"].fill_(state.E0_eV)
+            ov["tau_z_eff_s"].fill_(scaled.tau_z_s)
+            ov["sigma_delta0_eff"].fill_(scaled.sigma_delta0)
+            if self.optics is not None:
+                scaled_opt = scaled_optics(self.optics, ratio)
+                ov["tau_x_eff_s"].fill_(scaled_opt.tau_x_s)
+                ov["tau_y_eff_s"].fill_(scaled_opt.tau_y_s)
+                ov["epsx_eff_m"].fill_(scaled_opt.epsx_m)
+                ov["epsy_eff_m"].fill_(scaled_opt.epsy_m)
+
+            if self.ibs:
+                # Recompute the raw IBS rate from the live beam only every
+                # ibs_recompute_every turns (at the instantaneous ramped
+                # gamma), but re-fold it into this turn's own ramp-scaled
+                # SR damping times every turn -- refolding from the ramp's
+                # own freshly-scaled values (not a previously-folded one)
+                # means an overlapping recompute window can't compound.
+                if self._elapsed_turns % self.ibs_recompute_every == 0:
+                    self._recompute_ibs_rates(particles6, state.E0_eV)
+                tau_z, tau_x, tau_y = ibs_effective_taus(
+                    ov["tau_z_eff_s"], ov["tau_x_eff_s"], ov["tau_y_eff_s"], self._ibs_rates,
+                )
+                ov["tau_z_eff_s"].fill_(tau_z)
+                ov["tau_x_eff_s"].fill_(tau_x)
+                ov["tau_y_eff_s"].fill_(tau_y)
+
+            noise_delta, noise_xp, noise_yp = self._draw_noise(particles6)
+            # Discard the returned energy_eV -- ramping always overwrites
+            # self._energy_eV_t from the ramp table at the top of next
+            # turn regardless (why combining ramp= with rf="per_element"
+            # is out of scope, see the rf= docstring above).
+            particles6, _ = self._step(
+                particles6, self._element_params, self._energy_eV_t, self._mc2_eV_t, self.params, noise_delta,
+                Vrf_eff_V=ov["Vrf_eff_V"], omega_rf_eff=ov["omega_rf_eff"], phi_s_eff=ov["phi_s_eff"],
+                E0_eff_eV=ov["E0_eff_eV"], tau_z_eff_s=ov["tau_z_eff_s"], sigma_delta0_eff=ov["sigma_delta0_eff"],
+                optics=self.optics, noise_xp=noise_xp, noise_yp=noise_yp,
+                tau_x_eff_s=ov.get("tau_x_eff_s"), tau_y_eff_s=ov.get("tau_y_eff_s"),
+                epsx_eff_m=ov.get("epsx_eff_m"), epsy_eff_m=ov.get("epsy_eff_m"),
+                wake=self.wake, transverse_wake_x=self.transverse_wake_x, transverse_wake_y=self.transverse_wake_y,
+                charge_per_particle_C=self._charge_per_particle_C,
+                skip_rf_kick=(self.rf == "per_element"),
+            )
+
+            if self._elapsed_turns % sample_every == 0 or self._elapsed_turns == n_turns - 1:
+                tau_s = particles6[..., 4] / C_LIGHT
+                samples.append((
+                    self._elapsed_turns, state.E0_eV, particles6[..., 5], tau_s, particles6[..., 0], particles6[..., 2],
+                ))
+
+            self._ramp_E0_prev = state.E0_eV
+            self._elapsed_turns += 1
+
+        return particles6, self._collect(samples)
+
+    @staticmethod
+    def _collect(samples: list[tuple]) -> NativeTrackResult:
+        # s[1] is a plain float from _track_ramped but a 0-d tensor from
+        # _track_fixed_energy (rf="per_element"+change_p0 can change it
+        # turn to turn) -- float() handles both, deferred to here rather
+        # than inside the per-turn loop.
+        return NativeTrackResult(
+            turn=np.array([s[0] for s in samples]),
+            E0_eV=np.array([float(s[1]) for s in samples]),
+            sigma_delta=np.array([s[2].std().item() for s in samples]),
+            sigma_tau_s=np.array([s[3].std().item() for s in samples]),
+            sigma_x_m=np.array([s[4].std().item() for s in samples]),
+            sigma_y_m=np.array([s[5].std().item() for s in samples]),
+        )
+

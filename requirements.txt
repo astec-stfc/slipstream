@@ -1,0 +1,7 @@
+--index-url https://download.pytorch.org/whl/cu132
+--extra-index-url https://pypi.org/simple
+
+# Editable CUDA install: torch comes from the CUDA 13.2 index and the
+# [cuda] extra adds warp-lang.
+-e .[cuda]
+pytest
