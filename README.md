@@ -39,6 +39,23 @@ Optional SDDS support is available with:
 python -m pip install "slipstream-accel[sdds]"
 ```
 
+## Windows compilation
+
+On Windows, use `clang-cl` as the C++ compiler for `torch.compile`. It compiles
+Slipstream's CUDA paths better than MSVC. Set it before starting Python, and
+make sure `clang-cl` and the Windows SDK are available:
+
+```powershell
+$env:CXX = "clang-cl"
+```
+
+The equivalent setting is `set CXX=clang-cl` in `cmd.exe` or
+`export CXX=clang-cl` in a POSIX shell.
+
+See [`docs/compilation.md`](docs/compilation.md) for CPU and CUDA
+`torch.compile` setup, compilation-cache guidance, and optional NVIDIA Warp
+acceleration.
+
 ## Quick start
 
 The Python import name is `slipstream`:

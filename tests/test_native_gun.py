@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -234,17 +235,20 @@ def test_compensated_boris_recovers_a_sub_ulp_kick_that_plain_float32_deletes():
     assert abs(comp32 - ref64) <= half_ulp  # i.e. as close as float32 can store u at all
 
 
-def _ensure_msvc_inductor_env():
-    """CPU ``torch.compile`` shells out to MSVC (``cl``), which finds its
-    toolchain + UCRT headers through the ``INCLUDE``/``LIB`` env vars --
-    set by ``vcvarsall.bat`` but not by a plain conda shell (``CLAUDE.md``'s
-    Environment section documents the vcvars requirement; this applies the
-    same fix in-process via vswhere so the test is self-contained). No-op
-    when ``INCLUDE`` already resolves ``omp.h``; skips when no VS toolchain
-    + Windows SDK can be located (e.g. a non-Windows CI box without MSVC --
-    the compiled/eager parity is a Windows-env regression check)."""
+def _ensure_clang_cl_inductor_env():
+    """Use ``clang-cl`` for CPU ``torch.compile`` on Windows.
+
+    ``clang-cl`` uses the MSVC-compatible headers and libraries from the
+    Visual Studio/Windows SDK installation, so populate ``INCLUDE``/``LIB``
+    when a plain shell has not loaded them.  The compiler choice itself is
+    explicit: clang-cl is the supported Windows compiler for this codebase's
+    compiled CUDA paths and must not silently fall back to ``cl``.
+    """
+    if shutil.which("clang-cl") is None:
+        pytest.skip("CPU torch.compile needs clang-cl (see CLAUDE.md); not found")
     include = os.environ.get("INCLUDE", "")
     if any(os.path.isfile(os.path.join(d, "omp.h")) for d in include.split(";") if d):
+        os.environ["CXX"] = "clang-cl"
         return
     vswhere = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
     msvc_root, kits = None, r"C:\Program Files (x86)\Windows Kits\10"
@@ -257,7 +261,7 @@ def _ensure_msvc_inductor_env():
         cand = os.path.join(inst, "VC", "Tools", "MSVC")
         msvc_root = cand if inst and os.path.isdir(cand) else None
     if msvc_root is None or not os.path.isdir(os.path.join(kits, "Include")):
-        pytest.skip("CPU torch.compile needs MSVC + Windows SDK (see CLAUDE.md); not found")
+        pytest.skip("CPU torch.compile needs clang-cl + Windows SDK (see CLAUDE.md); not found")
     ver = max(os.listdir(msvc_root))
     sdk = max(os.listdir(os.path.join(kits, "Include")))
     incs = [os.path.join(msvc_root, ver, "include")] + [
@@ -267,6 +271,7 @@ def _ensure_msvc_inductor_env():
     os.environ["INCLUDE"] = ";".join(incs + ([include] if include else []))
     lib = os.environ.get("LIB", "")
     os.environ["LIB"] = ";".join(libs + ([lib] if lib else []))
+    os.environ["CXX"] = "clang-cl"
 
 
 def test_track_particles_compiled_matches_eager():
@@ -282,7 +287,7 @@ def test_track_particles_compiled_matches_eager():
     # enough to never flake on kernel-codegen changes, tight enough that a
     # real divergence of the two paths (a duplicated-then-drifted step, the
     # thing this sharing exists to prevent) would trip it immediately.
-    _ensure_msvc_inductor_env()
+    _ensure_clang_cl_inductor_env()
     torch.manual_seed(0)
     n, n_steps, dt = 300, 50, 1.0e-13
     dtype = torch.float64
