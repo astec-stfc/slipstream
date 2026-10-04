@@ -24,6 +24,11 @@ orbit with zero momentum offset, like elegant's `find_aperture`/
 Newton fixed point of the one-turn map, differentiable in any
 tensor strength `ring` carries (`create_graph=True`).
 
+Without `create_graph`, residual turns here and in `closed_orbit` use the
+packed Warp kernel when the map has one. On CUDA the eager PyTorch turn is
+launch-bound: `closed_orbit` on the MLS example took 0.8 ms, against
+0.58 s eager. Jacobians remain eager PyTorch.
+
 The convergence check runs *after* the Newton update, not before --
 deliberately, not merely for the usual "check what you just computed"
 reason. At the LOCO operating point (correctors and K1 errors exactly

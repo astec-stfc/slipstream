@@ -21,6 +21,13 @@ class LinearOptics(NamedTuple):
     alpha_y: torch.Tensor
 
 
+def _residual_turn(ring: RingMap, co: torch.Tensor, create_graph: bool) -> torch.Tensor:
+    """One-particle turn for Newton residuals. A packed Warp turn takes ~0.4 ms where the
+    launch-bound eager PyTorch turn takes ~0.6 s on CUDA; otherwise eager, so compiled maps
+    never retrace for shape ``(6,)``."""
+    return ring.turn(co, eager=create_graph or ring._warp_params is None)
+
+
 def _jacobian(ring: RingMap, x0: torch.Tensor, create_graph: bool) -> torch.Tensor:
     return torch.autograd.functional.jacobian(
         lambda u: ring.turn(u, eager=True), x0, create_graph=create_graph, vectorize=create_graph,
@@ -38,7 +45,7 @@ def _closed_orbit_and_matrix(
     eye = torch.eye(4, dtype=ring.dtype, device=ring.device)
     for _ in range(iters):
         J = _jacobian(ring, co, create_graph)
-        resid = ring.turn(co, eager=True)[:4] - co[:4]
+        resid = _residual_turn(ring, co, create_graph)[:4] - co[:4]
         converged = resid.abs().max().item() < tol
         co = torch.cat([co[:4] - torch.linalg.solve(J[:4, :4] - eye, resid), co[4:]])
         if converged:
@@ -58,7 +65,7 @@ def closed_orbit(ring: RingMap, delta: float = 0.0, iters: int = 8, create_graph
         co[5] = delta
         eye = torch.eye(4, dtype=ring.dtype, device=ring.device)
         for _ in range(iters):
-            resid = ring.turn(co, eager=True)[:4] - co[:4]
+            resid = _residual_turn(ring, co, False)[:4] - co[:4]
             if resid.abs().max().item() < tol:
                 return co
             J = _jacobian(ring, co, create_graph=False)

@@ -103,7 +103,7 @@ def main():
     parser.add_argument('--xi', type=float, nargs=2, default=(1., 1.), metavar=('XI_X', 'XI_Y'),
                         help='linear chromaticity held by S1/S2 while Q1 and S3 vary')
     parser.add_argument('--cma', action='store_true', help='include optional CMA-ES baseline')
-    parser.add_argument('--output-dir', type=Path, default=Path('.cache/nonlinear_optimisation'),
+    parser.add_argument('--output-dir', type=Path, default=Path('examples/MLS/nonlinear_optimisation'),
                         help='directory for nominal reference tables and plots')
     parser.add_argument('--no-plots', action='store_true', help='write tables without requiring Matplotlib')
     parser.add_argument('--reference-only', action='store_true', help='write nominal reference outputs and exit')

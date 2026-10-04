@@ -206,6 +206,22 @@ def test_cuda_warp_turn_matches_cpu(exact_dipole):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
+def test_cuda_warp_closed_orbit_matches_cpu():
+    # Offset quads give a nonzero orbit, so Newton needs Jacobian steps after Warp residuals.
+    specs = [ElementSpec("QF", "quad", .2, k1=1.2, dx=2e-4), ElementSpec("D", "drift", 1.),
+             ElementSpec("B", "bend", .5, angle=.1, e1=.05), ElementSpec("QD", "quad", .2, k1=-1.2, dy=1e-4),
+             ElementSpec("D", "drift", 1.)] * 4
+    cpu = RingMap(specs, 1e9, device="cpu", dtype=torch.float64)
+    cuda = RingMap(specs, 1e9, device="cuda", dtype=torch.float64)
+    if cuda._warp_params is None:
+        pytest.skip("Warp unavailable")
+    for delta in (0.0, 2e-3):
+        expected = nl.closed_orbit(cpu, delta)
+        assert expected[:4].abs().max() > 1e-5
+        torch.testing.assert_close(nl.closed_orbit(cuda, delta).cpu(), expected, atol=1e-12, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
 def test_cuda_higher_multipole_matches_cpu():
     specs = [ElementSpec("O", "oct", .2, k3=3000, skew_multipoles=((2, 5.),))]
     cpu = RingMap(specs, 3e9, device="cpu")
