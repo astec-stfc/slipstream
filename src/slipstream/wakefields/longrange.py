@@ -1,28 +1,5 @@
-"""Long-range (interbunch) wake: resonant cavity modes (main cavity and/or
-higher-harmonic cavities) represented as a decaying, rotating voltage
-phasor rather than a stored wake history (He & Bai, PRAB 24, 104401 (2021),
-Eqs. 1-9, high-Q approximation). Consumed by the pytorch multi-bunch
-tracker (``tracking.pystable.multibunch``); elegant driving isn't
-implemented in this repo's elegant module.
-
-Physics, in the paper's own eq. numbers:
-
-- Eq 1/3: a bunch leaves behind an "equivalent voltage phasor" at its own
-  bucket, `Veq_i = (q_i*wr*R/Q) * sum_k exp(-lam*tau_k)`, where
-  `lam = (1j - 1/(2Q))*wr` is the resonator's complex natural frequency
-  (rotation at wr, decay at rate wr/(2Q)). `tau_k` is the particle's own
-  offset from its bucket's reference phase.
-- Eq 4/5: that phasor is carried bucket-to-bucket around the ring by a
-  *fixed* complex factor `a = exp(lam*Tb)`, `Tb = T0/h`:
-  `V_b,i = a*V_c,i-1`, `V_c,i = V_b,i + Veq,i`, wrapping `V_c,0 := V_c,h`
-  turn to turn. This is the one genuinely sequential piece (bucket i needs
-  i-1) -- done here via a chunked weighted-cumsum closed form rather than
-  an h-long Python loop, see `LongRangeWake.step`.
-- Eq 8: the phasor felt by a particle with offset tau_k in bucket i is
-  `V_b,i * exp(lam*tau_k)` -- note the *same* lam as Eq 3, opposite sign in
-  the exponent (Eq 3 looks backward from bucket-tau=0 across the source
-  bunch; Eq 8 looks forward from bucket-tau=0 to the test particle).
-"""
+"""High-Q resonators accumulate decaying/rotating interbunch voltage phasors with
+`lambda=(i-1/(2Q))*omega_r`. See docs/modules/wakefields/longrange.md."""
 from __future__ import annotations
 
 import cmath
@@ -47,10 +24,7 @@ class Resonator:
     def from_detuning(
         cls, R_over_Q_ohm: float, Q: float, harmonic_n: int, detuning_Hz: float, h: int, f_rev_Hz: float
     ) -> "Resonator":
-        """Build from Table-style parameters (Eq. 7's inverse): the cavity
-        targets the harmonic_n'th multiple of the rf frequency
-        (harmonic_n=1 for the main cavity, 3 for a third-harmonic HHC), and
-        is detuned from it by detuning_Hz."""
+        """Compute from detuning; see the module documentation for details."""
         omega_target = 2 * math.pi * harmonic_n * h * f_rev_Hz
         omega_r = omega_target + 2 * math.pi * detuning_Hz
         return cls(R_over_Q_ohm * Q, Q, omega_r)
@@ -70,12 +44,7 @@ class Resonator:
 
 @dataclass
 class LongRangeWake:
-    """Per-bucket resonator phasor state (Eqs. 4-5), carried turn to turn.
-
-    `is_main_cavity=True` marks the resonator whose generator voltage is
-    adjusted by Eq. 9's feedback each turn (only one should be marked --
-    HHCs are passive, driven purely by the beam).
-    """
+    """Per-bucket resonator phasor state (Eqs. 4-5), carried turn to turn."""
 
     resonator: Resonator
     h: int
@@ -89,37 +58,14 @@ class LongRangeWake:
         return cmath.exp(self.resonator.lam * self.Tb_s)
 
     def init_uniform_fill(self, I0_avg_A: float, F: float = 1.0) -> None:
-        """Seed V_c,0 assuming a uniform fill pattern (every bucket filled
-        with an identical bunch), so the recursion starts at its steady
-        state instead of needing several (possibly many, for a high-Q HHC)
-        turns of transient to reach it.
-
-        The paper gives an approximate formula for this (Eq. 6, via the
-        detuning angle of Eq. 7). Used here instead is the *exact* closed
-        form for the same steady state, derived directly from Eqs. 4-5's
-        own recursion plus the periodicity condition V_c,0 = V_c,h: for a
-        uniform fill, Veq,i = Veq is the same every bucket, so
-        V_c,i = a^i*V_c,0 + Veq*(a^i-1)/(a-1); requiring V_c,h = V_c,0
-        gives V_c,0 = Veq/(1-a). Cross-checked against Eq. 6/7 in the
-        tests (they agree, as they must).
-        """
+        """Compute init uniform fill; see the module documentation for details."""
         res = self.resonator
         q_bunch = I0_avg_A * self.Tb_s  # average charge per bucket for uniform fill
         Veq = q_bunch * res.omega_r * res.R_ohm / res.Q * F
         self.V_c0 = Veq / (1 - self.a)
 
     def step(self, Veq_bucket: torch.Tensor) -> torch.Tensor:
-        """Advance one turn: solve V_c,i = a*V_c,i-1 + Veq,i for i=1..h
-        given self.V_c0, update self.V_c0 to V_c,h, and return V_b (length
-        h, complex) = a*V_c,i-1 for i=1..h -- the phasor felt by bucket i's
-        own bunch this turn (Eq. 4).
-
-        Closed form: with u_i = a^-i*Veq,i (u_0 := V_c,0), V_c,i = a^i *
-        cumsum(u)_i. Done in fixed-size chunks (default 256 buckets),
-        carrying V_c across chunk boundaries, because a^-i grows without
-        bound over h~1e3 buckets for a high-Q resonator (|a|<1) -- a single
-        h-long cumsum would overflow long before reaching realistic h.
-        """
+        """Compute step; see the module documentation for details."""
         h = Veq_bucket.shape[0]
         device, real_dtype = Veq_bucket.device, torch.float64
         log_a = self.resonator.lam * self.Tb_s  # a = exp(log_a); a^k = exp(k*log_a), avoids complex-tensor pow

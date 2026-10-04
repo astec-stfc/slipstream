@@ -1,37 +1,9 @@
-"""Yokoya elliptic form factors -- the standard, lightweight way to
-*approximate* a flat (or general elliptic) chamber's impedance from a
-round-chamber calculation, rather than solving the flat-chamber field
-problem directly (IMPEDANCE_PLAN.md Phase 3, ``wakefields/multilayer/flat.py``,
-which hit a genuine numerical-conditioning wall in its matrix inversion --
-parked, see that module's docstring -- not needed for this approximation).
-
-The table and the ``ratio``/interpolation recipe below are transcribed
-directly from IW2D's own official Python library (Elias Metral's group,
-``IW2D/PYTHON_codes_and_scripts/Impedance_lib_Python/Impedance.py``'s
-``Yokoya_elliptic``/``apply_Yokoya_elliptic``, table data credited there to
-Elias/USPAS) -- not re-derived. This is a real, standard approximation used
-throughout accelerator impedance work when a full 2D flat/elliptic solver
-isn't available or needed, not an ad-hoc shortcut: it reduces to the exact
-round-chamber result when the two semi-axes are equal, and to the known
-closed-form infinite-parallel-plate limit (long=1, dipy=pi^2/12,
-dipx=pi^2/24, quady=pi^2/24, quadx=-pi^2/24) as the aspect ratio goes to
-zero -- both checked in ``tests/test_yokoya.py``.
-
-Accuracy caveat, inherited from the method itself (not a code limitation):
-Yokoya factors are a frequency-independent, purely geometric correction --
-exact only in the appropriate asymptotic limits (round, or very flat) and
-approximate at intermediate aspect ratios, and blind to any physics that
-depends on the wall material varying between the horizontal and vertical
-directions (which this repo's ``Aperture`` model doesn't have anyway -- one
-material per aperture).
-"""
+"""Interpolates geometric elliptic form factors for round-result approximations. See
+docs/modules/wakefields/multilayer/yokoya.md."""
 from __future__ import annotations
 
 import numpy as np
 
-# Columns: ratio=(large-small)/(large+small), dipy, dipx, quady, quadx.
-# ratio=0 -> round (all -> 1,1,0,0); ratio->1 -> infinite flat plates
-# (dipy->pi^2/12=0.8225, dipx->pi^2/24=0.4112, quady->pi^2/24, quadx->-pi^2/24).
 _TABLE_CSV = """
 -1.38778e-17,1,1.00307,-0.00270479,0.00429341
 7.94873e-06,0.999988,1.00304,-0.00268229,0.0042735
@@ -158,13 +130,7 @@ _RATIO, _DIPY, _DIPX, _QUADY, _QUADX = _TABLE.T
 
 
 def yokoya_elliptic_factors(small_semiaxis_m: float, large_semiaxis_m: float) -> tuple[float, float, float, float, float]:
-    """(long, xdip, ydip, xquad, yquad) Yokoya factors for an elliptic
-    chamber, small axis assumed vertical (``Impedance.py``'s
-    ``Yokoya_elliptic`` -- swap the returned xdip/ydip and xquad/yquad
-    yourself if the small axis is actually horizontal, same as
-    ``apply_Yokoya_elliptic``'s ``orientation='H'`` swap does). ``long`` is
-    always 1 (no correction) -- not looked up, matching the source, since
-    the table doesn't even carry a longitudinal column."""
+    """Compute yokoya elliptic factors; see the module documentation for details."""
     if small_semiaxis_m > large_semiaxis_m:
         raise ValueError(f"small_semiaxis_m ({small_semiaxis_m}) must not exceed large_semiaxis_m ({large_semiaxis_m})")
     ratio = (large_semiaxis_m - small_semiaxis_m) / (large_semiaxis_m + small_semiaxis_m)

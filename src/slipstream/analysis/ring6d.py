@@ -1,9 +1,5 @@
-"""RF-on ring survival and tune analysis using the native tracker.
-
-These helpers preserve the tracker's real cavity locations and longitudinal
-physics. They advance its elapsed-turn and random-generator state normally.
-Use independent trackers for independent scans, particularly with excitation.
-"""
+"""RF-on survival and tune diagnostics advance the real `NativeTracker`, including configured
+longitudinal motion, damping and excitation. See docs/modules/analysis/ring6d.md."""
 from __future__ import annotations
 
 import math
@@ -28,13 +24,7 @@ def track_ring6d(
     delta_limit: float | None = None,
     record_every: int = 1,
 ) -> Ring6DResult:
-    """Track RF-on turns, recording all six coordinates and first losses.
-
-    Apertures are checked at the ring entrance after each turn, with optional
-    ``|delta|`` limit. Lost slots are frozen at zero. This is a single-particle
-    survival calculation: collective wakes/current and IBS are unsupported
-    because frozen losses must not contribute to collective moments.
-    """
+    """Track RF-on turns, recording all six coordinates and first losses."""
     if n_turns < 1:
         raise ValueError("n_turns must be positive")
     if not isinstance(record_every, int) or record_every < 0:
@@ -70,15 +60,7 @@ def betatron_tunes6d(
     half_width: float | None = None,
     dispersion: tuple[float, float, float, float] = (0., 0., 0., 0.),
 ) -> torch.Tensor:
-    """Return ``(..., 2)`` carrier tunes, NaN for lost launches.
-
-    Subtract linear dispersion times the instantaneous momentum deviation.
-    Restrict each NAFF seed to a band narrower than half the synchrotron
-    sideband spacing. The supplied optics must estimate the carrier within
-    that band; a large detuning requires updated centres. This does not
-    identify overlapping or unresolved sidebands automatically. At least
-    four synchrotron periods must be recorded to resolve the carrier.
-    """
+    """Return ``(..., 2)`` carrier tunes, NaN for lost launches."""
     if result.record_every != 1:
         raise ValueError("tune analysis requires record_every=1; decimated frequencies may alias")
     if not 0 < synchrotron_tune < 0.5:
@@ -117,14 +99,7 @@ def momentum_aperture6d(
     n_turns: int, aperture: tuple[float, float] = (0.05, 0.05),
     delta_limit: float | None = None,
 ) -> MomentumScan:
-    """Batched sampled momentum acceptance at a supplied RF synchronous orbit.
-
-    ``launch`` is a single six-coordinate orbit or ``(n_delta, 6)`` matched
-    launches. ``delta`` gives absolute initial momentum deviations. Return
-    the survival of every sample rather than assuming acceptance is connected
-    or interpolating across unstable islands. A finite scan bounds acceptance
-    only over its tested range and turn count.
-    """
+    """Batched sampled momentum acceptance at a supplied RF synchronous orbit."""
     delta = torch.as_tensor(delta, device=tracker.device, dtype=tracker.dtype)
     if delta.ndim != 1 or delta.numel() == 0:
         raise ValueError("delta must be a nonempty one-dimensional scan")
@@ -139,12 +114,7 @@ def dynamic_aperture6d(
     n_angles: int = 19, n_r: int = 32, refine: int = 2,
     aperture: tuple[float, float] = (0.05, 0.05), delta_limit: float | None = None,
 ) -> DynamicAperture:
-    """RF-on DA using the same batched ray refinement as frozen-energy DA.
-
-    Supply optics whose ``closed_orbit`` is the six-dimensional synchronous
-    launch. Refinement advances the tracker RNG; deterministic comparison
-    requires zero excitation. Damping can change the measured survival.
-    """
+    """RF-on DA using the same batched ray refinement as frozen-energy DA."""
     class SurvivalMap:
         device = tracker.device
         dtype = tracker.dtype
@@ -163,12 +133,7 @@ def frequency_map6d(
     aperture: tuple[float, float] = (0.05, 0.05), half_width: float | None = None,
     dispersion: tuple[float, float, float, float] = (0., 0., 0., 0.),
 ) -> FrequencyMap:
-    """RF-on carrier tunes and two-half Laskar diffusion on a launch grid.
-
-    Each half needs four synchrotron periods. Diffusion includes configured
-    radiation damping/excitation; use a deterministic tracker for a purely
-    Hamiltonian study. ``optics.closed_orbit`` is a supplied synchronous orbit.
-    """
+    """RF-on carrier tunes and two-half Laskar diffusion on a launch grid."""
     if n_turns < 2 or n_turns % 2:
         raise ValueError("n_turns must be positive and even")
     X, Y = torch.meshgrid(torch.linspace(*x_range, nx, device=tracker.device, dtype=tracker.dtype),

@@ -1,12 +1,6 @@
-"""Machine-agnostic longitudinal lattice parameters.
-
-Holds the handful of longitudinal machine parameters needed by both the
-pySTABLE tracker and the elegant driver, plus the small set of derived
-quantities (revolution period, synchronous phase, synchrotron tune, ...)
-both need. No lattice-specific (HALF, ALS-U, ...) information lives here --
-concrete machines are YAML files under ``examples/<machine>/lattice.yaml``,
-loaded via ``Lattice.from_yaml``.
-"""
+"""Stores longitudinal ring parameters and derives relativistic speed, revolution period, harmonic
+number, synchronous phase, synchrotron frequency and natural bunch length. See
+docs/modules/lattice/lattice.md."""
 from __future__ import annotations
 
 import math

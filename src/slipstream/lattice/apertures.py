@@ -1,27 +1,5 @@
-"""Machine aperture/material description (APERTURES.md): a YAML-defined set
-of named ``Material``s (single resistive-wall layers, or composites built
-from other named materials) and named ``Aperture``s (round or flat chamber
-sections, each referencing one material and repeated ``count`` times over
-``length_m``), summed into a total longitudinal ``Impedance`` for the ring.
-
-Deliberately longitudinal-only for now, matching APERTURES.md's own scope
-("total longitudinal (and later transverse) wakefields") -- round apertures
-use ``wakefields.multilayer.round.round_chamber_impedance`` directly
-(differentiable, validated against live/cached IW2D); flat apertures
-approximate via the Yokoya elliptic form factor applied to the equivalent
-round chamber at radius = the smaller half-aperture
-(``wakefields.multilayer.yokoya``, since the full flat-chamber solver in
-``wakefields.multilayer.flat`` is parked -- see that module's docstring).
-
-One material mutation surface (APERTURES.md's doc proposed several; this
-repo only needs one, see IMPEDANCE_PLAN.md-adjacent discussion): edit
-``Apertures.materials[name]``'s fields directly -- every aperture that
-references that material by name picks up the change next time impedance
-is computed, no special API needed since materials are looked up by name,
-not copied in. An aperture that needs to deviate from its shared material
-(e.g. a thicker coating on one specific section) sets
-``Aperture.material_overrides`` instead of forking the whole material.
-"""
+"""Builds longitudinal resistive-wall impedance from shared named materials and chamber sections. See
+docs/modules/lattice/apertures.md."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -40,10 +18,7 @@ _SHAPES = ("round", "flat")
 
 @dataclass
 class Material:
-    """Either a leaf material (``rho``/``tau_ps``/``thickness_m``, the same
-    Drude-relaxation layer ``RoundChamber.layers`` already uses) or a
-    composite (``layers``: an ordered list of other material names,
-    innermost first -- e.g. a NEG coating over a stainless substrate)."""
+    """Describe Material; see the module documentation for details."""
 
     rho: float | None = None
     tau_ps: float | None = None
@@ -100,10 +75,7 @@ _YAML_APERTURE_KEYS = {
 
 @dataclass
 class Apertures:
-    """The whole Materials + Apertures set from one YAML file. Not derived
-    from ``Lattice`` and doesn't duplicate any of its fields (circumference
-    is passed into ``impedance``/``default_length_m`` instead) -- mirrors
-    how ``resonators.yaml`` sits alongside, not inside, ``lattice.yaml``."""
+    """The whole Materials + Apertures set from one YAML file."""
 
     materials: dict[str, Material]
     apertures: dict[str, Aperture]
@@ -162,10 +134,9 @@ class Apertures:
         return aperture.length_m * aperture.count
 
     def aperture_impedance(self, aperture_name: str, freq_Hz: np.ndarray, gamma: float, circumference_m: float) -> Impedance:
-        """Zlong(f) for one named aperture (its full ``count``-repeated
-        length, or the Default aperture's residual length) -- round
-        chambers exactly, flat chambers via the Yokoya approximation
-        (module docstring)."""
+        """Zlong(f) for one named aperture (its full ``count``-repeated length, or the Default
+        aperture's residual length) -- round chambers exactly, flat chambers via the Yokoya
+        approximation (module docstring)."""
         aperture = self.apertures[aperture_name]
         chamber = RoundChamber(
             name=aperture_name,

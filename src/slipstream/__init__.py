@@ -1,9 +1,5 @@
-"""Native accelerator tracking and beam-dynamics utilities.
-
-The installable package deliberately exposes only the native implementation.
-Elegant/ASTRA file readers remain available, but external executable drivers
-and research backends live in the parent workbench.
-"""
+"""Public exports collect native transport, machine models, wakes and beam diagnostics. See
+docs/modules/__init__.md."""
 
 from .beamline import BeamlineStudy
 from .analysis.nonlinear import CoupledOptics, coupled_optics, coupled_signals

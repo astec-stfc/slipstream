@@ -1,9 +1,5 @@
-"""CPU reporting and optional Matplotlib plots for frozen-energy rings.
-
-Optics are linearized along the actual closed orbit using the configured
-RingMap transport. Tables are detached pandas outputs, not autograd APIs.
-Dispersion momenta use the native canonical px/py convention.
-"""
+"""Reports linear optics along the actual closed orbit and derives machine parameters from configured
+transport. See docs/modules/analysis/ring_outputs.md."""
 from __future__ import annotations
 
 import math
@@ -19,15 +15,7 @@ from .nonlinear import chromaticity, linear_optics
 
 
 def ring_optics_table(ring: RingMap, drift_samples: int = 8) -> pd.DataFrame:
-    """Entrance optics, drift interiors and an END row for an uncoupled ring.
-
-    Uses CPU float64 with the original slicing, offsets and strengths.
-    Rejects coupling through ``linear_optics``. Dispersion is d(co)/d(delta).
-    Phase accumulation assumes each element's phase advance is below 2*pi;
-    subdivide very long focusing elements if an integer tune is ambiguous.
-    ``drift_samples`` adds equally spaced interior points in plain drifts,
-    showing straight-section waists; zero gives element boundaries only.
-    """
+    """Entrance optics, drift interiors and an END row for an uncoupled ring."""
     if not isinstance(drift_samples, int) or drift_samples < 0:
         raise ValueError('drift_samples must be a nonnegative integer')
     ref = ring.float64_reference()
@@ -86,14 +74,7 @@ def ring_optics_table(ring: RingMap, drift_samples: int = 8) -> pd.DataFrame:
 
 def ring_parameters(ring: RingMap, optics: pd.DataFrame | None = None,
                     charge_e: float = 1., include_chromaticity: bool = True) -> pd.DataFrame:
-    """Derived machine parameters as columns ``parameter, value, unit``.
-
-    Energy is total energy; rigidity uses the magnitude of charge in units of e.
-    Slip factor includes the closed-orbit dispersion, and momentum compaction
-    follows eta = alpha_c - 1/gamma**2 for relative momentum delta. No RF,
-    damping or equilibrium-emittance values are inferred from a frozen map.
-    Supply a table from the same ring to avoid recomputing its optics.
-    """
+    """Derived machine parameters as columns ``parameter, value, unit``."""
     C = ring.circumference_m
     if not math.isfinite(C) or C <= 0 or not math.isfinite(charge_e) or charge_e == 0:
         raise ValueError('positive finite circumference and finite nonzero charge required')
@@ -126,11 +107,7 @@ def ring_parameters(ring: RingMap, optics: pd.DataFrame | None = None,
 
 
 def ring_lattice_table(ring: RingMap) -> pd.DataFrame:
-    """Configured element names, positions, geometry and K1/K2/K3 strengths.
-
-    For one machine only; batch strength/alignment ensembles raise an error.
-    Higher/skew tuples are retained as tuple columns. All values are SI.
-    """
+    """Configured element names, positions, geometry and K1/K2/K3 strengths."""
     def scalar(value):
         if isinstance(value, torch.Tensor):
             if value.numel() != 1:
@@ -150,12 +127,7 @@ def ring_lattice_table(ring: RingMap) -> pd.DataFrame:
 
 
 def plot_ring_twiss(optics: pd.DataFrame, lattice: pd.DataFrame | None = None):
-    """Return a Matplotlib Figure with beta, alpha, dispersion and optional layout.
-
-    Matplotlib is imported only here; install ``slipstream-accel[plot]``.
-    Samples are joined by lines; extrema between samples are not inferred.
-    The caller owns saving, display and closing the figure.
-    """
+    """Return a Matplotlib Figure with beta, alpha, dispersion and optional layout."""
     import matplotlib.pyplot as plt
     count = 4 if lattice is not None else 3
     fig, axes = plt.subplots(count, 1, sharex=True, figsize=(10, 8),

@@ -93,12 +93,12 @@ def reference_outputs(ring, output_dir, plots=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--budget', type=int, default=6)
-    parser.add_argument('--turns', type=int, default=32)
-    parser.add_argument('--angles', type=int, default=5, help='DA launch rays in the upper half-plane')
+    parser.add_argument('--budget', type=int, default=25)
+    parser.add_argument('--turns', type=int, default=1024)
+    parser.add_argument('--angles', type=int, default=25, help='DA launch rays in the upper half-plane')
     parser.add_argument('--radii', type=int, default=4, help='radial samples per refinement pass')
     parser.add_argument('--refine', type=int, default=1, help='additional DA refinement passes')
-    parser.add_argument('--r-max', type=float, default=.002, help='largest DA launch radius [m]')
+    parser.add_argument('--r-max', type=float, default=0.02, help='largest DA launch radius [m]')
     parser.add_argument('--cma', action='store_true', help='include optional CMA-ES baseline')
     parser.add_argument('--output-dir', type=Path, default=Path('.cache/nonlinear_optimisation'),
                         help='directory for nominal reference tables and plots')
@@ -136,7 +136,9 @@ def main():
                                    aperture=(0.02, 0.02))
 
     def aperture(x):
-        return -scan(x).area_m2 * 1e6  # minimise negative area in mm^2
+        aperture_value = -scan(x).area_m2 * 1e6  # minimise negative area in mm^2
+        print(f"  Aperture Value {x}= {aperture_value}")
+        return aperture_value
 
     # A separately labelled nominal scan is outside the optimiser call budgets.
     nominal_da = scan(theta)
@@ -154,8 +156,9 @@ def main():
         plt.close(fig)
         reference_files['dynamic_aperture_plot'] = str(path)
 
+    print(f"===  Using Method = gradient_then_{'CMA-ES' if args.cma else 'Powell'}  ===")
     low, high = multi_fidelity(smooth, aperture, theta, bounds, gradient_steps=2,
-                              learning_rate=1e-4, max_evaluations=args.budget, method='CMA-ES' if args.cma else 'Powell')
+                               learning_rate=1e-4, max_evaluations=args.budget, method='CMA-ES' if args.cma else 'Powell')
     rows = [{'method': 'gradient_then_' + high.method, 'loss': high.loss,
              'evaluations': high.evaluations, 'surrogate': low.loss,
              'strengths': high.theta.tolist()}]
@@ -163,6 +166,7 @@ def main():
     if args.cma:
         methods.append('CMA-ES')
     for method in methods:
+        print(f"===  Using Method = {method}  ===")
         result = gradient_free(aperture, theta, bounds, method=method,
                                max_evaluations=args.budget, seed=4)
         rows.append({'method': method, 'loss': result.loss, 'evaluations': result.evaluations,

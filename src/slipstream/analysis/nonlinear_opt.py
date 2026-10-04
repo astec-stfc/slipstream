@@ -1,16 +1,5 @@
-"""Gradient-based nonlinear-optics optimisation on top of ``analysis.nonlinear`` /
-``tracking.native.ring.RingMap`` -- see plans/RING_NONLINEAR_DYNAMICS_PLAN.md (Phase 4).
-
-- ``periodic_specs`` / ``unique_names``: give sextupole positions (identical arcs) or every
-  element of a kind its own name, so ``RingMap.with_strengths`` can address them one by one.
-- ``KnobSet``: a vector of K2 strengths ``theta`` mapped onto ``with_strengths``.
-- ``chromaticity_response`` / ``null_basis``: the autograd Jacobian ``d xi / d theta`` and
-  the directions that leave the chromaticity fixed ("orthogonal knobs").
-- ``Launches`` / ``Footprint``: the smooth dynamic-aperture surrogate that gets minimised -- the
-  tune shift with amplitude and with momentum over a small launch set, differentiable in every
-  tensor strength, optionally over an ensemble of machines (``(M, 1)`` strengths).
-- ``sample_field_errors``: per-element random K1/K2 errors for a machine ensemble.
-"""
+"""Tensor magnet strengths support differentiable chromaticity and tune-footprint objectives. See
+docs/modules/analysis/nonlinear_opt.md."""
 from __future__ import annotations
 
 import dataclasses
@@ -121,11 +110,9 @@ def build_launches(
     opt_by_delta: dict[float, nl.LinearOptics], amps_mm, chrom_deltas, a_small_mm: float = 0.3, device="cpu",
     diff_points: tuple = (),
 ) -> Launches:
-    """A small-amplitude reference (delta = 0), amplitude scans in x, y and on the diagonal at delta = 0, and
-    small-amplitude launches at ``chrom_deltas`` (each on that delta's closed orbit from ``opt_by_delta``).
-    ``diff_points`` = ``(x_mm, y_mm, delta)`` triples of *large-amplitude* launches (each ``delta`` must be a key of
-    ``opt_by_delta``) whose tune diffusion between the two halves of the run is penalised -- the smooth stand-in for
-    frequency-map chaos near the dynamic-aperture edge."""
+    """A small-amplitude reference (delta = 0), amplitude scans in x, y and on the diagonal at delta =
+    0, and small-amplitude launches at ``chrom_deltas`` (each on that delta's closed orbit from
+    ``opt_by_delta``)."""
     o0 = opt_by_delta[0.0]
     a = a_small_mm * 1e-3
     rows, centers, deltas, kind = [nl.launch(o0, a, a)], [(o0.Qx, o0.Qy)], [0.0], ["ref"]
@@ -151,21 +138,8 @@ def build_launches(
 
 
 class Footprint:
-    """``loss(ring)``: a smooth surrogate for dynamic aperture, differentiable in every tensor strength of ``ring``
-    (NAFF and the tracking both are). Two parts over one small tracked launch set of ``n_turns`` turns:
-
-    - *footprint*: mean squared tune shift ``[Q(x, y, delta) - Q(ref) - xi_target delta]`` over the ``amp`` and
-      ``chrom`` launches, in units of 1e-3 -- the amplitude detuning plus the higher-order chromaticity the sextupole
-      scheme leaves behind, at fixed linear chromaticity (a compact footprint crosses fewer resonances);
-    - *diffusion* (``diff_weight > 0``, ``diff`` launches): ``mean log(1 + (D / diff_scale)^2)`` with ``D`` the tune
-      change between the two halves of the run -- the frequency-map diffusion, which stays ~1e-6..1e-5 on regular
-      motion and jumps toward 1e-3 as the particle nears chaos. It keeps the optimiser from buying a small footprint
-      with large-amplitude stability. A ``diff`` launch lost inside ``n_turns`` counts as ``D = 0.1``; a lost
-      ``amp``/``chrom`` launch contributes the constant ``lost_penalty`` (squared tune shift, units of 1e-6) to the footprint
-      term -- neither has a gradient, so the optimiser is pushed back out of that region rather than crashing.
-
-    ``n_machines=M`` tracks the launch set on ``M`` machines at once (``ring`` strengths ``(M, 1)``); ``loss`` is then
-    the mean over machines plus ``std_weight`` times their standard deviation (a robust objective)."""
+    """``loss(ring)``: a smooth surrogate for dynamic aperture, differentiable in every tensor strength
+    of ``ring`` (NAFF and the tracking both are)."""
 
     def __init__(self, launches: Launches, opt_norm: nl.LinearOptics, xi_target: tuple[float, float], n_turns: int = 256,
                  checkpoint: bool = False, weights: dict[str, float] | None = None, n_machines: int | None = None,
@@ -187,10 +161,6 @@ class Footprint:
         ap = (self.loss_aperture, self.loss_aperture)
         dead = None
         if ring._needs_grad(state):
-            # A launch that is lost inside the run blows up (inf/NaN) in the turn it goes, and although the loss mask
-            # zeroes its state, the backward pass multiplies a zero gradient by the NaN local derivative and that NaN
-            # is summed into every strength's gradient. So find the lost launches with a cheap no-gradient pass
-            # (CUDA-graph path) and start them from a harmless launch in the tracked-with-gradient pass.
             with torch.no_grad():
                 dead = ring.track(state, self.T, record_every=0, aperture=ap).loss_turn >= 0
             state = torch.where(dead.unsqueeze(-1), self.L.state[0].to(ring.dtype), state)
@@ -253,11 +223,9 @@ def sample_field_errors(
     specs: list[ElementSpec], rules: list[tuple[str, str, float]], n_machines: int, seed: int = 0,
     dtype=torch.float64, device="cpu", cutoff: float = 3.0,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Per-element Gaussian field errors for ``n_machines`` machines, as ``(M, 1)``
-    ``(k1 dict, k2 dict)`` ready for ``RingMap.with_strengths`` (specs must have per-element names,
-    ``unique_names``). ``rules`` are ``(kind, parameter, rms)`` with ``kind`` an ``ElementSpec.kind``
-    (``"quad"``, ``"bend"``), ``parameter`` ``"K1"`` or ``"K2"`` and ``rms`` *relative* to the element's own
-    value (K1 for quads and bends; K2 of a bend). Gaussians are truncated at ``cutoff`` sigma."""
+    """Per-element Gaussian field errors for ``n_machines`` machines, as ``(M, 1)`` ``(k1 dict, k2
+    dict)`` ready for ``RingMap.with_strengths`` (specs must have per-element names,
+    ``unique_names``)."""
     g = torch.Generator().manual_seed(seed)
     k1: dict[str, torch.Tensor] = {}
     k2: dict[str, torch.Tensor] = {}
@@ -273,12 +241,7 @@ def sample_field_errors(
 
 
 def action_growth_loss(tbt: torch.Tensor, opt: nl.LinearOptics, scale: float = 1.0) -> torch.Tensor:
-    """Smooth soft-survival surrogate: mean squared soft positive action growth.
-
-    Normalized action is ``|z|**2/2``; reference is the first recorded turn.
-    Keep every launch inside the aperture: this cannot differentiate losses.
-    ``scale`` sets the acceptable fractional action growth.
-    """
+    """Smooth soft-survival surrogate: mean squared soft positive action growth."""
     if scale <= 0:
         raise ValueError("scale must be positive")
     zx, zy = nl.normalized_signals(tbt, opt)
@@ -292,11 +255,7 @@ def action_growth_loss(tbt: torch.Tensor, opt: nl.LinearOptics, scale: float = 1
 
 def joint_optics_loss(ring: RingMap, target: nl.LinearOptics, tune_scale: float = 1e-3,
                       beta_scale: float = 0.01) -> torch.Tensor:
-    """Differentiable tune and fractional beta constraints for K1/K2 optimisation.
-
-    Add this dimensionless penalty to a footprint/detuning objective. Beta
-    constraints refer to the observation point, not an entire-ring envelope.
-    """
+    """Differentiable tune and fractional beta constraints for K1/K2 optimisation."""
     if tune_scale <= 0 or beta_scale <= 0:
         raise ValueError("constraint scales must be positive")
     opt = nl.linear_optics(ring, create_graph=True)
@@ -319,12 +278,7 @@ class SearchResult:
 
 def gradient_free(objective, theta: torch.Tensor, bounds, method: str = "Powell",
                   max_evaluations: int = 100, seed: int = 0) -> SearchResult:
-    """Bounded Powell, Nelder-Mead or differential-evolution baseline.
-
-    Objective accepts a tensor with theta's dtype/device. Each evaluation is
-    detached; hardware synchronization here is intentional optimiser control.
-    SciPy is a core package dependency. Budgets count objective calls.
-    """
+    """Bounded Powell, Nelder-Mead or differential-evolution baseline."""
     import numpy as np
     from scipy.optimize import differential_evolution, minimize
     if method not in ("Powell", "Nelder-Mead", "differential_evolution", "CMA-ES"):
@@ -384,14 +338,7 @@ def multi_fidelity(smooth_objective, aperture_objective, theta: torch.Tensor, bo
                    gradient_steps: int = 20, learning_rate: float = 1e-2,
                    max_evaluations: int = 100, seed: int = 0,
                    method: str = "differential_evolution") -> tuple[SearchResult, SearchResult]:
-    """Gradient screening followed by bounded gradient-free DA refinement.
-
-    Both objectives are minimised (use negative DA area for the second).
-    The high-fidelity objective must retrack with its own long survival run;
-    it receives only strengths, never a surrogate survival estimate. Returns
-    independently measured best candidates from both stages. This uses DE,
-    Powell, Nelder-Mead or optional CMA-ES (install ``cma``).
-    """
+    """Gradient screening followed by bounded gradient-free DA refinement."""
     if gradient_steps < 1 or learning_rate <= 0:
         raise ValueError("positive gradient_steps and learning_rate required")
     if theta.ndim != 1 or theta.numel() == 0:

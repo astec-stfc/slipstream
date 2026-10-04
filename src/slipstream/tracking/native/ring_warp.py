@@ -1,11 +1,5 @@
-"""Whole-turn Warp backend for the forward-only ``RingMap`` fast path.
-
-This first slice accepts canonical/exact-dipole drift and multipole kicks,
-first- and second-order edge maps, and the existing flat-space misalignment
-transform. RF remains on the PyTorch fallback. One launch advances every
-particle through every packed element; it never crosses the PyTorch/Warp
-boundary per element.
-"""
+"""Implements selected fixed-lattice one-turn ring transport using a packed Warp kernel. See
+docs/modules/tracking/native/ring_warp.md."""
 from __future__ import annotations
 
 import math
@@ -251,9 +245,6 @@ if wk._HAVE_WARP:
                         x = x + ds * px / pz
                         y = y + ds * py / pz
                         arc = ds * (one + delta) / pz
-                    # Match elements.py's grouped reference-beta correction;
-                    # left-to-right evaluation accumulates a visible float32
-                    # tau residual over long lattices such as BR14.
                     tau = tau + (arc / beta - ds / beta0)
 
                     if kd != zero:

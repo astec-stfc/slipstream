@@ -1,29 +1,6 @@
-"""Warp-backed hot kernels for ``tracking.native.injector`` -- CUDA only.
-See ``plans/WARP_PORT_PLAN.md`` (Phase 1 spike measurements, Phase 2 this
-file). Optional dependency, mirrors ``laura_import.py``'s own
-``try: import ...; except ImportError:`` pattern: everything here is a
-drop-in accelerator for hot sub-computations of ``injector._fused_step``/
-``_fused_sc_fields``/``_apply_apertures``, never load-bearing for
-correctness -- the existing torch code in ``injector.py`` is the permanent
-fallback and the only CPU implementation. **CPU-float64 pytorch stays the
-accuracy baseline** (CLAUDE.md, user decision 2026-09-28): this module is
-never used on CPU, ``available()`` always returns ``False`` there.
-
-Every kernel is written once as a *generic* (``Any``-dtype) warp kernel
-and instantiated for float32/float64 via ``wp.overload`` rather than as a
-hand-duplicated f32/f64 pair (Phase 1's spike did the latter, flagged in
-its own Finding 4 as worth fixing). Measured directly: both overloads of a
-generic kernel compile from *one* module, vs. two independent modules for
-two hand-written kernels -- fewer compiled artifacts, less first-use
-latency, one body to keep in sync with the torch reference instead of two.
-Warp's literal typing is still strict inside a generic body (a bare
-``1.0`` defaults to float32 and cannot mix with a float64 operand --
-confirmed empirically, ``Any``/``wp.overload`` doesn't change this), so
-typed ``0``/``1``/``2`` constants are derived from an already-typed
-argument instead (``push``: ``ONE = dt / dt``, safe since ``dt`` is always
-physically nonzero; ``_apertures_kernel``: passed in explicitly as
-``zero``/``one`` params instead, since nothing in its own inputs is
-guaranteed nonzero the way ``dt`` is)."""
+"""Optional CUDA kernels accelerate Boris pushes, selected field evaluations, apertures, charge
+deposition/gathering, line-density histograms and CSR pairwise sums. See
+docs/modules/tracking/native/warp_kernels.md."""
 from __future__ import annotations
 
 import functools
@@ -84,10 +61,8 @@ if _HAVE_WARP:
         cx_n: wp.array(dtype=Any), cy_n: wp.array(dtype=Any), cz_n: wp.array(dtype=Any),
         cux_n: wp.array(dtype=Any), cuy_n: wp.array(dtype=Any), cuz_n: wp.array(dtype=Any),
     ):
-        """Relativistic Boris push, Kahan-compensated -- transcribed from
-        ``injector._fused_step``'s push tail. See that function's docstring
-        for why the compensation is physically load-bearing (float32
-        ulp-cancellation at CLARA-gun-exit momenta)."""
+        """Relativistic Boris push, Kahan-compensated -- transcribed from ``injector._fused_step``'s
+        push tail."""
         ONE = dt / dt
         TWO = ONE + ONE
         i = wp.tid()
@@ -158,15 +133,7 @@ if _HAVE_WARP:
         w10: wp.array(dtype=Any), w11: wp.array(dtype=Any),
         q: wp.array(dtype=Any), charge: wp.array(dtype=Any),
     ):
-        """CIC scatter-add of ``q`` onto the flat ``(nr, nz)`` charge grid's
-        four surrounding corners -- native ``wp.atomic_add`` in place of
-        ``injector._fused_sc_fields``'s four chained ``scatter_add_`` calls,
-        the kernel Phase 1 found warp winning on at every N. Cell indices
-        and CIC weights are precomputed in torch (``sc_deposit`` below) and
-        passed in, not recomputed here: ``injector.py`` needs the same
-        ``r0``/``wr``/``z0``/``wz`` again for the post-solve gather, so
-        computing them once in vectorized torch is strictly less work than
-        computing them a second time on-device in the kernel."""
+        """Compute deposit kernel; see the module documentation for details."""
         i = wp.tid()
         qi = q[i]
         wp.atomic_add(charge, idx00[i], qi * w00[i])
@@ -188,12 +155,7 @@ if _HAVE_WARP:
         ny: int, nz: int, ix_max: Any, iy_max: Any, iz_max: Any,
         charge: wp.array(dtype=Any),
     ):
-        """Direct 3D CIC deposit from particle coordinates.
-
-        Computing the eight indices/weights here avoids materialising and
-        filling two ``(8, N)`` torch tensors before this launch. The cathode
-        image, when requested, is deposited in the same launch.
-        """
+        """Direct 3D CIC deposit from particle coordinates."""
         particle = wp.tid()
         i = particle
         image = particle >= q.shape[0]
@@ -357,20 +319,8 @@ if _HAVE_WARP:
         zero: Any, one: Any,
         alive: wp.array(dtype=wp.bool),
     ):
-        """``injector._apply_apertures``'s swept AND-accumulation loop, one
-        kernel launch instead of one eager torch-op sequence per aperture.
-        Transcribed from ``_aperture_hit``/``_swept_aperture_hit``/
-        ``magnets.to_local`` -- see those docstrings for the geometry.
-        ``kind``: 0=RAD 1=COL_X 2=COL_Y 3=SCR_X 4=SCR_Y (``injector.py``'s
-        own ``_aperture_tables`` order). A RAD aperture with ``r < 0`` is a
-        solid plug (excluded region is the disc, needs the extra
-        closest-approach check); ``r >= 0`` is a hole (RAD/COL) or a
-        one-sided cut (SCR). ``zero``/``one`` are typed 0/1 constants
-        (warp's literal typing is strict even in a generic kernel, see
-        ``push_kernel``'s docstring -- passed in from the wrapper rather
-        than derived from an array element here, since nothing in this
-        kernel's own inputs is guaranteed nonzero the way ``push``'s
-        ``dt`` is)."""
+        """``injector._apply_apertures``'s swept AND-accumulation loop, one kernel launch instead of
+        one eager torch-op sequence per aperture."""
         i = wp.tid()
         if not alive[i]:
             return
@@ -475,17 +425,8 @@ if _HAVE_WARP:
         Ex: wp.array(dtype=Any), Ey: wp.array(dtype=Any), Ez: wp.array(dtype=Any),
         Bx: wp.array(dtype=Any), By: wp.array(dtype=Any), Bz: wp.array(dtype=Any),
     ):
-        """Standing-wave cavities: on-axis Ez0(z) + paraxial Er/Bphi
-        expansion, transcribed from ``injector._applied_fields``'s ``sw``
-        loop. ``cos_p``/``sin_p`` (one value per cavity) are precomputed in
-        torch (``injector._rf_phases``) and passed in rather than computed
-        per-particle here: the RF phase is the *same* scalar for every
-        particle at a given step, so computing it once in torch (as the
-        existing code already did) and reading it N times is strictly
-        cheaper than N per-thread transcendental evaluations. Adds onto
-        whatever ``Ex..Bz`` already hold (accumulator, not overwrite) --
-        callers chain ``_sw_kernel``/``_tw_kernel``/``_sol_kernel`` in
-        sequence onto the same buffers."""
+        """Standing-wave cavities: on-axis Ez0(z) + paraxial Er/Bphi expansion, transcribed from
+        ``injector._applied_fields``'s ``sw`` loop."""
         i = wp.tid()
         two = one + one
         n_c = z0.shape[0]
@@ -545,11 +486,7 @@ if _HAVE_WARP:
         Ex: wp.array(dtype=Any), Ey: wp.array(dtype=Any), Ez: wp.array(dtype=Any),
         Bx: wp.array(dtype=Any), By: wp.array(dtype=Any), Bz: wp.array(dtype=Any),
     ):
-        """Travelling-wave structures: the periodic section is stored once
-        and tiled; ``Ez = Er*cos(phase) - Ei*sin(phase)``, ``Ei`` from the
-        Floquet relation -- transcribed from ``injector._applied_fields``'s
-        ``tw`` loop (see ``fields.TravelingWaveField``). ``cos_t``/``sin_t``
-        precomputed per structure, same reasoning as ``_sw_kernel``."""
+        """Compute tw kernel; see the module documentation for details."""
         i = wp.tid()
         two = one + one
         n_c = z0.shape[0]
@@ -617,11 +554,8 @@ if _HAVE_WARP:
         zero: Any, one: Any, half: Any, quarter: Any,
         Bx: wp.array(dtype=Any), By: wp.array(dtype=Any), Bz: wp.array(dtype=Any),
     ):
-        """Solenoids: on-axis Bz0(z) + paraxial Br/Bz expansion --
-        transcribed from ``injector._applied_fields``'s ``sol`` loop. No
-        ``Ex``/``Ey``/``Ez`` params: a solenoid has no E field, so there's
-        nothing for those to do here (also saves 3 unneeded ``wp.from_torch``
-        wraps per call vs. carrying them through unused)."""
+        """Solenoids: on-axis Bz0(z) + paraxial Br/Bz expansion -- transcribed from
+        ``injector._applied_fields``'s ``sol`` loop."""
         i = wp.tid()
         two = one + one
         n_c = z0.shape[0]
@@ -670,13 +604,7 @@ if _HAVE_WARP:
         tau: wp.array(dtype=Any), score: wp.array(dtype=Any), softening: wp.array(dtype=Any),
         one: Any, weighted_sum: wp.array(dtype=Any),
     ):
-        """Exact one-sided softened CSR sum, one thread per observer.
-
-        This is the same operation as ``collective._csr_chunk_step`` without
-        materialising a row-block ``(rows, N)`` temporary.  Every observer
-        still visits every source, so the algorithm remains O(N^2); Warp only
-        changes the memory traffic and reduction implementation.
-        """
+        """Exact one-sided softened CSR sum, one thread per observer."""
         i = wp.tid()
         zero = one - one
         six = one + one + one + one + one + one
@@ -688,9 +616,7 @@ if _HAVE_WARP:
             diff = ti - tau[j]
             if diff < zero:
                 softened = diff * diff + eps * eps
-                # The reference reduction is a tree reduction while this
-                # kernel is source-serial per observer.  Compensated
-                # summation keeps float32 parity from degrading with N.
+                # The reference reduction is a tree reduction while this kernel is source-serial per observer.
                 term = score[j] * wp.pow(softened, -one / six) - compensation
                 updated = total + term
                 compensation = (updated - total) - term
@@ -751,14 +677,7 @@ if _HAVE_WARP:
 def csr_pairwise_sum(
     tau: torch.Tensor, score: torch.Tensor, softening: torch.Tensor,
 ) -> torch.Tensor:
-    """Run the exact one-sided CSR pairwise sum with one Warp thread/observer.
-
-    ``tau`` and ``score`` are one-dimensional, same-dtype CUDA tensors;
-    ``softening`` is a scalar CUDA tensor.  The scalar remains device-side so
-    this wrapper does not introduce a host synchronization into a collective
-    kick.  This is an accelerator primitive, not a replacement for the
-    authoritative PyTorch/autograd path.
-    """
+    """Run the exact one-sided CSR pairwise sum with one Warp thread/observer."""
     if not _HAVE_WARP:
         raise RuntimeError("Warp is not installed")
     if tau.device.type != "cuda" or tau.dtype not in (torch.float32, torch.float64):
@@ -787,12 +706,7 @@ def cic_line_density(
     bin_idx: torch.Tensor, interp_w: torch.Tensor, valid: torch.Tensor,
     charge_per_particle: torch.Tensor, n_bins: int, dtau: torch.Tensor,
 ) -> torch.Tensor:
-    """Deposit fixed-grid CIC line charge and return ``lambda = charge/dtau``.
-
-    The index/weight arrays are deliberately supplied by the caller: this is
-    the same split used by the existing fixed-grid implementation, and lets
-    the benchmark isolate the atomic deposition work from grid construction.
-    """
+    """Deposit fixed-grid CIC line charge and return ``lambda = charge/dtau``."""
     if not _HAVE_WARP:
         raise RuntimeError("Warp is not installed")
     if bin_idx.device.type != "cuda" or bin_idx.dtype != torch.int32:
@@ -827,13 +741,7 @@ def cic_line_density(
 
 
 def wake_histogram(safe_idx: torch.Tensor, n_bins: int, dtype: torch.dtype) -> torch.Tensor:
-    """Deposit unit counts for the fixed-window short-range wake histogram.
-
-    ``safe_idx`` includes the extra trash-bin index used by
-    ``ShortRangeWake.voltage_at``.  It must already use the reference path's
-    rounding and clamping semantics; this kernel only replaces the atomic
-    histogram update.
-    """
+    """Deposit unit counts for the fixed-window short-range wake histogram."""
     if not _HAVE_WARP:
         raise RuntimeError("Warp is not installed")
     if safe_idx.device.type != "cuda" or safe_idx.dtype != torch.int32:
@@ -855,12 +763,7 @@ def wake_histogram(safe_idx: torch.Tensor, n_bins: int, dtype: torch.dtype) -> t
 
 def push(x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,
          Ex, Ey, Ez, Bx, By, Bz, qmdt2: float, dt: float, c2_inv: float):
-    """Boris-push tail of ``injector._fused_step`` as one warp kernel
-    launch. ``qmdt2``/``dt``/``c2_inv`` are plain Python floats, not 0-d
-    tensors: unlike ``torch.compile(dynamic=False)``, a warp kernel never
-    recompiles on a changed scalar *value* (only on argument *type*), so
-    ``_fused_step``'s tensor-indirection trick to dodge that has no
-    equivalent cost here and would just add an unneeded host readback."""
+    """Boris-push tail of ``injector._fused_step`` as one warp kernel launch."""
     _ensure_init()
     dtype = x.dtype
     kern = _push_f64 if dtype == torch.float64 else _push_f32
@@ -878,26 +781,8 @@ def push(x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,
 
 def push_inplace(x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,
                   Ex, Ey, Ez, Bx, By, Bz, qmdt2: float, dt: float, c2_inv: float):
-    """Same physics as ``push``, but writes the twelve state tensors back
-    into themselves instead of allocating twelve fresh output tensors.
-    Safe: the kernel only reads a given particle's slot of ``x``/``cx``/etc.
-    *before* it writes that same slot (checked directly against the kernel
-    body above), so aliasing input and output buffers is race-free and
-    gives a bit-identical result to ``push`` -- confirmed empirically, not
-    just by inspection. This matters because ``push`` alone measured
-    surprisingly far from Phase 1's isolated-kernel numbers once wired into
-    a real per-step loop: ``wp.from_torch`` wrapping and fresh
-    ``torch.empty_like`` allocation, both negligible in a benchmark that
-    hoists them outside the timed loop (``benchmark/warp_port/bench.py``),
-    are *not* negligible paid fresh every step (measured ~0.27 ms/call at
-    N=50,000 float32 vs. this function's ~0.15 ms -- allocation plus half
-    the wrapping gone).
-
-    Only safe to use when the caller has no further use for the pre-step
-    values (``_fused_step_warp`` only calls this when ``emitted_all``,
-    where there's no old/new masking blend that needs them -- see there
-    for the ``emitted_all=False`` case, which still needs ``push``'s
-    allocating, non-aliased version)."""
+    """Same physics as ``push``, but writes the twelve state tensors back into themselves instead of
+    allocating twelve fresh output tensors."""
     _ensure_init()
     dtype = x.dtype
     kern = _push_f64 if dtype == torch.float64 else _push_f32
@@ -915,12 +800,7 @@ def push_inplace(x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,
 
 def sc_deposit(r0: torch.Tensor, z0: torch.Tensor, wr: torch.Tensor, wz: torch.Tensor,
                q: torch.Tensor, nr: int, nz: int) -> torch.Tensor:
-    """CIC scatter-add half of ``injector._fused_sc_fields``'s deposit, as
-    one warp kernel launch. ``r0``/``z0`` (int64, already clamped to
-    ``[0, nr-2]``/``[0, nz-2]``) and ``wr``/``wz`` (the bilinear weights)
-    are ``injector.py``'s own already-computed CIC coordinates -- see
-    ``_deposit_kernel``'s docstring for why they're passed in rather than
-    recomputed. Returns the flat ``(nr*nz,)`` charge array."""
+    """CIC scatter-add half of ``injector._fused_sc_fields``'s deposit, as one warp kernel launch."""
     _ensure_init()
     dtype = q.dtype
     kern = _deposit_f64 if dtype == torch.float64 else _deposit_f32
@@ -992,13 +872,7 @@ _APERTURE_KIND_CODE = {"RAD": 0, "COL_X": 1, "COL_Y": 2, "SCR_X": 3, "SCR_Y": 4}
 
 @functools.lru_cache(maxsize=64)
 def _aperture_arrays(apertures: tuple, device: str, dtype: torch.dtype):
-    """``apertures`` (``injector._aperture_tables``'s output: a tuple of
-    ``(kind, z1, z2, r[, (x_m, z_m, cos, sin)])`` per aperture, all plain
-    Python values) packed into the fixed-length arrays ``apply_apertures``
-    launches over. Cached on ``(apertures, device, dtype)`` -- ``apertures``
-    is itself a plain tuple of plain values, so it's hashable and fixed for
-    a whole run, exactly like ``sw``/``tw``/``sol`` are for
-    ``_applied_fields_compiled``: build these arrays once, not every step."""
+    """Compute aperture arrays; see the module documentation for details."""
     kinds, z1s, z2s, rs, has_place, px, pz, pc, ps = [], [], [], [], [], [], [], [], []
     for ap in apertures:
         kind, z1, z2, r = ap[:4]
@@ -1030,15 +904,9 @@ def _aperture_arrays(apertures: tuple, device: str, dtype: torch.dtype):
 def apply_apertures(x: torch.Tensor, y: torch.Tensor, z: torch.Tensor,
                      x0: torch.Tensor, y0: torch.Tensor, z0: torch.Tensor,
                      alive: torch.Tensor, apertures: tuple) -> torch.Tensor:
-    """``injector._apply_apertures``'s swept AND-accumulation check as one
-    warp kernel launch instead of one chained eager torch-op sequence per
-    aperture -- see ``_apertures_kernel``'s docstring for the geometry.
-    Measured as the single largest eager-dispatch cost once the two hot
-    kernels moved to warp (the 5pC CLARA deck's 8 apertures dominated the
-    whole warp-backed step, ~4.3 of ~4.8 ms/step, before this existed).
-    Mutates and returns ``alive`` in place (same in-place-is-safe reasoning
-    as ``push_inplace``: each thread only ever reads then writes its own
-    ``alive[i]``, never another thread's)."""
+    """``injector._apply_apertures``'s swept AND-accumulation check as one warp kernel launch instead
+    of one chained eager torch-op sequence per aperture -- see ``_apertures_kernel``'s docstring for
+    the geometry."""
     if not apertures:
         return alive
     _ensure_init()
@@ -1055,23 +923,11 @@ def apply_apertures(x: torch.Tensor, y: torch.Tensor, z: torch.Tensor,
     return alive
 
 
-# Packed-array cache for sw/tw/sol, keyed by id() of the tuple injector.py
-# builds once per Injector.track() call and never mutates -- (id, packed)
-# pairs, with a strong ref to the *original* tuple kept alongside the
-# packed tensors so its id can never be reused by a different object while
-# the cache entry is alive (the usual safety condition for id()-keyed
-# memoization). ponytail: unbounded -- grows by one entry per distinct
-# sw/tw/sol tuple built in this process; fine for how this is used (one
-# entry per Injector.track() call), add an eviction policy if that stops
-# being true.
 _ELEMENT_CACHE: dict[int, tuple] = {}
 
 
 def _cat_tables(entries: tuple, table_indices: tuple, device: str, dtype: torch.dtype):
-    """Concatenate one or more per-element 1D tables (``table_indices`` into
-    each ``entries[i]`` tuple) into flat arrays plus an ``int32`` offset
-    array -- the ragged-array packing ``_sw_kernel``/``_tw_kernel``/
-    ``_sol_kernel`` index with ``offset[c] + i0``."""
+    """Compute cat tables; see the module documentation for details."""
     flats = [[] for _ in table_indices]
     offsets = []
     off = 0
@@ -1131,17 +987,7 @@ def _pack_sol(sol: tuple, device: str, dtype: torch.dtype):
 def applied_fields(x: torch.Tensor, y: torch.Tensor, z: torch.Tensor, sw: tuple, tw: tuple, sol: tuple,
                     cos_sw: torch.Tensor, sin_sw: torch.Tensor, cos_tw: torch.Tensor, sin_tw: torch.Tensor,
                     c2_inv: float):
-    """``injector._applied_fields``'s ``sw``/``tw``/``sol`` loops (cavities,
-    TW structures, solenoids -- *not* ``quad``/``magnets``, see
-    ``injector._applied_fields_warp``'s docstring for why those stay on the
-    ``torch.compile`` path) as up to three warp kernel launches instead of
-    one ``torch.compile`` graph. Each kernel adds onto the same ``Ex..Bz``
-    buffers in sequence (a solenoid only ever touches ``Bx``/``By``/``Bz``).
-    ``cos_sw``/``sin_sw``/``cos_tw``/``sin_tw`` are one value per element,
-    precomputed in torch by ``injector._rf_phases`` -- see ``_sw_kernel``'s
-    docstring for why (the RF phase is one scalar per element per step, not
-    per-particle; computing it in the kernel would redundantly repeat a
-    transcendental evaluation once per particle instead of once)."""
+    """Compute applied fields; see the module documentation for details."""
     _ensure_init()
     dtype = x.dtype
     device = str(x.device)

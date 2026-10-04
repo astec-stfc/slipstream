@@ -1,5 +1,5 @@
-"""Common output schema for both the pySTABLE tracker and the elegant
-driver, HDF5-backed save/load."""
+"""`TrackingResult` stores sampled ring diagnostics with `sigma_tau_s` in seconds; `BeamlineResult`
+stores canonical output particles with tau in metres. See docs/modules/data/results.md."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,16 +11,9 @@ import numpy as np
 
 @dataclass
 class TrackingResult:
-    """One tracking run's sampled history, from either code.
+    """Turn-indexed diagnostics and HDF5 persistence."""
 
-    ``turn`` / ``sigma_delta`` / ``sigma_tau_s`` are equal-length 1D arrays,
-    one entry per sample (elegant: one per WATCH interval; pySTABLE: one
-    per ``sample_every`` turns). ``metadata`` is free-form (rho/d/sigma_s_mm,
-    seed, n_bunches, ... -- whatever the caller wants to keep alongside the
-    numbers for later plotting/filtering).
-    """
-
-    code: str  # "pystable" or "elegant"
+    code: str  # backend label
     n_particles: int
     n_turns: int
     current_A: float
@@ -28,35 +21,15 @@ class TrackingResult:
     sigma_delta: np.ndarray
     sigma_tau_s: np.ndarray
     transmission: np.ndarray | None = None
-    # Transverse (only populated when the run tracked optics -- see
-    # tracking.pystable.tracker.SingleBunchTracker's optics= kwarg).
-    # mean_x_m/mean_y_m are the essential ones: a coherent transverse
-    # instability is centroid growth, which sigma_x_m/sigma_y_m alone
-    # would miss.
     mean_x_m: np.ndarray | None = None
     mean_y_m: np.ndarray | None = None
     sigma_x_m: np.ndarray | None = None
     sigma_y_m: np.ndarray | None = None
-    # Live rms geometric emittance (SingleBunchTracker._rms_emittance on
-    # the tracked x/xp, y/yp) -- distinct from sigma_x_m/sigma_y_m (a beam
-    # size, which conflates emittance with beta) and from optics.epsx_m/
-    # epsy_m (the fixed *equilibrium* target, not what's actually being
-    # tracked). Directly comparable to elegant's own WATCH "ex"/"ey"
-    # columns.
     epsx_m: np.ndarray | None = None
     epsy_m: np.ndarray | None = None
-    # Longitudinal bunch centroid (mean tau/delta) -- populated by
-    # SingleBunchTracker.run() unconditionally (cheap, always meaningful);
-    # optional here only for backward compatibility with other callers
-    # (e.g. the elegant driver) that don't yet supply it. The concrete
-    # "oscillations in the bunch in the longitudinal RF bucket" signal for
-    # a ramping tracker (see lattice.ramp.RampProfile/RAMP_PLAN.md): a
-    # non-adiabatic ramp program shows up as coherent dipole motion here,
-    # not in sigma_tau_s/sigma_delta alone.
     mean_tau_s: np.ndarray | None = None
     mean_delta: np.ndarray | None = None
-    # Ramped central energy -- only populated when the run used
-    # SingleBunchTracker(ramp=...), see lattice.ramp.RampProfile.
+    # Optional ramped reference energy.
     E0_eV: np.ndarray | None = None
     metadata: dict = field(default_factory=dict)
 
@@ -111,18 +84,7 @@ class TrackingResult:
 
 @dataclass
 class BeamlineResult:
-    """One ``BeamlineStudy.track()`` pass's output (``main.beamline`` /
-    ``slipstream.beamline.BeamlineStudy``, E3 -- see
-    plans/essential/E3_NATIVE_FACADE_PLAN.md). A *pass*-level schema
-    (single beamline traversal), not ``TrackingResult``'s own *turn*-level
-    one -- the native linac/injector family's own facade, kept a sibling
-    type rather than forced into the ring-only shape.
-
-    ``particles_out``/``trajectory``/``energy_trajectory`` are plain numpy
-    (already off-device) -- a completed result, not a live tensor handle.
-    ``slice_summary`` (optional, ``None`` unless ``analysis.slices`` was
-    importable and asked for) is a flat ``{name: (n_slices,) array}`` dict,
-    the same keys ``analysis.slices.slice_stats`` returns."""
+    """Single-pass canonical beamline output and diagnostics."""
 
     particles_out: np.ndarray  # (N, 6), tracking.native canonical convention
     energy_eV_out: float
@@ -146,11 +108,9 @@ class BeamlineResult:
         }
 
     def compare_reference(self, reference: dict[str, float]) -> dict[str, float]:
-        """``{quantity: relative_difference}`` for every key ``reference``
-        shares with ``self.scalars()`` -- the everyday "did the run
-        reproduce the reference" one-liner (a ``.twi``/``.sig`` row, ASTRA
-        emit columns, ...). Absolute difference (not relative) when the
-        reference value is exactly zero."""
+        """``{quantity: relative_difference}`` for every key ``reference`` shares with
+        ``self.scalars()`` -- the everyday "did the run reproduce the reference" one-liner (a
+        ``.twi``/``.sig`` row, ASTRA emit columns,...)."""
         got = self.scalars()
         return {
             k: (got[k] - v) / v if v != 0.0 else got[k] - v
@@ -200,45 +160,7 @@ class BeamlineResult:
 
 
 class StreamingH5Writer:
-    """Incrementally-written companion to ``TrackingResult.save()``: opens
-    an HDF5 file immediately and appends one row per sample as it's
-    computed, instead of buffering an entire run in memory and writing
-    once at the end. Useful for a long run (e.g. tracking a full
-    synchrotron ramp, ``examples/diamond2booster``): partial results
-    survive a crash/interrupt, and progress is visible on disk (e.g. via
-    a separate ``TrackingResult.load()`` call) while the run is still
-    going.
-
-    No fixed column schema -- each ``append(**values)`` call creates any
-    not-yet-seen named dataset lazily, so the same writer works for
-    ``TrackingResult``'s own field names (``turn``, ``sigma_delta``, ...)
-    or extra ones a specific script wants (e.g. ``ex``/``ey``). To produce
-    a file ``TrackingResult.load()`` can read back, every ``append()``
-    call must include at least ``turn``/``sigma_delta``/``sigma_tau_s``,
-    and ``attrs`` must include ``code``/``n_particles``/``n_turns``/
-    ``current_A`` (``TrackingResult.load()``'s own required fields).
-
-    Use as a context manager, or call ``close()`` explicitly::
-
-        with StreamingH5Writer(path, attrs=dict(code="pystable", n_particles=n,
-                                                 n_turns=n_turns, current_A=current_A),
-                                metadata={"energy_MeV": "100"}) as writer:
-            for _ in range(n_turns // sample_every):
-                tracker.track(sample_every)
-                writer.append(turn=n, sigma_delta=tracker.sigma_delta, sigma_tau_s=tracker.sigma_tau_s)
-
-    ``flush_every``: ``flush()`` is what makes partial results durable
-    (survive a hard crash/power loss), but it's a real per-call cost --
-    default (every append) is the safest choice and fine for a coarse
-    ``sample_every`` (e.g. ``run_ramp_example.py``'s default 100), but for
-    a script sampling on a *fine* grid to match an
-    external reference (e.g. ``validate_ramp_vs_elegant.py``'s every-10-
-    turn elegant-WATCH alignment -- ~18,000 appends for a full ramp),
-    flushing every single append adds up. Pass e.g. ``flush_every=50`` to
-    trade a bounded amount of crash-survivability (lose at most that many
-    trailing rows) for throughput; ``close()``/``__exit__`` always does a
-    final flush regardless, so a clean run never loses anything either way.
-    """
+    """Append scalar diagnostic rows to an HDF5 file."""
 
     def __init__(
         self, path: str | Path, attrs: dict | None = None, metadata: dict | None = None, flush_every: int = 1,
@@ -277,34 +199,7 @@ class StreamingH5Writer:
 
 
 class CoordWriter:
-    """Periodic per-particle coordinate snapshots to HDF5 -- the pystable
-    analogue of elegant's ``watch, mode="coord"`` element
-    (``INTERVAL``/``SPARSE_INTERVAL``/``FLUSH_INTERVAL``), passed as
-    ``SingleBunchTracker.run(..., coord_writer=...)``. A separate concern
-    from ``StreamingH5Writer``'s aggregate per-sample statistics -- this
-    writes the raw (sparse-subsampled) particle coordinates themselves, on
-    its own ``interval``, independent of ``run()``'s own ``sample_every``.
-
-    ``interval``: save a snapshot every this many *tracked* turns
-    (elegant's ``INTERVAL``).
-    ``sparse_interval``: keep every this-many'th particle, by index into
-    the tracker's own ``tau``/``delta``/... tensors (elegant's
-    ``SPARSE_INTERVAL``) -- 1 keeps every particle.
-    ``flush_every``: flush to disk every this many *saved snapshots*
-    (elegant's ``FLUSH_INTERVAL``) -- same durability/throughput tradeoff
-    as ``StreamingH5Writer``'s own ``flush_every``.
-
-    Datasets: ``turn`` (1D) and ``particle_index`` (1D, the original
-    indices kept) plus ``tau``/``delta`` (and, once the tracker has
-    ``optics=``, ``x``/``xp``/``y``/``yp`` -- lazily added on first sight,
-    same discipline as ``StreamingH5Writer``'s own columns), each shape
-    ``(n_snapshots, n_sparse_particles)``.
-
-    Use as a context manager, or call ``close()`` explicitly::
-
-        with CoordWriter(path, n_particles, interval=1000, sparse_interval=1000) as cw:
-            tracker.run(n_turns, sample_every=100, coord_writer=cw)
-    """
+    """Write periodic coordinate snapshots from a compatible tracker state."""
 
     def __init__(
         self, path: str | Path, n_particles: int, interval: int,
@@ -332,9 +227,6 @@ class CoordWriter:
         idx = self._particle_index
         n_sparse = len(idx)
         names = ("tau", "delta", "x", "xp", "y", "yp") if tracker.optics is not None else ("tau", "delta")
-        # A LongTensor on the tracker's own device, not raw numpy-array
-        # indexing -- avoids depending on numpy-array-to-tensor fancy
-        # indexing working identically across torch versions/devices.
         idx_t = torch.as_tensor(idx, dtype=torch.long, device=tracker.tau.device)
         i = self._turn_ds.shape[0]
         self._turn_ds.resize((i + 1,))

@@ -27,7 +27,8 @@ or ASTRA executables and those programs are not package dependencies.
 - `src/slipstream/analysis/` — slice diagnostics, emittance, nonlinear ring
   analysis, and optimization helpers.
 - `src/slipstream/data/` — particle and tracking-result HDF5 schemas.
-- `docs/` — user-facing native tracking and file-format documentation.
+- `docs/` — physics explanations, usage guides and file-format documentation;
+  start with `docs/README.md` and the per-module index in `docs/modules/README.md`.
 - `tests/` — the package's regression and numerical tests.
 - `.github/workflows/` — CI, package building, and CodeQL workflows.
 
@@ -157,6 +158,10 @@ by the eager path.
 - Make the smallest change that proves the requested behavior. Do not add
   unrelated backend abstractions or copy functionality from a separate
   workbench into this package.
+- Keep comments and docstrings concise, retaining essential units, contracts
+  and local correctness cautions. Put longer explanations in the matching
+  `docs/modules/` page, with separate Physics and Usage sections. Keep active
+  work and development lessons out of API documentation.
 
 ## File-format boundaries
 

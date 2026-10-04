@@ -1,25 +1,5 @@
-"""Distribution generators -- the package could only track a bunch
-somebody else supplied (or the ring's own single matched-point Gaussian,
-``pystable.tracker.SingleBunchTracker.init_gaussian``); this adds
-Twiss-matched 6D Gaussian, waterbag, KV, and chirped-longitudinal
-generators for any beamline. See
-plans/DONE/E2_DISTRIBUTION_IO_PLAN.md.
-
-Columns are always ``(x, xp, y, yp, tau, delta)`` in the **slope**
-convention (``xp = dx/ds``) -- ``TransverseOptics``/``TwissTable``'s own
-convention (matching pystable/elegant WATCH), **not**
-``tracking.native``'s canonical ``px = Px/p0``. Convert with
-``tracking.native.elements._canonical_from_slopes(xp, yp, delta)`` before
-feeding a native-tracker (``LinacTracker``/``NativeTracker``) beamline.
-``tau`` is in **meters** (path-length-like, ``tracking.native``'s own
-convention -- see ``analysis.slices`` module docstring); for pystable's own
-seconds-valued ``tau_s``, divide by ``C_LIGHT``.
-
-Every generator takes an explicit ``seed`` (``None`` -> unseeded, a fresh
-``torch.Generator`` otherwise) -- reproduces exactly on the same device;
-CUDA and CPU RNG streams differ, so a seed reproduces only within one
-device class (torch's own guarantee, not this module's).
-"""
+"""Generates Twiss-matched Gaussian, KV surface and waterbag volume distributions, plus chirped
+longitudinal profiles. See docs/modules/tracking/distributions.md."""
 from __future__ import annotations
 
 import torch
@@ -41,20 +21,9 @@ def gaussian_matched_6d(
     dtype: torch.dtype = torch.float64,
     seed: int | None = None,
 ) -> torch.Tensor:
-    """6D Gaussian matched to explicit per-plane Twiss (``beta``/``alpha``/
-    ``eps``) + dispersion, plus an independent longitudinal
-    ``sigma_tau_m``/``sigma_delta`` (+ optional linear energy chirp
-    ``delta += chirp_per_m*tau``). ``(N, 6)``, module's own slope
-    convention -- see module docstring.
-
-    Each transverse plane is drawn from its own 2x2 sigma matrix
-    ``eps*[[beta, -alpha], [-alpha, gamma]]`` (``gamma=(1+alpha^2)/beta``)
-    via a Cholesky factor applied to iid unit Gaussians -- exact by
-    construction (see ``test_distributions.py``'s sigma-matrix check), not
-    a large-N-only approximation. Dispersion is added afterward as a
-    deterministic ``D*delta``/``Dp*delta`` shift, uncorrelated with the
-    betatron part (the standard "dispersive orbit + betatron oscillation"
-    decomposition)."""
+    """6D Gaussian matched to explicit per-plane Twiss (``beta``/``alpha``/ ``eps``) + dispersion, plus
+    an independent longitudinal ``sigma_tau_m``/``sigma_delta`` (+ optional linear energy chirp
+    ``delta += chirp_per_m*tau``)."""
     device = torch.device(device or "cpu")
     gen = _generator(device, seed)
 
@@ -101,19 +70,9 @@ def kv_4d(
     dtype: torch.dtype = torch.float64,
     seed: int | None = None,
 ) -> torch.Tensor:
-    """4D Kapchinskij-Vladimirskij distribution: uniform on the *surface*
-    of the real 4D phase-space ellipsoid (every particle at the same total
-    normalized amplitude) -- ASTRA's ``DISTRIBUTION=2``-comparable.
-    ``(N, 4)``, columns ``(x, xp, y, yp)``, slope convention.
-
-    Construction (Reiser, *Theory and Design of Charged Particle Beams*):
-    draw a uniform point ``n`` on the unit 3-sphere in R^4 (four iid unit
-    Gaussians, normalized), scale plane ``i``'s pair by ``sqrt(4*eps_i)``,
-    then un-normalize through each plane's own Floquet transform. No x-y
-    coupling (the same uniform-on-sphere ``n`` couples the planes only
-    through the projection, not through the physical optics) -- axisymmetric
-    optics blocks only, document this at the call site for a machine with
-    real x-y coupling."""
+    """4D Kapchinskij-Vladimirskij distribution: uniform on the *surface* of the real 4D phase-space
+    ellipsoid (every particle at the same total normalized amplitude) -- ASTRA's
+    ``DISTRIBUTION=2``-comparable."""
     device = torch.device(device or "cpu")
     gen = _generator(device, seed)
     g = torch.randn(4, n, generator=gen, dtype=dtype, device=device)
@@ -140,15 +99,7 @@ def waterbag_6d(
     dtype: torch.dtype = torch.float64,
     seed: int | None = None,
 ) -> torch.Tensor:
-    """4D waterbag transverse distribution (uniform *volume* fill of the
-    same phase-space ellipsoid ``kv_4d`` puts on the surface of -- scale
-    the KV construction's unit-sphere point by ``r = u**(1/4)`` for
-    ``u ~ Uniform(0,1)``, since a 4-ball's volume grows as ``r**4``) packed
-    with an independent Gaussian longitudinal ``(tau, delta)`` into ``(N,
-    6)``. No standard 6D waterbag exists (this package's own choice,
-    matching ``kv_4d``'s "4D + independent longitudinal Gaussian" Gotcha,
-    not a literature convention) -- ASTRA's uniform-ellipsoid
-    ``DISTRIBUTION=4``-comparable transversely."""
+    """Compute waterbag 6d; see the module documentation for details."""
     device = torch.device(device or "cpu")
     gen = _generator(device, seed)
     g = torch.randn(4, n, generator=gen, dtype=dtype, device=device)
@@ -178,24 +129,7 @@ def chirped_longitudinal(
     dtype: torch.dtype = torch.float64,
     seed: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(tau_m, delta)`` -- longitudinal profile generator for bunch-
-    compressor/CSR studies, taking correlation coefficients
-    (``chirp_per_m``/``quad_chirp_per_m2``), not a raw covariance, to keep
-    the call site at the physicist level.
-
-    ``profile="gaussian"`` (default): ``tau ~ N(0, sigma_tau_m)``.
-    ``profile="flattop"``: a uniform core of half-width
-    ``flattop_half_width_m`` (default ``sigma_tau_m``) plus independent
-    Gaussian smoothing noise (``0.3*sigma_tau_m`` rms) added on top --
-    ``ponytail:`` a real flat-top-with-erf-edges profile needs solving for
-    the edge shape or an actual convolution; this composition (uniform +
-    Gaussian noise) gives a flat core with softened edges at a fraction of
-    the code, good enough for "not a pure Gaussian" bunch-compressor input.
-    Add a real erf-edge solver if a study needs the edge shape itself to be
-    accurate, not just present.
-
-    ``delta = chirp_per_m*tau + quad_chirp_per_m2*tau**2 +
-    Gaussian(sigma_delta)``."""
+    """Compute chirped longitudinal; see the module documentation for details."""
     device = torch.device(device or "cpu")
     gen = _generator(device, seed)
     if profile == "gaussian":

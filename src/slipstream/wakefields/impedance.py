@@ -1,5 +1,5 @@
-"""Frequency-domain longitudinal impedance Z_parallel(f), machine-agnostic
-result container for whatever computed it (e.g. ``wakefields.iw2d``)."""
+"""Stores frequency-domain longitudinal impedance as real and imaginary ohms on a shared Hz grid. See
+docs/modules/wakefields/impedance.md."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,16 +31,8 @@ class Impedance:
     def from_sdds_file(
         cls, path: str | Path, freq_col: str = "Freq", re_col: str = "RealZ", im_col: str = "ImagZ",
     ) -> "Impedance":
-        """Load Z(f) from a column-per-part ASCII SDDS file -- elegant's own
-        ZLONGIT/ZTRANSVERSE impedance-table input format. ``re_col``/
-        ``im_col`` pick which columns hold the real/imaginary parts:
-        ZLONGIT splits Z_parallel into two separate single-column files
-        (call once per file with the same ``re_col``/``im_col`` pair --
-        whichever name is missing from a given file reads back as zero, so
-        the two calls' results can be combined directly); ZTRANSVERSE keeps
-        all four of RealX/ImagX/RealY/ImagY in one file (call once per
-        plane with the matching pair).
-        """
+        """Load Z(f) from a column-per-part ASCII SDDS file -- elegant's own ZLONGIT/ZTRANSVERSE
+        impedance-table input format."""
         from ..sdds_io import sdds_object
 
         with sdds_object() as (_sdds, x):

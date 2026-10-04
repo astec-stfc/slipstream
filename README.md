@@ -83,8 +83,8 @@ python -m slipstream.beamline_cli examples/beamline/study.yaml -o result.h5
 ```
 
 See [beamline studies](docs/beamline_studies.md) for generated, HDF5, SDDS,
-and native ASTRA sources, and the [essential-plan assessment](docs/essential_plans.md)
-for implemented milestones and remaining physics work.
+and native ASTRA sources. The [documentation index](docs/README.md) links
+physics explanations, usage guides and the reference for every module.
 
 For frozen-energy ring maps, normal modes, loss locations, and spectral
 analysis, see [`docs/nonlinear_dynamics.md`](docs/nonlinear_dynamics.md).

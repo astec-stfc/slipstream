@@ -1,4 +1,5 @@
-"""Run a native beamline study: ``python -m slipstream.beamline_cli study.yaml``."""
+"""Uses `BeamlineStudy` source conversion and single-pass transport; CLI orchestration adds no separate
+physics. See docs/modules/beamline_cli.md."""
 from __future__ import annotations
 
 import argparse

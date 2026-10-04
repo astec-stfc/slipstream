@@ -1,43 +1,5 @@
-"""Frozen-energy one-turn ring map for nonlinear-dynamics studies (DA, FMA,
-detuning, gradient-based sextupole optimisation) -- see
-plans/RING_NONLINEAR_DYNAMICS_PLAN.md.
-
-Same per-element transport as ``NativeTracker`` (``tracker._build_params``/
-``tracker._apply_elements``, every element exactly integrated every turn,
-so every K2 kick is always applied -- there is no linear-matrix fast path to
-fall into), but without RF, radiation damping, quantum excitation or wakes:
-``delta`` is a constant of motion, the standard setting for DA/FMA
-cross-checks against elegant. For RF-on 6D studies use ``NativeTracker``
-itself (it reuses ``pystable``'s longitudinal physics).
-
-**Slicing defaults are finer than ``NativeTracker``'s** (elegant's own
-defaults, 1/4 slices at order 4): on ``br14_simple.lte`` those leave the
-tunes 0.07/0.15 away from the converged 0.41/0.38 -- in elegant's own
-tracking too (0.350/0.244), the two codes' unconverged artifacts even
-differing from each other. Order 6 with 2/8 slices is within 5e-5 of
-converged (1e-4 relative on chromaticity), and matches elegant's
-``twiss_output`` chromaticity to 5 digits (tests/test_ring_nonlinear.py).
-Always converge slicing before trusting a nonlinear observable.
-
-**Bends use the exact-dipole splitting by default** (``exact_dipole=True``,
-see ``elements._exact_dipole_drift``): same Hamiltonian as elegant's
-splitting, converges to the same map, but float32-robust -- float32 DA on
-br14 is within 1% of elegant with it, 8% off without. Pass
-``exact_dipole=False`` to integrate elegant's own map (live-elegant
-comparisons at equal slicing).
-
-Two things this adds on top of ``NativeTracker``'s transport:
-
-- **Losses** (``track``): a per-turn aperture check at the ring start
-  (``|x| > aperture[0]``, ``|y| > aperture[1]`` or any non-finite
-  coordinate). Lost particles are frozen at zero and keep their slot in the
-  batch -- the batch is never split -- and their loss turn is recorded.
-- **Tensor strengths** (``with_strengths``): any element family's ``K1``/
-  ``K2`` can be replaced by a tensor. A 0-d ``requires_grad`` tensor makes
-  the ring differentiable in that strength (autograd knob); a tensor of
-  shape ``(M, 1)`` with particles shaped ``(M, N, 6)`` tracks ``M``
-  different machines (an error ensemble) in one batch.
-"""
+"""Provides frozen-energy one-turn nonlinear transport with fixed delta and no RF, radiation
+damping/excitation or wakes. See docs/modules/tracking/native/ring.md."""
 from __future__ import annotations
 
 from typing import NamedTuple
@@ -84,16 +46,8 @@ class RingMap:
         device: str | torch.device | None = None, dtype: torch.dtype | None = None,
         compile: bool = False, exact_dipole: bool = True, double_single: bool | str = False,
     ):
-        """``double_single=True``: every coordinate is a float32 ``hi + lo``
-        pair (``double_single.py``, ~44-bit mantissa) -- float64-grade FMA
-        on a consumer GPU. Needs ``exact_dipole=True``, no misalignments,
-        Python-float (or 0-d tensor) strengths; no autograd, ``tau`` not
-        tracked. Optics (``analysis.nonlinear.linear_optics``) are then
-        computed on ``float64_reference()``. ``double_single="hybrid"``:
-        only the linear, constant-coefficient part of each update is
-        double-single; small nonlinear remainders are plain float32
-        (``double_single._hy_*``) -- cheaper, ~1e-12..1e-10 per element
-        instead of ~1e-15."""
+        """``double_single=True``: every coordinate is a float32 ``hi + lo`` pair
+        (``double_single.py``, ~44-bit mantissa) -- float64-grade FMA on a consumer GPU."""
         if double_single not in (False, True, "full", "hybrid"):
             raise ValueError(f"double_single must be False, True/'full' or 'hybrid', got {double_single!r}")
         ds_hybrid = double_single == "hybrid"
@@ -122,11 +76,6 @@ class RingMap:
         )
         self._energy_t = torch.tensor(energy_eV, dtype=self.dtype, device=self.device)
         self._mc2_t = torch.tensor(mc2_eV, dtype=self.dtype, device=self.device)
-        # Per-element compile, not whole-turn: an unrolled ~5000-stage turn
-        # graph was still compiling after 15 min / 10 GB (same failure as
-        # LinacTracker's whole-pass compile). One graph per distinct element
-        # config fuses each element into a few kernels -- further reduced to
-        # one graph per element *family* below (K1/K2/length regionalization).
         if double_single and any(p.dx or p.dy or p.tilt for p in self.params):
             raise NotImplementedError("double_single: misalignments not supported")
         base = _apply_one_element
@@ -134,26 +83,9 @@ class RingMap:
         self._ds_slice, self._ds_edge = slice_base, ds_edge
         if compile:
             torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, len(self.params) + 8)
-            # Triton contracts a*b+c into FMA by default, which breaks the
-            # Dekker split inside double-single products (measured: 1e-6
-            # instead of 1e-13); emulate_precision_casts turns FP fusion off
-            # for these kernels only.
             opts = {"emulate_precision_casts": True} if double_single else None
             self._element = torch.compile(base, dynamic=False)
             if not double_single:
-                # Regional compilation -- promote the numeric fields that
-                # vary per *instance* of a family (K1/K2, a drift's length)
-                # to 0-d tensors, so dynamo guards on shape/dtype/device
-                # instead of value and every same-family element reuses one
-                # graph (27 -> 7 graphs measured on br14_simple; full
-                # rationale + numbers in docs/tracking_native.md's
-                # "Compilation-time discipline"). Left as plain floats
-                # wherever a *structural* check downstream reads the
-                # original value -- K1/K2 exactly zero (keeps
-                # track_element's `isinstance`-gated fast paths, elements.py)
-                # and length for angle!=0 or non-positive length (the `h =
-                # angle/length` divide and the `length <= 0.0` early-out
-                # must resolve in plain Python, never on a live tensor).
                 def _regionalize(p):
                     if (p.k1 or p.k2) and not isinstance(p.k1, torch.Tensor) and not isinstance(p.k2, torch.Tensor):
                         p = p._replace(
@@ -193,18 +125,8 @@ class RingMap:
         dx: dict[str, torch.Tensor] | None = None, dy: dict[str, torch.Tensor] | None = None,
         tilt: dict[str, torch.Tensor] | None = None,
     ) -> "RingMap":
-        """Copy of this map with every occurrence of each named element
-        family (case-insensitive) using the given tensor ``K1``/``K2``/
-        ``kick_x``/``kick_y``/``dx``/``dy``/``tilt``. The per-element
-        reference-orbit offset stays at its nominal value (a
-        discretization correction; its strength dependence is ~1e-12,
-        and it is deliberately computed at the design axis regardless of
-        misalignment -- see ``tracker._ElementParams``'s own docstring).
-        ``kick_x``/``kick_y`` only apply to ``kind="hkick"``/``"vkick"``
-        elements respectively -- naming an H-plane corrector in
-        ``kick_y`` (or vice versa) is a no-op, not an error (mirrors
-        ``k1``/``k2`` naming a non-quad/sext family). ``dx``/``dy``/
-        ``tilt`` apply to any element (LOCO's own alignment fit, Phase 6)."""
+        """Copy of this map with every occurrence of each named element family (case-insensitive) using
+        the given tensor ``K1``/``K2``/ ``kick_x``/``kick_y``/``dx``/``dy``/``tilt``."""
         k1 = {n.upper(): v for n, v in (k1 or {}).items()}
         k2 = {n.upper(): v for n, v in (k2 or {}).items()}
         kick_x = {n.upper(): v for n, v in (kick_x or {}).items()}
@@ -273,13 +195,7 @@ class RingMap:
         dy: dict[str, torch.Tensor] | None = None,
         tilt: dict[str, torch.Tensor] | None = None,
     ) -> "RingMap":
-        """Copy with absolute family offsets (metres) and rolls (radians).
-
-        Values broadcast over particle batch dimensions: ``(M, 1)`` errors
-        with ``(M, N, 6)`` states represent M machines. Tensor values retain
-        autograd. Alignment ensembles use the PyTorch path. Launch around
-        each machine's own closed orbit when estimating its dynamic aperture.
-        """
+        """Copy with absolute family offsets (metres) and rolls (radians)."""
         if self.double_single:
             raise NotImplementedError("double_single: misalignments not supported")
         fields = [{n.upper(): v for n, v in (d or {}).items()} for d in (dx, dy, tilt)]
@@ -295,10 +211,7 @@ class RingMap:
         return new
 
     def turn(self, state: torch.Tensor, eager: bool = False) -> torch.Tensor:
-        """One turn, no loss check -- differentiable. ``eager=True``
-        bypasses ``compile`` (Jacobians via ``vmap`` go this way). A
-        ``double_single`` map takes and returns the ``(..., 12)`` hi/lo
-        state."""
+        """One turn, no loss check -- differentiable."""
         if self.double_single:
             for p in self.params:
                 state = track_element_ds(
@@ -315,26 +228,7 @@ class RingMap:
         return state
 
     def turn_with_taps(self, state: torch.Tensor, tap_indices: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Eager per-element loop (same ``_apply_one_element`` as
-        ``turn(eager=True)``, always -- no ``compile``/Warp/CUDA-graph/
-        ``double_single`` path) that also returns the state at each of
-        ``tap_indices`` (0-based positions into ``self.params``/``self.specs``,
-        resolved by name in the LOCO layer -- see ``analysis.loco.
-        orbit_response_matrix``), stacked in the given order (shape
-        ``(..., n_taps, 6)``).
-
-        A tap is the state **exiting** that element (after its own
-        transport) -- for a BPM (a finite-length ``MONI``, parsed as a
-        plain ``kind="drift"`` spec, see plans/LOCO_PLAN.md's Phase 0
-        audit) this is numerically identical to tapping the entrance of
-        whatever follows, since a ``MONI`` transports exactly like a
-        drift; exit is simplest and matches elegant's own orbit/response
-        convention of reporting a device's reading at its own ``s``.
-
-        Duplicate indices are allowed (unused here, but harmless); every
-        entry of ``tap_indices`` must be a valid position. ``self.turn()``
-        pays no overhead from this method's existence -- it is a wholly
-        separate loop."""
+        """Compute turn with taps; see the module documentation for details."""
         if self.double_single:
             raise NotImplementedError("turn_with_taps: double_single not supported")
         captured: dict[int, torch.Tensor] = {}
@@ -363,13 +257,7 @@ class RingMap:
         self, state: torch.Tensor, n_turns: int, aperture: tuple[float, float] = (0.05, 0.05),
         element_apertures: dict[str, tuple[float, float]] | None = None, record_every: int = 0,
     ) -> "RingLossMap":
-        """Check losses at every element exit; first loss location is an element index.
-
-        Apertures are rectangular lab-frame half widths in metres. Named overrides
-        apply to every occurrence. This path uses PyTorch element transport, with
-        fixed particle slots; recording decimates observations at the ring start.
-        Double-single transport is currently unsupported on this optional path.
-        """
+        """Check losses at every element exit; first loss location is an element index."""
         if self.double_single:
             raise NotImplementedError("per-element loss maps require ordinary PyTorch transport")
         if n_turns < 0 or record_every < 0:
@@ -405,26 +293,10 @@ class RingMap:
         self, state: torch.Tensor, n_turns: int, aperture: tuple[float, float] = (0.05, 0.05),
         record_every: int = 0, checkpoint: bool = False,
     ) -> RingTrackResult:
-        """``state`` ``(..., 6)``. ``record_every=k>0`` stores ``(x, px, y,
-        py)`` after turns ``k-1, 2k-1, ...`` (memory: ``n_turns/k * N * 4``
-        numbers -- decimate or track a subset for 1e6-particle runs).
-        ``checkpoint=True`` recomputes each turn in the backward pass
-        (``torch.utils.checkpoint``) -- memory O(1 turn) for autograd
-        through many turns.
-
-        On CUDA, when nothing needs a gradient, one turn (every element
-        plus the loss bookkeeping) is captured once into a CUDA graph and
-        replayed -- the per-turn cost is then pure GPU time, no Python/
-        dynamo-guard overhead per element.
-
-        ``double_single``: ``state`` is converted to hi/lo from float64;
-        ``tbt`` and the returned state are float64 (``hi + lo``)."""
+        """``state`` ``(..., 6)``."""
         batch_shape = state.shape[:-1]
         if self.double_single:
             ds = DS.of(state.to(device=self.device, dtype=torch.float64))
-            # Flat batch marked dynamic: the compiled slices otherwise
-            # specialise on particle count, and one double-single recompile
-            # of the whole ring costs ~18 min.
             state = torch.cat([ds.hi, ds.lo], dim=-1).reshape(-1, 12)
             if state.shape[0] > 1:  # strict mark: maybe_mark_dynamic is ignored under dynamic=False
                 torch._dynamo.mark_dynamic(state, 0)
@@ -438,10 +310,6 @@ class RingMap:
             state = turn_fn(state)
             bad = (~torch.isfinite(state).all(-1)) | (state[..., 0].abs() > ax) | (state[..., 2].abs() > ay)
             loss_turn = torch.where(bad & (loss_turn < 0), t_dev, loss_turn)
-            # ponytail: loss checked once per turn at s=0, not per element --
-            # a particle past the DA diverges within a few turns anyway, so
-            # the loss *turn* can be late by O(1) turns; add a per-element
-            # check if loss maps (where, not when) are ever needed.
             state = torch.where((loss_turn >= 0).unsqueeze(-1), torch.zeros_like(state), state)
             return state, loss_turn
 

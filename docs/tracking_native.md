@@ -13,6 +13,10 @@ length-like longitudinal coordinate and `delta` is the relative momentum
 deviation. The injector works in Cartesian `(x, y, z, ux, uy, uz)` state
 internally and returns its documented endpoint/trajectory dictionaries.
 
+See the [native physics reference](native_reference.md) for normalization,
+transport and RF conventions, and the [module reference](modules/README.md)
+for individual model limits and API contracts.
+
 ## Choosing a backend
 
 The default install contains the PyTorch implementation and runs on CPU or

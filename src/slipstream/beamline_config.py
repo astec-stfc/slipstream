@@ -1,4 +1,5 @@
-"""Small, strict YAML run configuration for the native beamline facade."""
+"""Normalizes total energy and rest mass in eV, bunch charge in coulombs and canonical native
+coordinates. See docs/modules/beamline_config.md."""
 from __future__ import annotations
 
 import math

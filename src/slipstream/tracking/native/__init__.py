@@ -1,3 +1,5 @@
+"""Exports ring, linac and injector transport and elegant-lattice import. See
+docs/modules/tracking/native/__init__.md."""
 from .elements import track_element
 from .injector import Injector
 from .lattice_import import ElementSpec, parse_elegant_lattice

@@ -1,11 +1,5 @@
-"""Real per-element Twiss functions for the native (zero-external hybrid backend) tracker --
-feeds ``ibs.element_averaged_growth_rates`` directly from
-``NativeTracker``'s own per-element ``(length, angle, k1, k2)`` list and
-exact transport, generalizing ``tracking.external hybrid backend.optics.periodic_twiss``'s
-closed-form method (``beta=M12/sin(mu)``, periodic dispersion from
-``(I-R)^-1 @ r``) to a full per-element array instead of one matched point.
-See docs/tracking_native.md.
-"""
+"""Linearizes actual native per-element transport using autograd, solves periodic per-plane Twiss and
+dispersion and propagates element-local values. See docs/modules/tracking/native/optics.md."""
 from __future__ import annotations
 
 import functools
@@ -26,10 +20,7 @@ def _element_R(
     hgap: float = 0.0, fint: float = 0.5, edge_order: int = 1,
     edge1_effects: int = 1, edge2_effects: int = 1,
 ) -> torch.Tensor:
-    """6x6 linear transfer matrix for one element, via autograd Jacobian of
-    ``elements.track_element`` at the reference orbit (``state6=0``) --
-    ``lru_cache``d on the plain-float params since a real ring reuses the
-    same few magnet *types* many times."""
+    """Compute element R; see the module documentation for details."""
     dtype = torch.float64
 
     def f(state6: torch.Tensor) -> torch.Tensor:
@@ -45,10 +36,7 @@ def _element_R(
 
 
 def _propagate_twiss(beta0: float, alpha0: float, R: torch.Tensor) -> tuple[float, float]:
-    """Standard sigma-matrix Twiss propagation, ``sigma1 = R @ sigma0 @
-    R.T`` for ``sigma = [[beta, -alpha], [-alpha, gamma]]``, expanded to
-    the usual closed-form beta/alpha update -- ``R`` is one plane's 2x2
-    transfer-matrix block."""
+    """Compute propagate twiss; see the module documentation for details."""
     gamma0 = (1.0 + alpha0 * alpha0) / beta0
     R11, R12, R21, R22 = (R[0, 0].item(), R[0, 1].item(), R[1, 0].item(), R[1, 1].item())
     beta1 = R11 * R11 * beta0 - 2.0 * R11 * R12 * alpha0 + R12 * R12 * gamma0
@@ -57,9 +45,7 @@ def _propagate_twiss(beta0: float, alpha0: float, R: torch.Tensor) -> tuple[floa
 
 
 def _periodic_plane(Rblock: torch.Tensor, rcol: torch.Tensor) -> tuple[float, float, torch.Tensor, float]:
-    """Periodic (matched) beta/alpha/dispersion/tune for one plane's 2x2
-    transfer-matrix block and delta-column coupling -- same formulas as
-    ``tracking.external hybrid backend.optics.periodic_twiss``'s own ``_plane`` helper."""
+    """Compute periodic plane; see the module documentation for details."""
     cos_mu = ((Rblock[0, 0] + Rblock[1, 1]) / 2).clamp(-1, 1)
     mu = torch.arccos(cos_mu)
     sin_mu = torch.sin(mu)
@@ -74,28 +60,7 @@ def periodic_twiss_table(
     specs: list[ElementSpec], energy_eV: float, mc2_eV: float, n_kicks: int = 16, n_kicks_bend: int = 64,
     integration_order: int = 4,
 ) -> tuple[TwissTable, float, float]:
-    """Real per-element ``TwissTable`` (beta(s)/alpha(s)/dispersion(s) at
-    every element's *entrance*, ``s_m[i]`` the cumulative path length up to
-    that point) from the periodic solution of the ring's own linear
-    one-turn matrix -- feed this directly to
-    ``ibs.element_averaged_growth_rates`` for a genuinely per-element IBS
-    calculation using this tracker's own real lattice (no MAD-X round trip
-    needed). Returns ``(table, Qx_frac, Qy_frac)`` -- the fractional tunes
-    aren't part of ``TwissTable`` itself (a MAD-X-derived one has no single
-    natural "one-turn matrix" reference point the same way), but are cheap
-    byproducts of the same one-turn-matrix computation, so returned
-    alongside rather than silently discarded.
-
-    ``n_kicks``/``n_kicks_bend`` default to 16/64 here -- **deliberately
-    much higher than ``NativeTracker``'s own per-turn tracking defaults of
-    1/4**: a per-element linearization error that's negligible for per-
-    particle tracking compounds multiplicatively across a 290-fold matrix
-    product for tune/beta extraction, and ``beta=M12/sin(mu)`` is highly
-    sensitive to the resulting phase error. This is a one-time,
-    ``lru_cache``d cost with no per-turn tracking-speed impact, so there's
-    no reason to reuse the tracker's cheaper default here. See
-    docs/tracking_native.md for the convergence numbers.
-    """
+    """Compute periodic twiss table; see the module documentation for details."""
     Rs = [
         _element_R(
             s.length, s.angle, s.k1, s.k2, s.e1, s.e2, energy_eV, mc2_eV,

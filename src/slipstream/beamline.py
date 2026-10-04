@@ -1,4 +1,5 @@
-"""Native linac/injector study facade and portable YAML run orchestration."""
+"""Composes single-pass canonical linac tracking with bunch generation, slice diagnostics and optional
+injector transport. See docs/modules/beamline.md."""
 from __future__ import annotations
 
 import math
@@ -14,16 +15,7 @@ from .tracking.native.linac import LinacTracker, resolve_wakes
 
 
 class BeamlineStudy:
-    """One ``LinacTracker`` (created once, tracked many times -- the same
-    amortization pattern ``LinacTracker`` itself documents), plus the
-    everyday conveniences: slice analysis after a pass (via
-    ``analysis.slices``, imported lazily -- absent/``None`` in the result
-    if that module can't be imported), a Twiss-matched bunch generator, and
-    optional injector composition.
-
-    ``**tracker_kwargs`` forwards straight to ``LinacTracker`` (``n_kicks``,
-    ``errors``, ``fiducial``, ``dipole_collective_subcycle``, ...) -- this
-    class adds no new tracking knobs of its own."""
+    """Describe BeamlineStudy; see the module documentation for details."""
 
     def __init__(
         self, specs: list[ElementSpec], energy_eV: float,
@@ -66,12 +58,7 @@ class BeamlineStudy:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "BeamlineStudy":
-        """Build one reusable tracker from a strict YAML run configuration.
-
-        Paths are relative to the YAML file; lattice wake paths default to
-        the lattice directory. See ``docs/beamline_studies.md`` for the schema.
-        Particle sources are loaded when :meth:`run` is called.
-        """
+        """Build one reusable tracker from a strict YAML run configuration."""
         from .beamline_config import read_config
 
         config = read_config(path)
@@ -84,13 +71,7 @@ class BeamlineStudy:
         return study
 
     def run(self, output_path: str | Path | None = None) -> BeamlineResult:
-        """Execute the configured source and beamline, optionally saving HDF5.
-
-        Generated sources default to seed 0 and reproduce on repeated runs
-        on the same device. ``output_path`` overrides ``run.output``; an
-        explicit override is relative to the caller's working directory.
-        Injector/HDF5 sources supply their own reference energy and charge.
-        """
+        """Execute the configured source and beamline, optionally saving HDF5."""
         if self._run_config is None:
             raise ValueError("run() requires a study created with BeamlineStudy.from_yaml()")
         cfg = self._run_config
@@ -152,16 +133,8 @@ class BeamlineStudy:
         chirp_per_m: float = 0.0, seed: int | None = None,
     ) -> torch.Tensor:
         """A Twiss-matched bunch at this beamline's own entrance
-        (``tracking.distributions.gaussian_matched_6d``, converted to the
-        native canonical convention), ready to pass straight into
-        ``track()``.
-
-        ``ponytail:`` matching at an arbitrary *downstream* point (via
-        ``linac_twiss.linac_twiss_table``, which needs the exact same
-        beta/alpha/D inputs as this function -- a linac has no periodic
-        solve to shortcut that) isn't built here; propagate the desired
-        point's own Twiss with ``linac_twiss_table`` yourself and pass
-        those values in as ``beta_x0``/... if a later point is needed."""
+        (``tracking.distributions.gaussian_matched_6d``, converted to the native canonical
+        convention), ready to pass straight into ``track()``."""
         from .tracking.distributions import gaussian_matched_6d
         from .tracking.native.elements import _canonical_from_slopes
 
@@ -225,18 +198,7 @@ class BeamlineStudy:
         n_particles: int | None = None, injector_kwargs: dict | None = None,
         **track_kwargs,
     ) -> BeamlineResult:
-        """Run an ``Injector`` (an instance, or an ASTRA deck path built
-        via ``Injector.from_astra``) to its exit distribution, ballistically
-        converted to this tracker's own canonical convention
-        (``injector_exit_to_canonical6``), then straight into ``track()``.
-        The injector's own summed exit charge overrides this study's
-        ``bunch_charge_C`` for this call (an injector run has a real,
-        computed charge; a beamline built standalone usually doesn't), and
-        its own exit energy overrides ``self.energy_eV`` as the
-        ``LinacTracker``'s reference energy -- ``track()`` must resume from
-        where the injector actually left off, not this study's own
-        construction-time value. Updates the reference-energy tensor in
-        place and refreshes energy-dependent magnet reference offsets."""
+        """Compute track with injector; see the module documentation for details."""
         inj = injector_or_deck if isinstance(injector_or_deck, Injector) else Injector.from_astra(injector_or_deck)
         if inj.mc2_eV != self.mc2_eV:
             raise ValueError("Injector mc2_eV must match the beamline study")
