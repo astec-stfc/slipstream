@@ -31,15 +31,26 @@ import torch
 from slipstream.analysis.loco import apply_calibration, orbit_response_matrix
 from slipstream.analysis.nonlinear import closed_orbit
 from slipstream.analysis.nonlinear_opt import unique_names
-from slipstream.tracking.elegant import elegant_env, find_elegant_exe, read_coordinate_watch_pages, read_sdds_table, write_coordinate_bunch
 from slipstream.tracking.native import parse_elegant_lattice
 from slipstream.tracking.native import ring_warp
 from slipstream.tracking.native.elements import _corrector_kick
 from slipstream.tracking.native.ring import RingMap
 from slipstream.tracking.native.tracker import _apply_one_element
 
-ELEGANT_EXE = find_elegant_exe()
-needs_elegant = pytest.mark.skipif(ELEGANT_EXE is None, reason="no elegant binary found")
+try:
+    from slipstream.tracking.elegant import (
+        elegant_env, find_elegant_exe, read_coordinate_watch_pages,
+        read_sdds_table, write_coordinate_bunch,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "slipstream.tracking.elegant":
+        raise
+    ELEGANT_EXE = None
+    _elegant_skip_reason = "optional elegant development helpers unavailable"
+else:
+    ELEGANT_EXE = find_elegant_exe()
+    _elegant_skip_reason = "no elegant binary found"
+needs_elegant = pytest.mark.skipif(ELEGANT_EXE is None, reason=_elegant_skip_reason)
 E0 = 1e9
 MC2 = 510998.95
 
@@ -98,11 +109,8 @@ def test_parser_keeps_hkick_vkick_moni_with_occurrence(lte_path):
     assert all(s.length == pytest.approx(0.05) for s in bpms)
 
 
-def test_zero_length_kick_is_not_dropped():
-    import tempfile
-    from pathlib import Path
-
-    p = Path(tempfile.mktemp(suffix=".lte"))
+def test_zero_length_kick_is_not_dropped(tmp_path):
+    p = tmp_path / "zero_length_kick.lte"
     p.write_text("HCM: HKICK, L=0, KICK=0.001;\nRING: LINE=(HCM)\n")
     specs = parse_elegant_lattice(p, "RING")
     assert len(specs) == 1 and specs[0].kind == "hkick" and specs[0].length == 0.0
@@ -635,7 +643,6 @@ def test_real_booster_orm_matches_live_elegant(tmp_path):
     J_native = orbit_response_matrix(ring, correctors, bpms).detach().numpy()
 
     p_central_mev = E0_100MEV_eV / 1e6
-    p_central = ((E0_100MEV_eV / MC2) ** 2 - 1) ** 0.5
     lte_text = BR14_BST_LTE.read_text()
     slicing = (
         f"&alter_elements name = *, type = KQUAD, item = N_KICKS, value = {n_kicks} &end\n"

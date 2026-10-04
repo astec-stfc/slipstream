@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 
 from slipstream import NativeTracker, parse_elegant_lattice
 import slipstream
@@ -11,6 +13,25 @@ def test_native_public_imports_are_available():
                  "coupled_optics", "coupled_signals"):
         assert name in slipstream.__all__
         assert getattr(slipstream, name) is not None
+
+
+def test_native_imports_do_not_require_pystable():
+    # Use a fresh interpreter so cached imports cannot hide a stale dependency,
+    # even in a checkout where a historical development backend is present.
+    code = """
+import importlib.abc
+import sys
+
+class NoPystable(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == 'slipstream.tracking.pystable' or fullname.startswith('slipstream.tracking.pystable.'):
+            raise ModuleNotFoundError('native imports must not require pystable')
+
+sys.meta_path.insert(0, NoPystable())
+from slipstream import Injector, LinacTracker, NativeTracker, RingMap, ring_optics_table
+from slipstream.analysis.loco import apply_calibration, orbit_response_matrix
+"""
+    subprocess.run([sys.executable, '-c', code], check=True, capture_output=True, text=True)
 
 
 def test_elegant_lattice_reader_is_local(tmp_path: Path):

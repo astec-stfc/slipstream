@@ -68,8 +68,11 @@ def set_compile_cache_env(root: Path | None = None) -> None:
     already the torch 2.14 default, set explicitly so a future config
     change can't silently disable it unnoticed), all via ``os.environ.
     setdefault`` so an explicit value the caller already set always wins.
-    No other Inductor config is touched."""
+    Creates the effective cache directories, including explicit overrides;
+    unused default directories are left alone. No other Inductor config is touched."""
     inductor_dir, triton_dir = cache_dirs(root)
+    inductor_dir = Path(os.environ.get("TORCHINDUCTOR_CACHE_DIR", str(inductor_dir)))
+    triton_dir = Path(os.environ.get("TRITON_CACHE_DIR", str(triton_dir)))
     inductor_dir.mkdir(parents=True, exist_ok=True)
     triton_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(inductor_dir))

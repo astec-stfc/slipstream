@@ -61,6 +61,18 @@ finite-grid survival measurement, and diffusion depends on record length.
 Use float64 for small tune changes and converge integration slices, grid
 resolution and turn count before interpreting either result.
 
+`slipstream.analysis.loco.orbit_response_matrix(ring, corrector_names,
+bpm_names)` returns a native closed-orbit response matrix with shape
+`(n_bpm, 2, n_corrector)`, in metres per radian. Correctors are evaluated
+at zero kick; BPM readings are taken at the named element exits. Use unique
+element names for individual devices. `create_graph=True` retains strength
+and alignment derivatives for fitting. `apply_calibration` applies BPM
+gains/rolls and corrector gains; fix a gain scale or supply a prior to remove
+the shared BPM/corrector scale ambiguity. These functions use native transport
+and do not require an elegant backend. Optional live-elegant comparison tests
+skip when development helpers or the executable are unavailable; native LOCO
+regressions still run.
+
 See [multipoles and coupled modes](ring_multipoles.md),
 [nonlinear optimisation](nonlinear_optimisation.md), and
 [RF-on analysis](ring6d.md) for extended APIs. CUDA and optional Warp

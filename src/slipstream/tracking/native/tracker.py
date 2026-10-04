@@ -34,7 +34,6 @@ from ...lattice.optics import TransverseOptics
 from ...lattice.ramp import RampProfile, scaled_lattice, scaled_optics
 from ...wakefields.shortrange import ShortRangeWake
 from ...wakefields.transverse import TransverseWake
-from ..pystable.tracker import SingleBunchTracker
 from .ring_physics import (
     damping_excitation,
     ibs_effective_taus,

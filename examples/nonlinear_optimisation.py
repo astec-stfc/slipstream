@@ -115,7 +115,7 @@ def main():
         print(json.dumps({'reference_files': reference_files}, indent=2))
         return
     target = nl.linear_optics(base)
-    theta = torch.tensor([MLS_K1[0], 20., -20., 0.], dtype=torch.float64)
+    theta = torch.tensor([MLS_K1[0], 20., -20., 0.], dtype=base.dtype, device=base.device)
     bounds = [(MLS_K1[0] - .005, MLS_K1[0] + .005), (-150, 150), (-150, 150), (-150, 150)]
     state = nl.launch(target, torch.tensor([0.00005, 0.0001], dtype=base.dtype),
                       torch.tensor([0.00003, 0.00005], dtype=base.dtype))
