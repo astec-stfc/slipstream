@@ -1,9 +1,5 @@
-"""Generic YAML round-trip for flat dataclasses (lattices, resonators, ...).
-
-Not meant for dataclasses carrying large numpy arrays or non-init state
-(e.g. ``ShortRangeWake``, ``LongRangeWake``) -- those have their own
-tabular/SDDS I/O instead, see wakefields/shortrange.py.
-"""
+"""Serialization preserves scalar machine parameters; it introduces no transport or coordinate
+conversion. See docs/modules/serialization.md."""
 from __future__ import annotations
 
 import dataclasses

@@ -1,0 +1,5 @@
+! Synthetic demonstration lattice; no machine-specific parameters.
+D: DRIFT, L=0.2
+Q: KQUAD, L=0.1, K1=0.8
+R: RFCA, L=0.1, VOLT=2000000, PHASE=90, FREQ=3000000000
+DEMO: LINE=(D,Q,R,D)

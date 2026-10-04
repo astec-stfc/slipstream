@@ -1,17 +1,5 @@
-"""Short-range (intrabunch) wake: derive a pseudo-Green-function wake
-potential W(t) [V/C] from a frequency-domain impedance, and consume it in
-tracking via per-turn bin+convolve (Sec. II D of He & Bai, PRAB 24, 104401
-(2021)). Feeds both the pytorch pySTABLE tracker (``voltage_at``) and
-elegant's own WAKE element (``to_sdds_file`` / ``from_sdds_file``).
-
-Physics for ``wake_potential_from_impedance``: for a very short Gaussian
-"probe" bunch of rms length sigma_s, the wake potential is the inverse
-Fourier transform of Z_parallel(omega) multiplied by the bunch's
-frequency-domain line density lambda~(omega) = exp(-omega^2 sigma_t^2 / 2),
-sigma_t = sigma_s / c. Z_parallel is only known on the positive-frequency
-grid; the negative-frequency side is filled in by the reality condition
-Z(-omega) = conj(Z(omega)) before the inverse FFT.
-"""
+"""Constructs a Gaussian-probe wake from impedance via inverse Fourier transformation, enforcing
+`Z(-omega)=conj(Z(omega))`. See docs/modules/wakefields/shortrange.md."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -31,13 +19,7 @@ def wake_potential_from_impedance(
     dt: float = 2e-15,
     n_points: int = 1 << 15,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return (t [s], W [V/C]), t centered on 0, for a Gaussian probe bunch.
-
-    dt/n_points set the FFT's time resolution and window
-    (T = n_points*dt, Nyquist = 1/(2*dt)) -- independent of the bin size a
-    tracker later uses (resample/trim separately, see ``trim_wake`` and
-    ``ShortRangeWake.set_fixed_bin_window``).
-    """
+    """Return (t [s], W [V/C]), t centered on 0, for a Gaussian probe bunch."""
     sigma_t = sigma_s_m / C_LIGHT
 
     f_fft = np.fft.fftfreq(n_points, d=dt)
@@ -60,49 +42,27 @@ def wake_potential_from_impedance(
 
 
 def next_fast_fft_len(n: int) -> int:
-    """Next power of 2 >= n. cuFFT (like every major FFT backend) only has
-    a fast mixed-radix decomposition for small-prime lengths; an unlucky
-    length with a large prime factor falls back to the much slower,
-    multi-kernel Bluestein algorithm. A wake's fixed convolution length
-    (n_bins + wake_table_length - 1) has no reason to land on a good
-    length by construction -- measured 122499 = 3^3*13*349 for one wake
-    table vs 122500 = 2^2*5^4*7^2 for another, one element longer, a ~4x
-    slowdown from that single-sample difference (profiled on the
-    transverse HALF dipole wake). Padding up is always safe for an
-    FFT-based linear convolution (only adds trailing zeros the convolution
-    never reads back, see set_fixed_bin_window's callers), so there's no
-    reason not to round up unconditionally."""
+    """Compute next fast fft len; see the module documentation for details."""
     return 1 << (n - 1).bit_length()
 
 
 def trim_wake(t: np.ndarray, W: np.ndarray, t_min: float, t_max: float) -> tuple[np.ndarray, np.ndarray]:
-    """Keep only [t_min, t_max] -- a tracker (or elegant's WAKE element)
-    wants a compact table, not the full FFT window. A small negative
-    t_min is often wanted deliberately: a Gaussian-probe wake potential can
-    have a small acausal precursor before t=0 (a real feature of a
-    finite-length probe bunch, not a bug) -- elegant's WAKE element needs
-    ACAUSAL_ALLOWED=1 to accept it, ``ShortRangeWake.voltage_at`` handles it
-    natively.
-    """
+    """Keep only [t_min, t_max] -- a tracker (or elegant's WAKE element) wants a compact table, not the
+    full FFT window."""
     mask = (t >= t_min) & (t <= t_max)
     return t[mask], W[mask]
 
 
 @dataclass
 class ShortRangeWake:
-    """A short-range wake potential table W(t) [V/C] on a uniform time grid.
-
-    ``t_s`` may include a small negative "acausal precursor" -- expected for
-    a pseudo-Green-function wake from a finite-length probe bunch, not a bug.
-    """
+    """A short-range wake potential table W(t) [V/C] on a uniform time grid."""
 
     t_s: np.ndarray
     W_V_per_C: np.ndarray
     dt_s: float = field(init=False)
     _fixed_lo_idx: int | None = field(init=False, default=None, repr=False)
     _fixed_n_bins: int | None = field(init=False, default=None, repr=False)
-    # Precomputed in set_fixed_bin_window/prepare, not lazily -- see docs/wakefields.md's
-    # "ShortRangeWake's fixed-window state" note.
+    # Precomputed by set_fixed_bin_window/prepare.
     _fixed_o_min_w: int | None = field(init=False, default=None, repr=False)
     _fixed_conv_len: int | None = field(init=False, default=None, repr=False)
     _fixed_W_fft: torch.Tensor | None = field(init=False, default=None, repr=False)
@@ -132,16 +92,7 @@ class ShortRangeWake:
 
     @classmethod
     def from_sdds_file(cls, path: str | Path, t_column: str = "t", w_column: str = "W") -> "ShortRangeWake":
-        """Load a wake table written by ``to_sdds_file`` (default column
-        names) or a real elegant wake file with **free-form column
-        names** -- elegant's own ``WAKE``/``RFCW`` elements take the
-        column names as separate string parameters (``TCOLUMN=``,
-        ``WCOLUMN=``/``WZCOLUMN=``, confirmed from ``track_data.c``'s own
-        ``wake_param``/``rfcw_param`` tables -- neither has a built-in
-        default of ``"t"``/``"W"``, that's only this module's own
-        ``to_sdds_file`` convention), so a real file (e.g. an ``RFCW``'s
-        combined wake file with ``t``/``Wx``/``Wy``/``Wz`` columns) needs
-        the actual column name passed explicitly."""
+        """Compute from sdds file; see the module documentation for details."""
         with sdds_object() as (_sdds, x):
             x.load(str(path))
             cols = x.columnName
@@ -169,24 +120,8 @@ class ShortRangeWake:
         return ShortRangeWake(self.t_s[mask], self.W_V_per_C[mask])
 
     def set_fixed_bin_window(self, t_min_s: float, t_max_s: float) -> None:
-        """Fix the per-turn charge-binning window instead of resizing it to
-        the bunch's instantaneous tau range every turn.
-
-        Tracking calls the wake convolution once per turn; with a dynamic
-        window the FFT size changes every turn, so the wake table's own FFT
-        (which never changes) can't be cached and gets recomputed every
-        single turn -- the dominant cost of a multi-thousand-turn run. A
-        fixed window makes the convolution length constant, so the wake's
-        FFT is computed once here and reused for every subsequent
-        ``voltage_at`` call. Particles landing outside the window are
-        dropped from the shared charge histogram (so a rare transient
-        outlier can't pile artificial charge onto the edge bin and kick off
-        a numerical runaway -- clamping them into the histogram instead of
-        dropping them did exactly that in an earlier version); they still
-        get a voltage back, read from the nearest edge bin. Choose the
-        window generously (a handful of expected rms bunch lengths) so
-        drops stay rare.
-        """
+        """Fix the per-turn charge-binning window instead of resizing it to the bunch's instantaneous
+        tau range every turn."""
         self._fixed_lo_idx = int(round(t_min_s / self.dt_s))
         self._fixed_n_bins = int(round((t_max_s - t_min_s) / self.dt_s))
         self._fixed_o_min_w = int(round(self.t_s[0] / self.dt_s))
@@ -198,35 +133,23 @@ class ShortRangeWake:
         self._W_fft_cache.clear()
 
     def prepare(self, dtype: torch.dtype, device: str | torch.device) -> None:
-        """Precompute the fixed window's wake FFT for a given dtype/device
-        ahead of time (no-op if no fixed window is set). Call this once
-        before tracking, especially before wrapping the per-turn step in
-        ``torch.compile`` -- ``voltage_at``'s fixed-window path assumes
-        this has already been done and never computes the FFT lazily
-        itself, since a first-call-computes-and-caches pattern is exactly
-        the kind of thing that graph-breaks under dynamo."""
+        """Precompute the fixed window's wake FFT for a given dtype/device ahead of time (no-op if no
+        fixed window is set)."""
         if self._fixed_n_bins is None:
             return
         W = torch.as_tensor(self.W_V_per_C, dtype=dtype, device=device)
         self._fixed_W_fft = torch.fft.rfft(W, n=self._fixed_conv_len)
 
     def voltage_at(self, tau: torch.Tensor, charge_per_particle_C: torch.Tensor | float) -> torch.Tensor:
-        """Voltage [V] felt by each particle from the present bunch's own
-        short-range wake.
-
-        Bins ``tau`` onto the same absolute dt-grid as the wake table (bin k
-        and wake sample k both sit at time k*dt from a common t=0),
-        convolves, and reads the result back at each particle's own bin.
-        """
+        """Voltage [V] felt by each particle from the present bunch's own short-range wake."""
         idx = torch.round(tau / self.dt_s).to(torch.int64)
         if self._fixed_n_bins is not None:
             lo, n_bins = self._fixed_lo_idx, self._fixed_n_bins
-            # Fixed-shape "trash bin" for out-of-range particles -- see docs/wakefields.md.
+            # Fixed-shape extra bin excludes out-of-range charge.
             in_range = (idx >= lo) & (idx < lo + n_bins)
             safe_idx = torch.where(in_range, idx - lo, n_bins)
             charge_bin_full = torch.zeros(n_bins + 1, dtype=tau.dtype, device=tau.device)
-            # Scatter bare counts, scale by charge_per_particle_C after binning -- see docs/wakefields.md's
-            # "Scalar charge, scatter after not before".
+            # Scatter counts, then scale by macro-charge.
             charge_bin_full.scatter_add_(0, safe_idx, torch.ones_like(tau))
             charge_bin = charge_bin_full[:n_bins] * charge_per_particle_C
             idx_readback = idx.clamp(lo, lo + n_bins - 1)

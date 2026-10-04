@@ -1,15 +1,5 @@
-"""A documented, minimal HDF5 particle-dump schema -- the "modern format"
-fallback named in plans/DONE/E2_DISTRIBUTION_IO_PLAN.md (a later
-OpenPMD-beamphysics upgrade would replace this, not add a second one).
-
-Schema: one dataset ``particles6`` (``(N, 6)``, float64), plus scalar
-attrs ``charge_C`` (total bunch charge, signed), ``energy_eV`` (reference
-energy), ``mc2_eV`` (reference rest mass), ``canonical`` (bool -- whether
-columns are ``tracking.native``'s canonical ``(x, px, y, py, tau, delta)``
-or the slope convention ``(x, xp, y, yp, tau, delta)``, see
-``tracking.distributions``' own module docstring), ``tau_units``
-(always ``"m"`` -- this schema never stores seconds-valued tau; convert a
-pystable ``tau_s`` via ``*C_LIGHT`` before saving)."""
+"""The HDF5 particle schema distinguishes canonical `(x,px,y,py,tau,delta)` from slope
+`(x,xp,y,yp,tau,delta)` coordinates. See docs/modules/data/particles.md."""
 from __future__ import annotations
 
 from pathlib import Path

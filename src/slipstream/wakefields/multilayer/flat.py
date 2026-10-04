@@ -1,74 +1,5 @@
-"""Flat-chamber multilayer resistive-wall impedance (IMPEDANCE_PLAN.md
-Phase 3), ported directly from IW2D's ``flat.cc``/``flatchamber.cc``
-(N. Mounet & E. Metral, "Electromagnetic fields and beam coupling
-impedances in a multilayer flat chamber", CERN note, 2010).
-
-**PARKED, not currently usable -- do not wire this into anything.** The
-formula translation below is structurally complete and faithful to
-``flat.cc`` (checked line by line), but ``_etachi``'s 4x4 matrix inversion
-overflows double precision even for unremarkable geometries (e.g. a 13mm
-half-gap, stainless-steel-like wall, 10 GHz: the field-matching matrix
-already reaches ~exp(2e4)) -- the same class of problem ``round.py`` hit
-and fixed for its Bessel functions, but round chamber's fix worked because
-its final answer is a *determinant ratio* with a provable algebraic
-cancellation (see ``round.py``'s docstring); flat chamber's answer comes
-from a *matrix inverse* mixing bounded and unbounded entries in a way that
-doesn't reduce to a single scale factor the same way. A real fix exists
-(redo the matrix arithmetic in arbitrary precision via ``mpmath``,
-mirroring what IW2D's own 160-bit arithmetic does -- straightforward but
-slow, since this module already loops over frequency and adaptive
-quadrature points in plain Python; or derive a genuinely stable
-double-precision reformulation, open-ended numerical-methods work) but
-wasn't pursued: ``lattice.apertures`` approximates flat apertures via
-Yokoya elliptic form factors applied to the (already validated)
-round-chamber result instead (``wakefields/multilayer/yokoya.py``, ported
-from IW2D's own official Python library) -- the standard, much cheaper
-approach, and accurate enough for what the Apertures feature needs. Revisit
-this module only if that approximation turns out to be insufficient for a
-real case.
-
-Scope, deliberately narrower than ``flat.cc`` itself:
-
-- **Top-bottom symmetric only** (``flat.cc``'s own default, ``flag_topbotsym=1``):
-  one material stack, mirrored top and bottom. Nothing in this repo needs
-  independently-specified upper/lower stacks (a flat aperture has one
-  coating), and symmetry means the lower stack's field-matching matrix is
-  identical to the upper one (no separate computation) and the "constant"
-  term ``Zycst`` (only nonzero for an up-down *asymmetric* chamber) is
-  identically zero -- both proven directly from ``flatchamber.cc``'s own
-  ``alphamn``, which zeroes any ``alpha_mn`` with odd ``m+n`` whenever
-  ``flag_topbotsym`` is set, not approximated here.
-- **Non-magnetic layers only** (mu=1), same assumption ``round.py`` makes
-  and for the same reason: nothing in this repo's materials has ever
-  needed permeability.
-- **"Maximum order of non-linear terms" = 0** (``flat.cc``'s own default):
-  the standard six outputs (Zlong, Zxdip, Zydip, Zxquad, Zyquad, Zycst)
-  come from exactly four ``alpha_mn`` integrals (``alpha00``, ``alpha01``,
-  ``alpha02``, ``alpha11``) -- confirmed directly from
-  ``flatchamber.cc``'s ``order<=0`` branch. The general higher-order
-  multipole path (``coefmn``, arbitrary ``alpha_mn``) is a separate,
-  unbounded-order feature nothing here calls for; not ported.
-
-Numerically, flat chamber is a different problem from round: the
-transverse dependence is Cartesian (exponentials in a Fourier-type
-horizontal wavenumber ``kx``), not a Bessel expansion, but ``alpha_mn``
-itself is a semi-infinite integral over ``kx`` (via ``u`` with
-``kx=(k/gamma)*sinh(u)``) with no closed form -- ``flat.cc`` evaluates it
-with GSL's adaptive Gauss-Kronrod quadrature to infinity (``qagiu``); this
-port uses ``scipy.integrate.quad``'s equivalent (QUADPACK's own infinite-
-range transform), the direct Python counterpart, not a re-derivation.
-Each integrand evaluation needs a 4x4 complex boundary-matching matrix
-chain (``_field_matching_matrix``, ported from ``multilayerm_flat``) and a
-4x4 complex inverse (``_etachi``, ported from ``etachi``) -- cheap per
-call, but this means (unlike ``round.py``'s closed-form, frequency-batched
-``_alpha_tm``) evaluation is inherently a Python-level loop over frequency
-and, within each frequency, an adaptive number of quadrature points -- not
-batched, not GPU-vectorized, and (via ``scipy.integrate.quad``) not
-autograd-differentiable. This matches where the round-chamber code
-actually stands too: per IMPEDANCE_PLAN.md, gradients don't flow through
-``RoundChamber``'s plain-float inputs yet either, so this isn't a
-regression against a capability anything currently uses.
-"""
+"""Experimental flat-chamber impedance; numerically unreliable and not for production use. See
+docs/modules/wakefields/multilayer/flat.md."""
 from __future__ import annotations
 
 import warnings
@@ -87,12 +18,7 @@ Z0 = MU0 * C_LIGHT
 
 
 def _csqrt(z: complex) -> complex:
-    """Principal-branch complex sqrt, matching IW2D's ``csqrtMP`` exactly
-    (including its -0j -> +0j fixup right at the branch cut) -- same fixup
-    as ``round.py``'s own ``_csqrt``, reimplemented here in plain
-    numpy/complex rather than torch since this module's per-frequency
-    quadrature loop (module docstring) evaluates it scalar-at-a-time, far
-    too often to pay a torch round-trip on each call."""
+    """Compute csqrt; see the module documentation for details."""
     imag = z.imag
     if imag == 0.0 and np.signbit(imag):
         imag = -imag
@@ -130,13 +56,8 @@ def _field_matching_matrix(
     eps1_ratio: np.ndarray, nu2: np.ndarray, nu2_ratio: np.ndarray, eps1_inv: np.ndarray,
     b: np.ndarray, kx: complex, beta: float,
 ) -> np.ndarray:
-    """4x4 field-matching matrix for one (top==bottom, by symmetry) stack
-    at a single frequency and horizontal wavenumber ``kx`` -- ported from
-    ``flat.cc``'s ``multilayerm_flat``. ``eps1_inv`` must be
-    ``1/eps1_physical`` (``flat.cc``'s own in-place ``eps1(p)=1/eps1(p)``
-    reassignment before this matrix build -- see the module docstring's
-    "NB" note in the original source); mu=1 throughout (module docstring).
-    """
+    """4x4 field-matching matrix for one (top==bottom, by symmetry) stack at a single frequency and
+    horizontal wavenumber ``kx`` -- ported from ``flat.cc``'s ``multilayerm_flat``."""
     n_layers = len(b)
     kyp = _csqrt(nu2[0] + kx**2)
     m = np.eye(4, dtype=complex)
@@ -197,10 +118,7 @@ def _integrand(
     eps1_ratio: np.ndarray, nu2: np.ndarray, nu2_ratio: np.ndarray, eps1_inv: np.ndarray,
     b: np.ndarray, beta: float, k_over_gamma: float, u: float,
 ) -> complex:
-    """Ported from ``flat.cc``'s ``integrand`` (``kx=(k/gamma)*sinh(u)``);
-    a NaN real or imaginary part (from an overflowing ``kx`` at large
-    ``u``, same as the source) is replaced by zero, real/imag
-    independently, matching ``flat.cc`` exactly."""
+    """Compute integrand; see the module documentation for details."""
     kx = k_over_gamma * np.sinh(u)
     chi1, chi2, eta1, eta2 = _etachi(eps1_ratio, nu2, nu2_ratio, eps1_inv, b, kx, beta)
     m1powm = 1 if m % 2 == 0 else -1
@@ -216,26 +134,7 @@ _MAX_SAFE_EXPONENT = 600.0  # double overflows above ~709; this leaves comfortab
 
 
 def _u_max(b: np.ndarray, k_over_gamma: float) -> float:
-    """Upper bound replacing IW2D's literal semi-infinite ``alphamn``
-    integral (module docstring's numerical-conditioning note): IW2D's own
-    160-bit arithmetic tolerates evaluating the integrand at arbitrarily
-    large ``u`` (GSL's infinite-range quadrature rule samples near-infinite
-    ``u`` on its very first panel, before any adaptive refinement) --
-    double precision does not, because ``kx=(k/gamma)*sinh(u)`` grows
-    exponentially with ``u``, and so does ``kyp~|kx|`` and hence
-    ``exp((kyp+kyp1)*b[p])`` (``_field_matching_matrix``'s ``exp3``/``exp4``).
-    ``b[-1]`` (the outermost material boundary) is the least forgiving --
-    ``kyp``/``kyp1`` are the same order for every boundary at large ``u``,
-    so the largest ``b`` overflows first. Truncating where that product
-    would first reach ``_MAX_SAFE_EXPONENT`` is negligible, not
-    approximate: the true integrand there is suppressed by the reciprocal
-    of that same (squared) factor -- order ``exp(-1200)`` or smaller, many
-    orders below double precision's own ~1e-16 resolution -- because the
-    physical (decaying, not growing) branch is what a correctly-conditioned
-    evaluation would keep (the same "only the decaying solution survives"
-    principle behind ``round.py``'s own overflow fix, worked out there
-    algebraically; here enforced by never evaluating far enough out for the
-    growing branch to be sampled in the first place)."""
+    """Compute u max; see the module documentation for details."""
     kx_max = _MAX_SAFE_EXPONENT / b[-1]
     return float(np.arcsinh(kx_max / k_over_gamma))
 
@@ -280,15 +179,9 @@ class FlatImpedances:
 
 
 def flat_chamber_impedances(chamber: FlatChamber, freq_Hz: np.ndarray, gamma: float) -> FlatImpedances:
-    """All six standard outputs for ``chamber`` -- ``flatchamber.cc``'s
-    ``order<=0`` branch (module docstring), drop-in (same physical
-    definitions and units) for what IW2D's ``flatchamber.x`` itself
-    writes. Top-bottom symmetric, non-magnetic, no differentiability (see
-    module docstring) -- unlike ``round.py``'s functions, this loops over
-    frequency in Python (each point needs its own adaptive quadrature), so
-    it is much slower per point; fine for offline impedance generation,
-    not for anything called per-turn.
-    """
+    """All six standard outputs for ``chamber`` -- ``flatchamber.cc``'s ``order<=0`` branch (module
+    docstring), drop-in (same physical definitions and units) for what IW2D's ``flatchamber.x``
+    itself writes."""
     beta = float(np.sqrt(1 - 1 / gamma**2))
     freq = np.asarray(freq_Hz, dtype=float)
     omega = 2 * np.pi * freq
@@ -335,8 +228,5 @@ def flat_chamber_impedances(chamber: FlatChamber, freq_Hz: np.ndarray, gamma: fl
 
 
 def flat_chamber_impedance(chamber: FlatChamber, freq_Hz: np.ndarray, gamma: float) -> Impedance:
-    """Zlong(f) only -- the piece ``lattice.apertures`` actually consumes
-    today (its longitudinal-only scope, transverse aperture-summing is
-    explicitly future work per APERTURES.md). Thin wrapper over
-    ``flat_chamber_impedances`` for callers that don't need the other five."""
+    """Experimental flat-chamber solver; numerically unreliable and not for production use."""
     return flat_chamber_impedances(chamber, freq_Hz, gamma).Zlong

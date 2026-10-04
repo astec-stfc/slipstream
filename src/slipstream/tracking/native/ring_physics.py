@@ -1,9 +1,5 @@
-"""Small ring-physics maps shared by native tracking and dev backends.
-
-This module is intentionally independent of the historical pySTABLE tracker.
-The native tracker can therefore be installed and used without importing any
-development backend.
-"""
+"""Native ring kicks apply sinusoidal RF, radiation damping/excitation and effective IBS damping times.
+See docs/modules/tracking/native/ring_physics.md."""
 from __future__ import annotations
 
 import math

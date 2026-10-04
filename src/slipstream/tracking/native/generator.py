@@ -1,35 +1,5 @@
-"""Native (pure PyTorch, no ASTRA, no external hybrid backend) clone of ASTRA's ``generator``: the
-program that turns a ``&INPUT`` namelist (``generator.in``) into an initial
-particle-distribution file. See docs/tracking_native.md's "Generating the beam
-natively" and ``plans/DONE/NATIVE_GENERATOR_PLAN.md`` for the full validation
-(what was measured row-by-row against the real ``generator.exe``, and what is
-not reproduced); the manual is ASTRA's, chapters 3 and 7.
-
-``generate`` builds the same beam from the same ``generator.in`` at any
-particle count, on any device, from a seed (unlike the CLARA decks' own
-pre-generated 262144-particle file, which can only be subsampled)::
-
-    from slipstream.tracking.native.generator import generate
-    beam = generate("ASTRA/20pC/generator.in", ipart=1_000_000, seed=1)
-    beam.write("laser_1M.astra")            # ASTRA-readable, 20-digit ``High_res`` format
-    dist = beam.particles(device="cuda")    # what ``Injector.track`` consumes
-
-or ``python -m slipstream.tracking.native.generator generator.in -n 1000000 -o laser.astra``.
-
-Every option of the manual's chapter 7 namelist is accepted (``Dist_*`` =
-``uniform``/``plateau``/``gauss``/``radial``/``isotropic``/``inverted``/
-``FD_300``/``uniform ellipsoid``/``2D-Gaussian``, ``Cathode``, ``Probe``, ``Passive``,
-``Noise_reduc``, ``Species``/``Ion_mass``, ``Type='ring'``, ``Tau``, ``Nemit_*``,
-``emit_z``, ``cor_*``, ``Disp_*``, offsets, ``Add``/``N_add``), except ``R_cathode``
-(curved cathode -- the sign of its sag/time correction cannot be read off the manual) and
-``Binary``, which raise. ``Noise_reduc=T`` is a Halton sequence, not the manual's
-Hammersley set (bases ``E``:2, ``t``:3, ``z``:5, ``py``:7, ``px``:11, ``y``:13, ``x``:17).
-
-**Improvements over ASTRA** (all optional): ``ipart``/``seed`` at call time; ``sequence=
-"sobol"`` (scrambled Sobol', better than Halton in 7 dimensions at small N) or ``"random"``;
-``Beam.particles`` returns the probes' charge share to the tracked particles so the tracked
-total is exactly ``Q_total`` at any N (ASTRA's is short by ``7/Ipart``).
-"""
+"""Samples ASTRA-style initial beams with configurable distributions, correlations, offsets, species
+and emission times. See docs/modules/tracking/native/generator.md."""
 from __future__ import annotations
 
 import math
@@ -53,10 +23,7 @@ _PROBE_SIGMAS = (0.5, 1.0, 1.5)  # the 6 probes sit at these multiples of the rm
 
 @dataclass
 class GeneratorInput:
-    """One ``&INPUT`` namelist. Field names are ASTRA's, lower-cased; units are ASTRA's (manual
-    ch. 7): lengths in mm (``ref_zpos`` and ``r_cathode`` in m, ``disp_*`` in m), times in ns,
-    ``sig_ekin``/``le``/``re``/``cor_ekin`` in keV, ``ref_ekin`` in MeV, momenta in eV/c,
-    ``nemit_*`` in mm mrad, ``cor_p*`` in mrad, charge in nC. Defaults are the manual's."""
+    """One ``&INPUT`` namelist."""
     fname: str = "rfgun.ini"
     add: bool = False
     n_add: int = 0
@@ -239,10 +206,8 @@ def _ndtri_cut(v: torch.Tensor, cut: float) -> torch.Tensor:
 
 
 def _plateau_ppf(u: torch.Tensor, length: float, rise: float) -> torch.Tensor:
-    """Inverse CDF of ASTRA's plateau ``f(x) = 1/(1 + exp(4 (|x| - L/2)/rt))`` (manual 7.2.2; measured: the
-    ``4/rt`` is what makes the tangent at ``L/2`` climb from 0 to 1 in ``rt``). The CDF is analytic --
-    ``int_0^a f = a - s softplus((a-mu)/s) + s softplus(-mu/s)``, ``s = rt/4``, ``mu = L/2`` -- so a bisection on it
-    is exact to rounding (a Newton step diverges in the near-zero-density tails)."""
+    """Inverse CDF of ASTRA's plateau ``f(x) = 1/(1 + exp(4 (|x| - L/2)/rt))`` (manual 7.2.2; measured:
+    the ``4/rt`` is what makes the tangent at ``L/2`` climb from 0 to 1 in ``rt``)."""
     if rise <= 0.0:
         return length * (u - 0.5)
     zero = u <= 0.0  # base 2 hits u = 0 exactly (n = 1, v = 1/2); measured: ASTRA puts that one particle at the centre
@@ -448,8 +413,7 @@ def _block(inp: GeneratorInput, ipart: int, sequence: str, seed: int, normalise:
         px = _conform(px, zero_f, t_px, normalise and not cut_px)
         py = _conform(py, zero_f, t_py, normalise and not cut_py)
 
-    # ---- correlations and dispersion. Measured: they act on the probes too, and a correlated px, py is taken out of
-    # pz so that |p| is conserved. Done on [probes; particles] together, so a dispersion has its mean over all rows removed.
+    # ---- correlations and dispersion.
     P = 1 + n_probe
     pz_probe = float(_p_of_E(inp.le * 1e3, mass)) if k_pz == "isotropic" else p_ref  # measured: isotropic probes carry p(LE)
     X, Y, Z = torch.cat([fx[1:], x]), torch.cat([fy[1:], y]), torch.cat([fz[1:], z])
@@ -494,10 +458,8 @@ class Beam:
     high_res: bool = True
 
     def particles(self, device=None, dtype=None, exact_charge: bool = True) -> dict[str, torch.Tensor]:
-        """The trackable particles, as ``astra_io.read_astra_distribution`` returns a file's: the standard
-        rows (probes and passive particles excluded), absolute ``z``/``pz``/``clock``. ``exact_charge``
-        (default) rescales ``q`` so they carry exactly ``Q_total`` -- ASTRA's ``Q_total/Ipart`` per row
-        leaves the 6 probe rows a charge share the tracker never uses."""
+        """The trackable particles, as ``astra_io.read_astra_distribution`` returns a file's: the
+        standard rows (probes and passive particles excluded), absolute ``z``/``pz``/``clock``."""
         d = distribution_from_rows(self.rows, device, dtype, status=(-1, 5))
         if exact_charge and d["q"].numel():
             d["q"] = d["q"] * (abs(self.q_total_nC) * 1e-9 / abs(float(d["q"].sum())))
@@ -535,15 +497,8 @@ def generate(
     noise_reduc: bool | None = None,
     normalise: bool = True,
 ) -> Beam:
-    """Generate a beam from a ``generator.in`` path or already-built ``GeneratorInput`` (a list = ``Add=T``).
-
-    ``ipart`` overrides ``Ipart`` -- ASTRA's count, which *includes* the reference row and the 6
-    probes (with several stacked namelists it rescales them proportionally). ``noise_reduc``
-    overrides the deck's flag; ``sequence`` is ``"halton"`` (what ``Noise_reduc=T`` means in ASTRA),
-    ``"sobol"`` (scrambled) or ``"random"`` (default: from ``noise_reduc``). ``seed`` fixes the
-    pseudo-random draws (``"random"``/``"sobol"``, ``Tau``, ``Type='ring'``, ``FD_300``); the Halton
-    sequence itself is deterministic. ``normalise=False`` skips the exact-rms rescale (the means are
-    still zeroed) to leave the raw sampling noise in."""
+    """Generate a beam from a ``generator.in`` path or already-built ``GeneratorInput`` (a list =
+    ``Add=T``)."""
     inputs = [source] if isinstance(source, GeneratorInput) else (
         list(source) if isinstance(source, (list, tuple)) else read_generator_input(source))
     counts = [i.ipart for i in inputs]

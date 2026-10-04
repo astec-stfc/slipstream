@@ -1,14 +1,5 @@
-"""Transverse (betatron) optics parameters -- a sibling to ``Lattice``, not
-merged into it, so every existing longitudinal-only ``lattice.yaml``/tracker
-stays valid untouched. Passed alongside ``Lattice`` into a tracker the same
-way ``ShortRangeWake``/``LongRangeWake`` already are (see
-``tracking/pystable/tracker.py``).
-
-Linear one-turn-map approximation throughout: a single matched point (fixed
-beta/alpha in and out), no nonlinear optics -- the same level of realism
-``Lattice``'s own longitudinal map, PyHEADTAIL's ``Synchrotron``, and
-elegant's ``ILMATRIX`` already use elsewhere in this codebase.
-"""
+"""Stores single-point transverse Twiss/dispersion, tunes/chromaticities, equilibrium geometric
+emittances and damping times. See docs/modules/lattice/optics.md."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,14 +10,7 @@ from ..serialization import dump_yaml, load_yaml
 
 @dataclass
 class TransverseOptics:
-    """Transverse machine parameters for the single-bunch one-turn map.
-
-    ``epsx_m``/``epsy_m`` are geometric (not normalized) equilibrium
-    emittances, and ``tau_x_s``/``tau_y_s`` transverse damping times --
-    direct inputs, matching ``Lattice``'s own flat-parameter style for
-    ``tau_z_s``/``sigma_delta0`` rather than deriving them from
-    synchrotron-radiation integrals.
-    """
+    """Transverse machine parameters for the single-bunch one-turn map."""
 
     beta_x_m: float
     alpha_x: float
@@ -44,11 +28,7 @@ class TransverseOptics:
     tau_y_s: float
     epsy_m: float
 
-    # Dispersion slope (dD/ds) at this matched point -- optional, defaults to
-    # flat dispersion (0.0). Not used by the betatron/damping maps above;
-    # only consumed by slipstream.ibs's dispersion invariant H_x/H_y, where
-    # a nonzero slope matters (e.g. a point inside a bend). Defaulting to 0
-    # keeps every existing constructor call/YAML file valid unchanged.
+    # Dispersion slope (dD/ds) at this matched point -- optional, defaults to flat dispersion (0.0).
     Dp_x_m: float = 0.0
     Dp_y_m: float = 0.0
 

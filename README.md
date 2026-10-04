@@ -39,6 +39,23 @@ Optional SDDS support is available with:
 python -m pip install "slipstream-accel[sdds]"
 ```
 
+## Windows compilation
+
+On Windows, use `clang-cl` as the C++ compiler for `torch.compile`. It compiles
+Slipstream's CUDA paths better than MSVC. Set it before starting Python, and
+make sure `clang-cl` and the Windows SDK are available:
+
+```powershell
+$env:CXX = "clang-cl"
+```
+
+The equivalent setting is `set CXX=clang-cl` in `cmd.exe` or
+`export CXX=clang-cl` in a POSIX shell.
+
+See [`docs/compilation.md`](docs/compilation.md) for CPU and CUDA
+`torch.compile` setup, compilation-cache guidance, and optional NVIDIA Warp
+acceleration.
+
 ## Quick start
 
 The Python import name is `slipstream`:
@@ -59,6 +76,21 @@ Particle states use the canonical `(x, px, y, py, tau, delta)` layout. See
 injector usage, and [`docs/formats.md`](docs/formats.md) for supported input
 formats.
 
+Run a complete synthetic beamline study from a portable YAML configuration:
+
+```bash
+python -m slipstream.beamline_cli examples/beamline/study.yaml -o result.h5
+```
+
+See [beamline studies](docs/beamline_studies.md) for generated, HDF5, SDDS,
+and native ASTRA sources. The [documentation index](docs/README.md) links
+physics explanations, usage guides and the reference for every module.
+
+For frozen-energy ring maps, normal modes, loss locations, and spectral
+analysis, see [`docs/nonlinear_dynamics.md`](docs/nonlinear_dynamics.md).
+RF-on dynamic aperture, frequency maps, and sampled momentum acceptance are
+documented in [`docs/ring6d.md`](docs/ring6d.md).
+
 ## Scope
 
 - `NativeTracker` models ring transport and turn-by-turn effects.
@@ -67,3 +99,7 @@ formats.
   aperture transport.
 - `warp-lang` accelerates supported CUDA paths; it is not required for CPU
   execution.
+
+Ring reference tables and plots are described in
+[`docs/ring_outputs.md`](docs/ring_outputs.md). Install the optional
+`slipstream-accel[plot]` extra to render the figures.

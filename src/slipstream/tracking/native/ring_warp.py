@@ -1,11 +1,5 @@
-"""Whole-turn Warp backend for the forward-only ``RingMap`` fast path.
-
-This first slice accepts canonical/exact-dipole drift and multipole kicks,
-first- and second-order edge maps, and the existing flat-space misalignment
-transform. RF remains on the PyTorch fallback. One launch advances every
-particle through every packed element; it never crosses the PyTorch/Warp
-boundary per element.
-"""
+"""Implements selected fixed-lattice one-turn ring transport using a packed Warp kernel. See
+docs/modules/tracking/native/ring_warp.md."""
 from __future__ import annotations
 
 import math
@@ -66,15 +60,17 @@ def pack(params, device: torch.device, dtype: torch.dtype) -> PackedRing | None:
     if not params:
         return None
     for p in params:
-        if p.is_rf or p.edge_order not in (1, 2) or p.edge1_effects not in (0, 1) or p.edge2_effects not in (0, 1):
+        if (
+            isinstance(p.k3, torch.Tensor) or p.k3 != 0 or p.multipoles or p.skew_multipoles or p.integrated_multipoles
+            or p.is_rf or p.is_kick or p.edge_order not in (1, 2) or p.edge1_effects not in (0, 1) or p.edge2_effects not in (0, 1)
+        ):
             return None
-        for strength in (p.k1, p.k2):
+        for strength in (p.k1, p.k2, p.dx, p.dy, p.tilt):
             if isinstance(strength, torch.Tensor) and (strength.ndim != 0 or strength.requires_grad):
                 return None
         if p.integration_order not in (4, 6, 8) or p.n_kicks < 1 or p.length <= 0.0:
             return None
 
-    n = len(params)
     order_tables = {
         4: (_DRIFT_FRAC4, _KICK_FRAC4),
         6: (_DRIFT_FRAC6, _KICK_FRAC6),
@@ -249,9 +245,6 @@ if wk._HAVE_WARP:
                         x = x + ds * px / pz
                         y = y + ds * py / pz
                         arc = ds * (one + delta) / pz
-                    # Match elements.py's grouped reference-beta correction;
-                    # left-to-right evaluation accumulates a visible float32
-                    # tau residual over long lattices such as BR14.
                     tau = tau + (arc / beta - ds / beta0)
 
                     if kd != zero:

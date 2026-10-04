@@ -18,8 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-sdds = ["sdds"]
+sdds = ["soliday.sdds"]
 cuda = ["warp-lang"]
+optimise = ["cma>=4"]
+plot = ["matplotlib>=3.6"]
+
+[project.scripts]
+slipstream-beamline = "slipstream.beamline_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -29,3 +34,8 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
+
+[tool.ruff.lint]
+# ponytail: explicit rules so new ruff releases do not change what CI enforces
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E731"]

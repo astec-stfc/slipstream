@@ -1,8 +1,5 @@
-"""Pure chamber and frequency-scan data structures.
-
-The structures are shared by native multilayer impedance calculations and by
-the optional IW2D development driver.  This module never launches IW2D.
-"""
+"""Stores round/flat chamber geometry, section length and material layers. See
+docs/modules/wakefields/chambers.md."""
 from __future__ import annotations
 
 from dataclasses import dataclass

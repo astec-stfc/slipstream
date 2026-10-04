@@ -1,9 +1,5 @@
-"""Setting up a ``LinacTracker`` line: find a named element, change one cavity,
-and phase a cavity on crest against a real bunch. Shared by ``Stories/`` and
-any driver that scans RF phases -- ``crest_phase_rad`` mirrors
-``Injector.auto_phase`` (coarse scan, parabolic refinement), applied to a generic
-``LinacTracker`` cavity instead of the injector's own analytic field maps.
-"""
+"""Crest calibration maximizes reference-particle energy gain through the upstream line and selected
+cavity using a phase scan and parabolic refinement. See docs/modules/tracking/native/linac_setup.md."""
 from __future__ import annotations
 
 import dataclasses

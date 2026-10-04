@@ -1,9 +1,5 @@
-"""RMS-emittance helpers, factored out of ``tracking.native.injector``
-(previously private there, ``_geometric_emittance_m``/
-``_longitudinal_emittance_keV_mm``) so ``slices.py`` -- and any other
-consumer -- doesn't duplicate the formula. ``injector.py`` re-exports
-these under its old private names, unchanged behavior.
-"""
+"""RMS helpers combine unbiased position/momentum variances with the mean cross product. See
+docs/modules/analysis/emittance.md."""
 from __future__ import annotations
 
 import torch
@@ -25,11 +21,7 @@ def geometric_emittance_xy(
 
 
 def longitudinal_emittance_keV_mm(z_or_tau_m: torch.Tensor, ekin_eV: torch.Tensor) -> torch.Tensor:
-    """Normalized longitudinal emittance in ASTRA's Zemit convention
-    (manual sec. 4.13): the real RMS phase-space area
-    ``sqrt(<dz^2><dE^2> - <dz dE>^2)`` over centered ``(z, Ekin)`` -- the
-    correlation term removes an RF-accelerated bunch's energy chirp.
-    Moved from ``injector._longitudinal_emittance_keV_mm`` unchanged."""
+    """Compute longitudinal emittance keV mm; see the module documentation for details."""
     dz_mm = (z_or_tau_m - z_or_tau_m.mean()) * 1e3
     de_keV = (ekin_eV - ekin_eV.mean()) / 1e3
     return torch.sqrt(torch.clamp(dz_mm.var() * de_keV.var() - (dz_mm * de_keV).mean() ** 2, min=0.0))

@@ -1,23 +1,5 @@
-"""Read RF/magnet field maps and structure wakefields directly from LAURA's
-own HDF5 field-map format (``laura.translator.utils.fields.FieldMap``) --
-see plans/LAURA_INTERFACE_PLAN.md. Bypasses ASTRA-text/elegant-SDDS
-regeneration entirely: reuses LAURA's own HDF5 reader (units, the
-point-count-vs-metres ``length`` quirk, wake ``t``/``z`` interconversion are
-all handled there, not reimplemented here), then feeds the raw arrays
-straight into slipstream's existing format-agnostic field/wake classes.
-
-Optional dependency, same as ``laura_import.py``: only this module needs
-``laura`` installed.
-
-**Scope**: 1D on-axis field maps only (``1DElectroDynamic``,
-``1DMagnetoStatic``, ``1DElectroStatic``, ``1DQuadrupole``) and 1D wakes
-(``LongitudinalWake``, ``TransverseWake``, ``3DWake``). LAURA's 2D/3D
-off-axis field maps (``2DElectroDynamic`` etc) need a genuine grid
-interpolator slipstream doesn't have yet (every existing field class here is
-on-axis-profile + analytic paraxial expansion, see ``fields.py``'s module
-docstring) -- ``field_from_laura_hdf5`` raises ``NotImplementedError`` for
-those rather than silently mishandling them.
-"""
+"""Loads LAURA on-axis field profiles and wake tables into existing native field/wake classes. See
+docs/modules/tracking/native/laura_fields.md."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -37,9 +19,6 @@ except ImportError:
 _SUPPORTED_FIELD_TYPES = {
     "1DElectroDynamic", "1DElectroStatic", "1DMagnetoStatic", "1DQuadrupole",
 }
-# V/pC and V/pC/m are the only non-SI unit spellings seen in real CLARA
-# wake files (case varies, e.g. "V/c" for "V/C") -- normalize by string,
-# not by blindly trusting a particular case.
 _PC_TO_C = 1e12
 
 
@@ -60,16 +39,8 @@ def field_from_laura_hdf5(
     z_offset: float = 0.0,
     **kwargs,
 ) -> SolenoidField | RFCavityField | TravelingWaveField:
-    """One LAURA HDF5 field-map file -> the matching slipstream field object,
-    dispatched on the file's own ``type``/``cavity_type`` attrs (no need to
-    tell this function which kind of element it is).
-
-    ``e_max_V_per_m``/``b_max_T``/``frequency_hz`` are the *element's* own
-    physical amplitude/frequency (``laura``'s ``SlipstreamElement.
-    e_max_v_per_m``/``b_max_t``/``frequency_hz``) -- the HDF5 file itself
-    stores a normalized profile (peak magnitude ~1), not physical units, same
-    convention as the existing ASTRA-file readers in ``fields.py``.
-    """
+    """One LAURA HDF5 field-map file -> the matching slipstream field object, dispatched on the file's
+    own ``type``/``cavity_type`` attrs (no need to tell this function which kind of element it is)."""
     if not _HAVE_LAURA:
         raise ImportError(
             "field_from_laura_hdf5 needs the optional 'laura' package installed "
@@ -96,9 +67,6 @@ def field_from_laura_hdf5(
             "read field_map.G.value if adding this."
         )
 
-    # 1DElectroDynamic / 1DElectroStatic: an RF cavity, standing- or
-    # travelling-wave (LAURA has no separate field_type for the latter --
-    # cavity_type on the same 1DElectroDynamic map distinguishes them).
     ez = np.asarray(field_map.Ez.value, dtype=np.float64)
     if getattr(field_map, "cavity_type", None) == "TravellingWave":
         return TravelingWaveField(
@@ -115,12 +83,8 @@ def field_from_laura_hdf5(
 
 
 def wake_from_laura_hdf5(path: str | Path, component: str) -> ShortRangeWake | TransverseWake:
-    """One LAURA HDF5 wake file -> ``ShortRangeWake`` (``component="Wz"``) or
-    ``TransverseWake`` (``component="Wx"``/``"Wy"``). ``t_s`` comes from
-    LAURA's own ``FieldMap.t_values`` (``z / c``, confirmed exact match
-    against LAURA's own elegant-SDDS wake export for a real CLARA cavity,
-    see plans/LAURA_INTERFACE_PLAN.md's Validation section) rather than
-    recomputed here."""
+    """One LAURA HDF5 wake file -> ``ShortRangeWake`` (``component="Wz"``) or ``TransverseWake``
+    (``component="Wx"``/``"Wy"``)."""
     if not _HAVE_LAURA:
         raise ImportError(
             "wake_from_laura_hdf5 needs the optional 'laura' package installed "
@@ -130,10 +94,6 @@ def wake_from_laura_hdf5(path: str | Path, component: str) -> ShortRangeWake | T
     t_s = np.asarray(field_map.t_values, dtype=np.float64)
     w_param = getattr(field_map, component)
     if w_param.value is None:
-        # A LongitudinalWake file has no Wx/Wy -- FieldMap always exposes
-        # the FieldParameter itself (never a plain AttributeError), just
-        # with .value=None, so this must be checked explicitly rather than
-        # relying on attribute lookup to fail.
         raise ValueError(f"{path}: no {component!r} component in this wake file")
     w = np.asarray(w_param.value, dtype=np.float64) * _unit_scale(getattr(w_param.value, "units", None))
     if component == "Wz":

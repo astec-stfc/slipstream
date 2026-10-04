@@ -1,5 +1,5 @@
-"""Physical constants shared across the package (previously duplicated in
-pySTABLE/tracker.py, HALF/wake.py, and HALF/run_scan.py)."""
+"""Shared constants include the speed of light, elementary charge, electron rest energy, classical
+electron radius, vacuum permittivity and permeability. See docs/modules/constants.md."""
 
 C_LIGHT = 299792458.0  # m/s
 ELECTRON_MASS_EV = 0.51099895e6  # eV/c^2

@@ -56,14 +56,32 @@ def test_set_compile_cache_env_never_overrides_an_explicit_value(tmp_path: Path,
     override. This is the property that makes the helper safe to import
     unconditionally from an entry script without stomping on a user's own
     setup."""
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "/already/set/by/user")
-    monkeypatch.setenv("TRITON_CACHE_DIR", "/already/set/by/user/triton")
+    inductor = tmp_path / "caller-cache" / "inductor"
+    triton = tmp_path / "caller-cache" / "triton"
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(inductor))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(triton))
 
     _compile_env.set_compile_cache_env(tmp_path)
 
     import os
-    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == "/already/set/by/user"
-    assert os.environ["TRITON_CACHE_DIR"] == "/already/set/by/user/triton"
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(inductor)
+    assert os.environ["TRITON_CACHE_DIR"] == str(triton)
+    assert not (tmp_path / "inductor").exists()
+    assert not (tmp_path / "triton").exists()
+
+
+def test_set_compile_cache_env_creates_explicit_paths_without_touching_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inductor = tmp_path / "inductor"
+    triton = tmp_path / "triton"
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(inductor))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(triton))
+    monkeypatch.setattr(_compile_env, "_default_cache_root", lambda: tmp_path / "default-cache")
+
+    _compile_env.set_compile_cache_env()
+
+    assert inductor.is_dir()
+    assert triton.is_dir()
+    assert not (tmp_path / "default-cache").exists()
 
 
 def test_set_compile_cache_env_is_silent_after_torch_inductor_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

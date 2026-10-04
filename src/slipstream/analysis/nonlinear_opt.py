@@ -1,16 +1,5 @@
-"""Gradient-based nonlinear-optics optimisation on top of ``analysis.nonlinear`` /
-``tracking.native.ring.RingMap`` -- see plans/RING_NONLINEAR_DYNAMICS_PLAN.md (Phase 4).
-
-- ``periodic_specs`` / ``unique_names``: give sextupole positions (identical arcs) or every
-  element of a kind its own name, so ``RingMap.with_strengths`` can address them one by one.
-- ``KnobSet``: a vector of K2 strengths ``theta`` mapped onto ``with_strengths``.
-- ``chromaticity_response`` / ``null_basis``: the autograd Jacobian ``d xi / d theta`` and
-  the directions that leave the chromaticity fixed ("orthogonal knobs").
-- ``Launches`` / ``Footprint``: the smooth dynamic-aperture surrogate that gets minimised -- the
-  tune shift with amplitude and with momentum over a small launch set, differentiable in every
-  tensor strength, optionally over an ensemble of machines (``(M, 1)`` strengths).
-- ``sample_field_errors``: per-element random K1/K2 errors for a machine ensemble.
-"""
+"""Tensor magnet strengths support differentiable chromaticity and tune-footprint objectives. See
+docs/modules/analysis/nonlinear_opt.md."""
 from __future__ import annotations
 
 import dataclasses
@@ -121,11 +110,9 @@ def build_launches(
     opt_by_delta: dict[float, nl.LinearOptics], amps_mm, chrom_deltas, a_small_mm: float = 0.3, device="cpu",
     diff_points: tuple = (),
 ) -> Launches:
-    """A small-amplitude reference (delta = 0), amplitude scans in x, y and on the diagonal at delta = 0, and
-    small-amplitude launches at ``chrom_deltas`` (each on that delta's closed orbit from ``opt_by_delta``).
-    ``diff_points`` = ``(x_mm, y_mm, delta)`` triples of *large-amplitude* launches (each ``delta`` must be a key of
-    ``opt_by_delta``) whose tune diffusion between the two halves of the run is penalised -- the smooth stand-in for
-    frequency-map chaos near the dynamic-aperture edge."""
+    """A small-amplitude reference (delta = 0), amplitude scans in x, y and on the diagonal at delta =
+    0, and small-amplitude launches at ``chrom_deltas`` (each on that delta's closed orbit from
+    ``opt_by_delta``)."""
     o0 = opt_by_delta[0.0]
     a = a_small_mm * 1e-3
     rows, centers, deltas, kind = [nl.launch(o0, a, a)], [(o0.Qx, o0.Qy)], [0.0], ["ref"]
@@ -151,21 +138,8 @@ def build_launches(
 
 
 class Footprint:
-    """``loss(ring)``: a smooth surrogate for dynamic aperture, differentiable in every tensor strength of ``ring``
-    (NAFF and the tracking both are). Two parts over one small tracked launch set of ``n_turns`` turns:
-
-    - *footprint*: mean squared tune shift ``[Q(x, y, delta) - Q(ref) - xi_target delta]`` over the ``amp`` and
-      ``chrom`` launches, in units of 1e-3 -- the amplitude detuning plus the higher-order chromaticity the sextupole
-      scheme leaves behind, at fixed linear chromaticity (a compact footprint crosses fewer resonances);
-    - *diffusion* (``diff_weight > 0``, ``diff`` launches): ``mean log(1 + (D / diff_scale)^2)`` with ``D`` the tune
-      change between the two halves of the run -- the frequency-map diffusion, which stays ~1e-6..1e-5 on regular
-      motion and jumps toward 1e-3 as the particle nears chaos. It keeps the optimiser from buying a small footprint
-      with large-amplitude stability. A ``diff`` launch lost inside ``n_turns`` counts as ``D = 0.1``; a lost
-      ``amp``/``chrom`` launch contributes the constant ``lost_penalty`` (squared tune shift, units of 1e-6) to the footprint
-      term -- neither has a gradient, so the optimiser is pushed back out of that region rather than crashing.
-
-    ``n_machines=M`` tracks the launch set on ``M`` machines at once (``ring`` strengths ``(M, 1)``); ``loss`` is then
-    the mean over machines plus ``std_weight`` times their standard deviation (a robust objective)."""
+    """``loss(ring)``: a smooth surrogate for dynamic aperture, differentiable in every tensor strength
+    of ``ring`` (NAFF and the tracking both are)."""
 
     def __init__(self, launches: Launches, opt_norm: nl.LinearOptics, xi_target: tuple[float, float], n_turns: int = 256,
                  checkpoint: bool = False, weights: dict[str, float] | None = None, n_machines: int | None = None,
@@ -187,10 +161,6 @@ class Footprint:
         ap = (self.loss_aperture, self.loss_aperture)
         dead = None
         if ring._needs_grad(state):
-            # A launch that is lost inside the run blows up (inf/NaN) in the turn it goes, and although the loss mask
-            # zeroes its state, the backward pass multiplies a zero gradient by the NaN local derivative and that NaN
-            # is summed into every strength's gradient. So find the lost launches with a cheap no-gradient pass
-            # (CUDA-graph path) and start them from a harmless launch in the tracked-with-gradient pass.
             with torch.no_grad():
                 dead = ring.track(state, self.T, record_every=0, aperture=ap).loss_turn >= 0
             state = torch.where(dead.unsqueeze(-1), self.L.state[0].to(ring.dtype), state)
@@ -253,11 +223,9 @@ def sample_field_errors(
     specs: list[ElementSpec], rules: list[tuple[str, str, float]], n_machines: int, seed: int = 0,
     dtype=torch.float64, device="cpu", cutoff: float = 3.0,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Per-element Gaussian field errors for ``n_machines`` machines, as ``(M, 1)``
-    ``(k1 dict, k2 dict)`` ready for ``RingMap.with_strengths`` (specs must have per-element names,
-    ``unique_names``). ``rules`` are ``(kind, parameter, rms)`` with ``kind`` an ``ElementSpec.kind``
-    (``"quad"``, ``"bend"``), ``parameter`` ``"K1"`` or ``"K2"`` and ``rms`` *relative* to the element's own
-    value (K1 for quads and bends; K2 of a bend). Gaussians are truncated at ``cutoff`` sigma."""
+    """Per-element Gaussian field errors for ``n_machines`` machines, as ``(M, 1)`` ``(k1 dict, k2
+    dict)`` ready for ``RingMap.with_strengths`` (specs must have per-element names,
+    ``unique_names``)."""
     g = torch.Generator().manual_seed(seed)
     k1: dict[str, torch.Tensor] = {}
     k2: dict[str, torch.Tensor] = {}
@@ -270,3 +238,135 @@ def sample_field_errors(
             err = (nominal * rms * z).to(dtype=dtype, device=device)
             (k1 if param == "K1" else k2)[s.name] = torch.as_tensor(nominal, dtype=dtype, device=device) + err
     return k1, k2
+
+
+def action_growth_loss(tbt: torch.Tensor, opt: nl.LinearOptics, scale: float = 1.0) -> torch.Tensor:
+    """Smooth soft-survival surrogate: mean squared soft positive action growth."""
+    if scale <= 0:
+        raise ValueError("scale must be positive")
+    zx, zy = nl.normalized_signals(tbt, opt)
+    action = (zx.abs().square() + zy.abs().square()) / 2
+    reference = action[..., :1].clamp_min(torch.finfo(action.dtype).tiny)
+    growth = (action / reference - 1) / scale
+    # Smooth positive part; even constant action has a log(2)**2 baseline.
+    positive = torch.nn.functional.softplus(growth)
+    return positive.square().mean(-1)
+
+
+def joint_optics_loss(ring: RingMap, target: nl.LinearOptics, tune_scale: float = 1e-3,
+                      beta_scale: float = 0.01) -> torch.Tensor:
+    """Differentiable tune and fractional beta constraints for K1/K2 optimisation."""
+    if tune_scale <= 0 or beta_scale <= 0:
+        raise ValueError("constraint scales must be positive")
+    opt = nl.linear_optics(ring, create_graph=True)
+    loss = torch.zeros((), dtype=ring.dtype, device=ring.device)
+    for q, q0 in ((opt.Qx, target.Qx), (opt.Qy, target.Qy)):
+        d = torch.remainder(q - q0 + 0.5, 1) - 0.5
+        loss = loss + (d / tune_scale).square()
+    for b, b0 in ((opt.beta_x, target.beta_x), (opt.beta_y, target.beta_y)):
+        loss = loss + ((b / b0 - 1) / beta_scale).square()
+    return loss
+
+
+@dataclasses.dataclass
+class SearchResult:
+    theta: torch.Tensor
+    loss: float
+    evaluations: int
+    method: str
+
+
+def gradient_free(objective, theta: torch.Tensor, bounds, method: str = "Powell",
+                  max_evaluations: int = 100, seed: int = 0) -> SearchResult:
+    """Bounded Powell, Nelder-Mead or differential-evolution baseline."""
+    import numpy as np
+    from scipy.optimize import differential_evolution, minimize
+    if method not in ("Powell", "Nelder-Mead", "differential_evolution", "CMA-ES"):
+        raise ValueError("unknown gradient-free method")
+    if theta.ndim != 1 or theta.numel() == 0:
+        raise ValueError("theta must be a nonempty vector")
+    limits = np.asarray(bounds, dtype=float)
+    if limits.shape != (theta.numel(), 2) or (not np.isfinite(limits).all()) or np.any(limits[:, 0] >= limits[:, 1]):
+        raise ValueError("bounds must contain one increasing pair per knob")
+    if max_evaluations < 1:
+        raise ValueError("max_evaluations must be positive")
+    best = [np.clip(theta.detach().cpu().numpy(), limits[:, 0], limits[:, 1]), float("inf")]
+    calls = 0
+
+    class BudgetExhausted(Exception):
+        pass
+
+    def evaluate(x):
+        nonlocal calls
+        if calls >= max_evaluations:
+            raise BudgetExhausted
+        calls += 1
+        with torch.no_grad():
+            value = float(objective(torch.as_tensor(x, dtype=theta.dtype, device=theta.device)))
+        if np.isfinite(value) and value < best[1]:
+            best[:] = [x.copy(), value]
+        return value if np.isfinite(value) else float("inf")
+
+    try:
+        evaluate(best[0])
+        if method == "CMA-ES":
+            try:
+                import cma
+            except ImportError as exc:
+                raise ImportError("CMA-ES requires the optional cma package") from exc
+            widths = limits[:, 1] - limits[:, 0]
+            strategy = cma.CMAEvolutionStrategy((best[0] - limits[:, 0]) / widths, 1 / 6, {
+                "bounds": [0, 1],
+                "seed": seed + 1, "verbose": -9, "maxfevals": max_evaluations})
+            while not strategy.stop():
+                population = strategy.ask()
+                values = [evaluate(limits[:, 0] + widths * x) for x in population]
+                strategy.tell(population, values)
+        elif method == "differential_evolution":
+            differential_evolution(evaluate, limits, seed=seed, polish=False,
+                                   maxiter=max_evaluations, popsize=5, x0=best[0])
+        else:
+            minimize(evaluate, best[0], method=method, bounds=limits,
+                     options={"maxfev": max_evaluations, "maxiter": max_evaluations})
+    except BudgetExhausted:
+        pass
+    return SearchResult(torch.as_tensor(best[0], dtype=theta.dtype, device=theta.device),
+                        best[1], calls, method)
+
+
+def multi_fidelity(smooth_objective, aperture_objective, theta: torch.Tensor, bounds,
+                   gradient_steps: int = 20, learning_rate: float = 1e-2,
+                   max_evaluations: int = 100, seed: int = 0,
+                   method: str = "differential_evolution") -> tuple[SearchResult, SearchResult]:
+    """Gradient screening followed by bounded gradient-free DA refinement."""
+    if gradient_steps < 1 or learning_rate <= 0:
+        raise ValueError("positive gradient_steps and learning_rate required")
+    if theta.ndim != 1 or theta.numel() == 0:
+        raise ValueError("theta must be a nonempty vector")
+    limits = torch.as_tensor(bounds, dtype=theta.dtype, device=theta.device)
+    if limits.shape != (theta.numel(), 2) or not bool(torch.isfinite(limits).all()) or bool((limits[:, 0] >= limits[:, 1]).any()):
+        raise ValueError("bounds must contain one increasing pair per knob")
+    candidate = theta.detach().clone().clamp(limits[:, 0], limits[:, 1]).requires_grad_(True)
+    optimizer = torch.optim.Adam([candidate], lr=learning_rate)
+    best_theta, best_loss = candidate.detach().clone(), float("inf")
+    for _ in range(gradient_steps):
+        optimizer.zero_grad()
+        loss = smooth_objective(candidate)
+        value = float(loss.detach())
+        if not math.isfinite(value):
+            raise ValueError("non-finite surrogate; reduce launch amplitudes")
+        if value < best_loss:
+            best_theta, best_loss = candidate.detach().clone(), value
+        loss.backward()
+        if candidate.grad is None or not bool(torch.isfinite(candidate.grad).all()):
+            raise ValueError("non-finite surrogate gradient; reduce launch amplitudes")
+        optimizer.step()
+        with torch.no_grad():
+            candidate.clamp_(limits[:, 0], limits[:, 1])
+    final_loss = float(smooth_objective(candidate).detach())
+    if math.isfinite(final_loss) and final_loss < best_loss:
+        best_theta, best_loss = candidate.detach().clone(), final_loss
+    screening = SearchResult(best_theta, best_loss, gradient_steps + 1, "Adam")
+    refinement = gradient_free(aperture_objective, best_theta, bounds, method,
+                               max_evaluations, seed)
+    return screening, refinement

@@ -1,20 +1,5 @@
-"""Nonlinear ring dynamics on top of ``tracking.native.ring.RingMap``:
-closed orbit / linear optics / chromaticity from the autograd Jacobian of the
-real one-turn map, batched NAFF tunes, tune shift with amplitude (TSA),
-dynamic aperture (DA) and frequency-map analysis (FMA). See
-plans/RING_NONLINEAR_DYNAMICS_PLAN.md.
-
-Everything is batched over particles (no per-particle Python loops) and --
-except the survival bookkeeping of DA -- differentiable in any tensor
-strength set via ``RingMap.with_strengths``: ``linear_optics``/
-``chromaticity`` via ``create_graph`` Jacobians, ``naff`` via unrolled Newton
-refinement (the FFT peak search only seeds it).
-
-Tunes are fractional, in ``[0, 1)``. Amplitudes are physical offsets at the
-ring start (``s=0``, the first element's entrance), launched from the closed
-orbit with zero momentum offset, like elegant's ``find_aperture``/
-``frequency_map``.
-"""
+"""Computes fixed-energy ring closed orbits, Jacobian optics, chromaticity, NAFF frequencies, amplitude
+detuning, dynamic aperture and frequency-map diffusion. See docs/modules/analysis/nonlinear.md."""
 from __future__ import annotations
 
 import math
@@ -37,14 +22,16 @@ class LinearOptics(NamedTuple):
 
 
 def _jacobian(ring: RingMap, x0: torch.Tensor, create_graph: bool) -> torch.Tensor:
-    # vectorize=True: ~4x faster than 6 separate backward passes; forward
-    # mode would be faster still but can't create_graph (torch 2.14).
-    return torch.autograd.functional.jacobian(lambda u: ring.turn(u, eager=True), x0, create_graph=create_graph, vectorize=True)
+    return torch.autograd.functional.jacobian(
+        lambda u: ring.turn(u, eager=True), x0, create_graph=create_graph, vectorize=create_graph,
+    )
 
 
 def _closed_orbit_and_matrix(
     ring: RingMap, delta: float, iters: int, create_graph: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Newton fixed point of the one-turn map, differentiable in any tensor strength ``ring`` carries
+    (``create_graph=True``)."""
     tol = 1e-13 if ring.dtype == torch.float64 else 1e-6
     co = torch.zeros(6, dtype=ring.dtype, device=ring.device)
     co[5] = delta
@@ -52,9 +39,10 @@ def _closed_orbit_and_matrix(
     for _ in range(iters):
         J = _jacobian(ring, co, create_graph)
         resid = ring.turn(co, eager=True)[:4] - co[:4]
-        if resid.abs().max().item() < tol:
-            break
+        converged = resid.abs().max().item() < tol
         co = torch.cat([co[:4] - torch.linalg.solve(J[:4, :4] - eye, resid), co[4:]])
+        if converged:
+            break
     else:
         raise RuntimeError(f"closed orbit not converged at delta={delta}")
     return co, J
@@ -64,6 +52,18 @@ def closed_orbit(ring: RingMap, delta: float = 0.0, iters: int = 8, create_graph
     """Transverse fixed point ``(x, px, y, py)`` of the one-turn map at fixed
     ``delta`` by Newton iteration (converges to round-off in ~3 steps for
     a stable ring). Returns the full ``(6,)`` state (``tau=0``)."""
+    if not create_graph:
+        tol = 1e-13 if ring.dtype == torch.float64 else 1e-6
+        co = torch.zeros(6, dtype=ring.dtype, device=ring.device)
+        co[5] = delta
+        eye = torch.eye(4, dtype=ring.dtype, device=ring.device)
+        for _ in range(iters):
+            resid = ring.turn(co, eager=True)[:4] - co[:4]
+            if resid.abs().max().item() < tol:
+                return co
+            J = _jacobian(ring, co, create_graph=False)
+            co = torch.cat([co[:4] - torch.linalg.solve(J[:4, :4] - eye, resid), co[4:]])
+        raise RuntimeError(f"closed orbit not converged at delta={delta}")
     return _closed_orbit_and_matrix(ring, delta, iters, create_graph)[0]
 
 
@@ -83,9 +83,49 @@ def linear_optics(ring: RingMap, delta: float = 0.0, create_graph: bool = False)
     if ring.double_single:
         ring = ring.float64_reference()
     co, M = _closed_orbit_and_matrix(ring, delta, 8, create_graph)
+    if max(M[:2, 2:4].abs().max().item(), M[2:4, :2].abs().max().item()) > (1e-10 if M.dtype == torch.float64 else 1e-5):
+        raise ValueError("coupled transverse map: use coupled_optics and coupled_signals")
     Qx, bx, ax = _plane(M[0:2, 0:2])
     Qy, by, ay = _plane(M[2:4, 2:4])
     return LinearOptics(co, M, Qx, Qy, bx, ax, by, ay)
+
+
+class CoupledOptics(NamedTuple):
+    closed_orbit: torch.Tensor
+    M: torch.Tensor
+    tunes: torch.Tensor  # (2,), normal-mode fractional tunes
+    normalizer: torch.Tensor  # (4,4), symplectic normal coordinates -> lab
+
+
+def coupled_optics(ring: RingMap, delta: float = 0.0, create_graph: bool = False) -> CoupledOptics:
+    """Stable 4D normal modes from symplectically normalized eigenvectors."""
+    if ring.double_single:
+        ring = ring.float64_reference()
+    co, M = _closed_orbit_and_matrix(ring, delta, 8, create_graph)
+    A = M[:4, :4]
+    J = A.new_tensor([[0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 0, 1], [0, 0, -1, 0]])
+    if not torch.allclose(A.T @ J @ A, J, atol=1e-7, rtol=1e-7):
+        raise ValueError("transverse map is not symplectic")
+    vals, vec = torch.linalg.eig(A)
+    if not torch.allclose(vals.abs(), torch.ones_like(vals.real), atol=1e-7, rtol=1e-7):
+        raise ValueError("linearly unstable transverse normal modes")
+    norm = (vec.conj() * (J.to(vec.dtype) @ vec)).sum(0).imag
+    selected = torch.nonzero(norm > 1e-8).flatten()
+    if selected.numel() != 2:
+        raise ValueError("normal modes degenerate or not symplectically normalizable")
+    q = torch.remainder(torch.angle(vals[selected]) / (2 * math.pi), 1)
+    order = q.argsort()
+    selected, q = selected[order], q[order]
+    v = vec[:, selected] * torch.sqrt(2 / norm[selected]).unsqueeze(0)
+    N = torch.stack((v[:, 0].real, v[:, 0].imag, v[:, 1].real, v[:, 1].imag), -1)
+    return CoupledOptics(co, M, q, N)
+
+
+def coupled_signals(tbt: torch.Tensor, opt: CoupledOptics) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normal-mode signals shaped ``(...,T)`` for recorded lab coordinates."""
+    u = tbt.double() - opt.closed_orbit[:4].to(tbt.device, torch.float64)
+    normal = u @ torch.linalg.inv(opt.normalizer.to(u)).T
+    return tuple(torch.complex(normal[..., i], -normal[..., i + 1]).movedim(0, -1) for i in (0, 2))
 
 
 def chromaticity(ring: RingMap, ddelta: float = 1e-4, create_graph: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
@@ -105,18 +145,7 @@ def naff(
     z: torch.Tensor, window_order: int = 1, newton_iters: int = 5, pad: int = 4,
     center: torch.Tensor | float | None = None, half_width: float = 0.1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Dominant frequency (turns^-1, in ``[0, 1)``) and amplitude of each
-    complex signal ``z`` ``(..., T)`` -- Laskar's NAFF first harmonic:
-    Hann^``window_order`` window, zero-padded FFT peak as the seed, then
-    Newton refinement of ``argmax |sum_n w_n z_n exp(-2 pi i nu n)|``.
-    Error on a pure tone ~1e-10 at T=1024 (float64); see
-    tests/test_ring_nonlinear.py.
-
-    ``center`` (broadcastable to ``z.shape[:-1]``) restricts the seed to
-    ``|nu - center| < half_width``: with a large amplitude in one plane the
-    other plane's signal carries driven lines (``2 Q_y`` ... ) that can
-    out-weigh its own small betatron line, and an unrestricted peak search
-    then returns the wrong line (a ~0.2 "tune shift")."""
+    """Compute naff; see the module documentation for details."""
     T = z.shape[-1]
     n = torch.arange(T, dtype=z.real.dtype, device=z.device)
     w = (1 - torch.cos(2 * math.pi * n / T)) ** window_order
@@ -171,14 +200,7 @@ def tunes(
     ring: RingMap, opt: LinearOptics, state: torch.Tensor, n_turns: int, checkpoint: bool = False,
     band: float | None = None, centers: tuple | None = None, **naff_kw,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Track ``state`` ``n_turns`` (recording every turn) and NAFF both
-    planes. Returns ``(Qx, Qy, lost)``; lost particles' tunes are NaN.
-    ``state`` may sit at any ``delta`` (NAFF removes the mean, so the launch
-    need not be exactly on that ``delta``'s closed orbit); ``checkpoint``
-    recomputes each turn in the backward pass (memory O(1 turn)).
-    ``band`` (half-width, tune units) restricts each plane's NAFF seed to
-    ``|nu - Q| < band`` around ``centers = (Qx, Qy)`` (default the linear
-    tunes of ``opt``) -- see ``naff``."""
+    """Track ``state`` ``n_turns`` (recording every turn) and NAFF both planes."""
     res = ring.track(state, n_turns, record_every=1, aperture=(math.inf, math.inf), checkpoint=checkpoint)
     zx, zy = normalized_signals(res.tbt, opt)
     lost = res.loss_turn >= 0
@@ -203,18 +225,7 @@ def detuning(
     ring: RingMap, x_max: float, y_max: float, n_amp: int = 6, n_turns: int = 512, delta: float = 0.0,
     opt: LinearOptics | None = None, band: float | None = 0.05,
 ) -> Detuning:
-    """First-order amplitude-detuning coefficients (per metre of action,
-    ``J = gamma*u^2/2`` for a pure-offset launch) from a linear+quadratic
-    least-squares fit of NAFF tunes over ``n_amp`` amplitudes up to
-    ``x_max`` (y fixed at ``y_max/(2 n_amp)``) and up to ``y_max`` (x fixed
-    at ``x_max/(2 n_amp)``), all in one batch. The fixed other-plane
-    amplitude only offsets the fitted line; it must stay well above the
-    working-precision noise floor (a 1 um amplitude in float32 gave a
-    cross-term 100x off).
-    ``band``: NAFF seed window around the linear tunes (see ``naff``) -- keeps
-    the fit on the betatron line when the other plane's amplitude drives lines
-    that out-weigh it.
-    Differentiable through NAFF and the fit (keep amplitudes inside the DA)."""
+    """Compute detuning; see the module documentation for details."""
     opt = opt or linear_optics(ring, delta)
     a = torch.linspace(0, 1, n_amp + 1, dtype=ring.dtype, device=ring.device)[1:]
     xs = torch.cat([a * x_max, torch.full_like(a, x_max / (2 * n_amp))])
@@ -247,14 +258,7 @@ def dynamic_aperture(
     delta: float = 0.0, aperture: tuple[float, float] = (0.05, 0.05), batch_shape: tuple[int, ...] = (),
     opt: LinearOptics | None = None,
 ) -> DynamicAperture:
-    """Upper-half-plane DA along ``n_angles`` rays in ``[0, pi]`` (elegant
-    ``find_aperture`` ``mode="n-lines"`` geometry): ``n_r`` radii per ray in
-    one batched run; the boundary on each ray is the last radius before the
-    *first* loss (islands beyond it don't count). ``refine`` further batched
-    passes subdivide each ray's bracketing interval by ``n_r``, so the
-    final resolution is ``r_max / n_r**(refine+1)``. ``batch_shape`` prefixes
-    the particle batch -- e.g. ``(M,)`` with a ``with_strengths`` error
-    ensemble of shape ``(M, 1)``, launched from the nominal closed orbit."""
+    """Compute dynamic aperture; see the module documentation for details."""
     opt = opt or linear_optics(ring, delta)
     dev, dt = ring.device, ring.dtype
     theta = torch.linspace(0, math.pi, n_angles, dtype=dt, device=dev)
@@ -288,12 +292,8 @@ def frequency_map(
     n_turns: int = 1024, delta: float = 0.0, aperture: tuple[float, float] = (0.05, 0.05),
     opt: LinearOptics | None = None, band: float | None = 0.1,
 ) -> FrequencyMap:
-    """Laskar FMA on an ``nx x ny`` grid of initial offsets: one run of
-    ``n_turns``, NAFF on each half, diffusion ``log10 sqrt(dQx^2+dQy^2)``.
-    Keep ``y_range[0] > 0`` (zero vertical amplitude has no vertical tune).
-    ``band``: NAFF seed window ``|nu - Q| < band`` around the linear tunes (see ``naff``) --
-    without it a small-``x``, large-``y`` launch returns the driven ``2 Q_y`` line as its
-    horizontal "tune"; ``None`` restores the unrestricted peak search."""
+    """Laskar FMA on an ``nx x ny`` grid of initial offsets: one run of ``n_turns``, NAFF on each half,
+    diffusion ``log10 sqrt(dQx^2+dQy^2)``."""
     opt = opt or linear_optics(ring, delta)
     dev, dt = ring.device, ring.dtype
     X, Y = torch.meshgrid(
@@ -310,3 +310,27 @@ def frequency_map(
     nan = torch.tensor(math.nan, dtype=dt, device=dev)
     D = torch.where(lost, nan, 0.5 * torch.log10(dqx**2 + dqy**2 + 1e-300))
     return FrequencyMap(X, Y, torch.where(lost, nan, q[0]), torch.where(lost, nan, q[1]), D)
+
+
+def naff_harmonics(z: torch.Tensor, n_harmonics: int = 3, **naff_kw) -> tuple[torch.Tensor, torch.Tensor]:
+    """Successive NAFF lines and complex coefficients, shaped ``(..., H)``."""
+    if n_harmonics < 1 or z.shape[-1] < 4 or not z.is_complex():
+        raise ValueError("need a complex signal with >=4 samples and positive harmonic count")
+    n = torch.arange(z.shape[-1], dtype=z.real.dtype, device=z.device)
+    residual = z - z.mean(-1, keepdim=True)
+    frequencies = []
+    for _ in range(n_harmonics):
+        q = naff(residual, **naff_kw)[0]
+        frequencies.append(q)
+        qs = torch.stack(frequencies, -1)
+        basis = torch.exp(2j * math.pi * n[:, None] * qs.unsqueeze(-2))
+        coefficients = torch.linalg.lstsq(basis, z.unsqueeze(-1)).solution.squeeze(-1)
+        residual = z - (basis @ coefficients.unsqueeze(-1)).squeeze(-1)
+    return qs, coefficients
+
+
+def spectral_lines(z: torch.Tensor, frequencies: torch.Tensor) -> torch.Tensor:
+    """Complex amplitudes at specified lines by a joint least-squares fit."""
+    n = torch.arange(z.shape[-1], dtype=z.real.dtype, device=z.device)
+    basis = torch.exp(2j * math.pi * n[:, None] * frequencies.unsqueeze(-2))
+    return torch.linalg.lstsq(basis, z.unsqueeze(-1)).solution.squeeze(-1)

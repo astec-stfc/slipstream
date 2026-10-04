@@ -1,0 +1,28 @@
+# Portable synthetic example, with total reference energy in eV and SI units.
+lattice:
+  path: line.lte
+  root: DEMO
+energy_eV: 30000000
+tracker:
+  device: cpu
+  dtype: float64
+  compile: false
+  bunch_charge_C: 2.0e-10
+  lsc: false
+  csr: false
+bunch:
+  source: generated
+  n: 512
+  beta_x0: 2.0
+  alpha_x0: 0.3
+  epsx_m: 1.0e-8
+  beta_y0: 1.5
+  alpha_y0: -0.1
+  epsy_m: 2.0e-8
+  sigma_tau_m: 1.0e-4
+  sigma_delta: 2.0e-3
+  seed: 123
+run:
+  return_trajectory: true
+reference:
+  energy_eV: 32000000
