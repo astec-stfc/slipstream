@@ -1,16 +1,7 @@
-"""``BeamlineStudy`` -- the ``Study`` facade's sibling for the native
-linac/injector family (E3, see
-plans/essential/E3_NATIVE_FACADE_PLAN.md). ``Study`` (``main.py``) covers
-the ring backends only; the entire validated
-``tracking.native.linac.LinacTracker``/``tracking.native.injector.Injector``
-family was previously reachable only via bespoke scripts
-(``examples/clara_linac/run_clara_linac_demo.py``,
-``Stories/Moustache/track_moustache.py``). No new physics -- orchestration
-only, composition rather than a ``Study`` subclass (the constructor inputs
-are genuinely different: an ``ElementSpec`` list, not a ``Lattice``).
-"""
+"""Native linac/injector study facade and portable YAML run orchestration."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import torch
@@ -60,6 +51,7 @@ class BeamlineStudy:
             lsc=lsc, csr=csr, pipe_radius_b_m=pipe_radius_b_m,
             fast_collective_effects=fast_collective_effects, **tracker_kwargs,
         )
+        self._run_config = None
 
     @classmethod
     def from_lattice_file(
@@ -71,6 +63,85 @@ class BeamlineStudy:
         directory) -- a machine's own ``.lte`` straight into a study."""
         specs = resolve_wakes(parse_elegant_lattice(lte_path, root_name), base_dir=wake_base_dir)
         return cls(specs, energy_eV, mc2_eV=mc2_eV, **kwargs)
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "BeamlineStudy":
+        """Build one reusable tracker from a strict YAML run configuration.
+
+        Paths are relative to the YAML file; lattice wake paths default to
+        the lattice directory. See ``docs/beamline_studies.md`` for the schema.
+        Particle sources are loaded when :meth:`run` is called.
+        """
+        from .beamline_config import read_config
+
+        config = read_config(path)
+        lattice = config["lattice"]
+        specs = parse_elegant_lattice(lattice["path"], lattice["root"])
+        if lattice.get("wakes", True):
+            specs = resolve_wakes(specs, base_dir=lattice["wake_base_dir"])
+        study = cls(specs, config["energy_eV"], mc2_eV=config["mc2_eV"], **config["tracker"])
+        study._run_config = config
+        return study
+
+    def run(self, output_path: str | Path | None = None) -> BeamlineResult:
+        """Execute the configured source and beamline, optionally saving HDF5.
+
+        Generated sources default to seed 0 and reproduce on repeated runs
+        on the same device. ``output_path`` overrides ``run.output``; an
+        explicit override is relative to the caller's working directory.
+        Injector/HDF5 sources supply their own reference energy and charge.
+        """
+        if self._run_config is None:
+            raise ValueError("run() requires a study created with BeamlineStudy.from_yaml()")
+        cfg = self._run_config
+        bunch = dict(cfg["bunch"])
+        source = bunch.pop("source")
+        self.energy_eV = cfg["energy_eV"]
+        self._tracker._set_reference_energy(self.energy_eV)
+        self._tracker.bunch_charge_C = cfg["tracker"].get("bunch_charge_C", 0.0)
+        kwargs = dict(return_trajectory=cfg["run"].get("return_trajectory", False),
+                      reference=cfg["reference"], metadata={"config_path": str(cfg["path"]), "source": source})
+        if source == "astra":
+            injector = Injector.from_astra(bunch["path"], mc2_eV=self.mc2_eV)
+            result = self.track_with_injector(injector, n_particles=bunch.get("n_particles"),
+                                              injector_kwargs=bunch["injector"], **kwargs)
+        else:
+            if source == "generated":
+                particles = self.generate_bunch(**bunch)
+            elif source == "sdds":
+                from .beamline_config import load_sdds_particles
+
+                particles = load_sdds_particles(
+                    bunch["path"], self.energy_eV, self.mc2_eV, self._tracker.device,
+                    self._tracker.dtype, bunch.get("time_origin_s", 0.0),
+                )
+            else:
+                from .data.particles import load_particles_h5
+                from .tracking.native.elements import _canonical_from_slopes
+
+                particles, meta = load_particles_h5(bunch["path"], self._tracker.device, self._tracker.dtype)
+                if meta["tau_units"] != "m" or meta["mc2_eV"] != self.mc2_eV:
+                    raise ValueError("HDF5 bunch must have tau_units=m and mc2_eV matching the study")
+                if not math.isfinite(meta["energy_eV"]) or not meta["energy_eV"] > self.mc2_eV:
+                    raise ValueError("HDF5 bunch energy_eV must be finite and exceed mc2_eV")
+                if not math.isfinite(meta["charge_C"]):
+                    raise ValueError("HDF5 bunch charge_C must be finite")
+                self.energy_eV = meta["energy_eV"]
+                self._tracker._set_reference_energy(self.energy_eV)
+                self._tracker.bunch_charge_C = meta["charge_C"]
+                if not meta["canonical"]:
+                    if particles.ndim != 2 or particles.shape[1] != 6:
+                        raise ValueError("Bunch must have shape (N, 6)")
+                    x, xp, y, yp, tau, delta = particles.unbind(-1)
+                    px, py = _canonical_from_slopes(xp, yp, delta)
+                    particles = torch.stack((x, px, y, py, tau, delta), dim=-1)
+            if particles.ndim != 2 or particles.shape[1] != 6 or particles.shape[0] < 2:
+                raise ValueError("Configured bunch must have shape (N, 6) with at least two particles")
+            result = self.track(particles, **kwargs)
+        output = output_path if output_path is not None else cfg["run"].get("output")
+        if output is not None:
+            result.save(output)
+        return result
 
     def generate_bunch(
         self, n: int,
@@ -110,6 +181,10 @@ class BeamlineStudy:
         """One pass through ``self.specs``. ``reference`` (optional):
         compared against the result's own ``scalars()`` immediately,
         stashed under ``metadata["reference_diff"]``."""
+        if particles6.ndim != 2 or particles6.shape[1] != 6 or particles6.shape[0] < 1:
+            raise ValueError("Bunch must have shape (N, 6) with at least one particle")
+        if not bool(torch.isfinite(particles6).all()):
+            raise ValueError("Bunch coordinates must be finite")
         if return_trajectory:
             particles_out, energy_out, trajectory, energy_trajectory = self._tracker.track(particles6, return_trajectory=True)
         else:
@@ -160,17 +235,19 @@ class BeamlineStudy:
         its own exit energy overrides ``self.energy_eV`` as the
         ``LinacTracker``'s reference energy -- ``track()`` must resume from
         where the injector actually left off, not this study's own
-        construction-time value. Updates the tracker's own reference-energy
-        tensor in place (``.fill_()``, not reassignment -- the
-        ``torch.compile`` "changing-value argument forces a recompile"
-        discipline this package follows throughout, see ``CLAUDE.md``)."""
+        construction-time value. Updates the reference-energy tensor in
+        place and refreshes energy-dependent magnet reference offsets."""
         inj = injector_or_deck if isinstance(injector_or_deck, Injector) else Injector.from_astra(injector_or_deck)
+        if inj.mc2_eV != self.mc2_eV:
+            raise ValueError("Injector mc2_eV must match the beamline study")
         out = inj.track(n_particles=n_particles, return_particles=True, **(injector_kwargs or {}))
+        if out["x"].numel() < 1:
+            raise ValueError("Injector exit bunch must contain at least one particle")
         particles6, energy_eV, charge_C = injector_exit_to_canonical6(
-            out, device=self._tracker.device, dtype=self._tracker.dtype,
+            out, device=self._tracker.device, dtype=self._tracker.dtype, mc2_eV=inj.mc2_eV,
         )
         self.energy_eV = energy_eV
-        self._tracker._energy_eV_t.fill_(energy_eV)
+        self._tracker._set_reference_energy(energy_eV)
         self._tracker.bunch_charge_C = charge_C
         return self.track(particles6, **track_kwargs)
 

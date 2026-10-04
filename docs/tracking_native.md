@@ -54,6 +54,10 @@ kick per turn.
 
 ## Linac tracking
 
+For a complete run from YAML, including bunch generation or an injector
+stage, use [BeamlineStudy](beamline_studies.md). The package includes a
+portable synthetic example and `python -m slipstream.beamline_cli` runner.
+
 `LinacTracker` takes the same parsed element list and an injection energy:
 
 ```python

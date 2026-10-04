@@ -76,6 +76,16 @@ Particle states use the canonical `(x, px, y, py, tau, delta)` layout. See
 injector usage, and [`docs/formats.md`](docs/formats.md) for supported input
 formats.
 
+Run a complete synthetic beamline study from a portable YAML configuration:
+
+```bash
+python -m slipstream.beamline_cli examples/beamline/study.yaml -o result.h5
+```
+
+See [beamline studies](docs/beamline_studies.md) for generated, HDF5, SDDS,
+and native ASTRA sources, and the [essential-plan assessment](docs/essential_plans.md)
+for implemented milestones and remaining physics work.
+
 For frozen-energy ring maps, normal modes, loss locations, and spectral
 analysis, see [`docs/nonlinear_dynamics.md`](docs/nonlinear_dynamics.md).
 RF-on dynamic aperture, frequency maps, and sampled momentum acceptance are

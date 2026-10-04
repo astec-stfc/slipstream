@@ -172,7 +172,12 @@ class BeamlineResult:
                     g.create_dataset(k, data=np.asarray(v))
             meta = f.create_group("metadata")
             for k, v in self.metadata.items():
-                meta.attrs[k] = v
+                if k == "reference_diff" and isinstance(v, dict):
+                    ref = meta.create_group("reference_diff")
+                    for name, difference in v.items():
+                        ref.attrs[name] = difference
+                else:
+                    meta.attrs[k] = v
 
     @classmethod
     def load(cls, path: str | Path) -> "BeamlineResult":
@@ -180,6 +185,9 @@ class BeamlineResult:
             slice_summary = None
             if "slice_summary" in f:
                 slice_summary = {k: f["slice_summary"][k][()] for k in f["slice_summary"]}
+            metadata = dict(f["metadata"].attrs) if "metadata" in f else {}
+            if "metadata/reference_diff" in f:
+                metadata["reference_diff"] = dict(f["metadata/reference_diff"].attrs)
             return cls(
                 particles_out=f["particles_out"][()],
                 energy_eV_out=float(f.attrs["energy_eV_out"]),
@@ -187,7 +195,7 @@ class BeamlineResult:
                 trajectory=f["trajectory"][()] if "trajectory" in f else None,
                 energy_trajectory=f["energy_trajectory"][()] if "energy_trajectory" in f else None,
                 slice_summary=slice_summary,
-                metadata=dict(f["metadata"].attrs) if "metadata" in f else {},
+                metadata=metadata,
             )
 
 

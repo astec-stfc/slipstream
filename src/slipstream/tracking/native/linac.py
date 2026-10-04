@@ -47,7 +47,7 @@ from .collective import (
     lsc_delta_kick,
     lsc_delta_kick_fast,
 )
-from .elements import _match_energy_to_centroid, _rebase_reference, track_element
+from .elements import _match_energy_to_centroid, _rebase_reference, reference_offset, track_element
 from .errors import FiducialReference, SampledError, apply_errors
 from .lattice_import import ElementSpec
 from .tracker import _ElementParams, _apply_one_element, _build_params
@@ -496,7 +496,9 @@ class LinacTracker:
             integration_order=integration_order, rf_mode="per_element",
             change_p0_override=False if always_change_p0 else None,
         )
-        if csr and fast_collective_effects and bunch_charge_C != 0:
+        # Keep the substep shape stable when an injector/source supplies
+        # charge after construction. Zero charge gives zero collective kick.
+        if csr and fast_collective_effects:
             for i, spec in enumerate(effective_specs):
                 if (not spec.csr or spec.csr_n_slices <= 1 or spec.angle == 0
                         or spec.dx != 0 or spec.dy != 0 or spec.tilt != 0):
@@ -558,8 +560,31 @@ class LinacTracker:
         # Monte Carlo jitter study) must not force a recompile per
         # distinct injection energy.
         self._energy_eV_t = torch.tensor(energy_eV, dtype=dtype, device=self.device)
+        self._reference_energy_eV = energy_eV
         self._mc2_eV_t = torch.tensor(mc2_eV, dtype=dtype, device=self.device)
         self._charge_per_particle_C = torch.zeros((), dtype=dtype, device=self.device)
+
+    def _set_reference_energy(self, energy_eV: float) -> None:
+        """Update entrance energy and cached magnet reference offsets together.
+
+        Source handoffs may change energy after construction. Never mutate
+        ``reference_offset``'s shared cached CPU tensor; each refreshed offset
+        is an owned tensor with the original shape, dtype and device.
+        """
+        if energy_eV != self._reference_energy_eV:
+            def refresh(p):
+                if p.is_rf or p.is_kick:
+                    return p
+                offset = reference_offset(
+                    p.length, p.angle, p.k1, p.k2, p.e1, p.e2, energy_eV, self.mc2_eV,
+                    p.n_kicks, p.integration_order, p.hgap, p.fint, p.edge_order,
+                    p.edge1_effects, p.edge2_effects, p.exact_dipole,
+                ).to(device=self.device, dtype=self.dtype).clone()
+                return p._replace(offset=offset, csr_substeps=tuple(refresh(sub) for sub in p.csr_substeps))
+
+            self._element_params = [refresh(p) for p in self._element_params]
+            self._reference_energy_eV = energy_eV
+        self._energy_eV_t.fill_(energy_eV)
 
     def track(
         self, particles6: torch.Tensor, return_trajectory: bool = False, reference_energy_eV: torch.Tensor | None = None,
@@ -579,14 +604,14 @@ class LinacTracker:
         each element's own physics -- only the trajectory bookkeeping (a
         growing Python list + a final ``torch.stack``) stays uncompiled."""
         particles6 = particles6.to(device=self.device, dtype=self.dtype)
-        if self.bunch_charge_C != 0.0:
-            self._charge_per_particle_C.fill_(self.bunch_charge_C / particles6.shape[0])
+        self._charge_per_particle_C.fill_(self.bunch_charge_C / particles6.shape[0])
+        csr_active = self.csr and self.bunch_charge_C != 0.0
         if reference_energy_eV is not None:
             return self._track_design_reference(particles6, reference_energy_eV)
         if not return_trajectory:
             return self._track_single_pass(
                 particles6, self._element_params, self._energy_eV_t, self._mc2_eV_t, self.always_change_p0,
-                self._charge_per_particle_C, self.lsc, self.csr, self.pipe_radius_b_m,
+                self._charge_per_particle_C, self.lsc, csr_active, self.pipe_radius_b_m,
                 self.lsc_radius_factor, self.csr_softening_m,
             )
         trajectory = [particles6]
@@ -596,7 +621,7 @@ class LinacTracker:
             fn = self._rf_step_fn if p.is_rf else self._step_fn
             particles6, energy_eV = fn(
                 particles6, p, energy_eV, self._mc2_eV_t, self.always_change_p0, self._charge_per_particle_C,
-                self.lsc, self.csr, self.pipe_radius_b_m, self.lsc_radius_factor, self.csr_softening_m,
+                self.lsc, csr_active, self.pipe_radius_b_m, self.lsc_radius_factor, self.csr_softening_m,
             )
             trajectory.append(particles6)
             energy_trajectory.append(energy_eV)
@@ -619,7 +644,8 @@ class LinacTracker:
             fn = self._rf_step_fn if p.is_rf else self._step_fn
             particles6, e_out = fn(
                 particles6, p, prof[i], self._mc2_eV_t, False, self._charge_per_particle_C,
-                self.lsc, self.csr, self.pipe_radius_b_m, self.lsc_radius_factor, self.csr_softening_m,
+                self.lsc, self.csr and self.bunch_charge_C != 0.0,
+                self.pipe_radius_b_m, self.lsc_radius_factor, self.csr_softening_m,
             )
             particles6 = _rebase_reference(particles6, e_out, prof[i + 1], self._mc2_eV_t)
         return particles6, prof[-1]
@@ -641,7 +667,7 @@ class LinacTracker:
         for p in self._element_params:
             state, energy_eV = self._step_fn(
                 state, p, energy_eV, self._mc2_eV_t, self.always_change_p0, 0.0,
-                self.lsc, self.csr, self.pipe_radius_b_m, self.lsc_radius_factor, self.csr_softening_m,
+                self.lsc, False, self.pipe_radius_b_m, self.lsc_radius_factor, self.csr_softening_m,
             )
             trajectory.append(state)
         t_ref_s = (state[..., 4] / C_LIGHT).mean().item()
