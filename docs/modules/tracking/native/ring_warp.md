@@ -10,6 +10,10 @@ Implements selected fixed-lattice one-turn ring transport using a packed Warp ke
 
 - This is a CUDA forward-only optimization; tensor-gradient strengths and unsupported physics use PyTorch fallback.
 - Packing returns `None` for unsupported maps, including RF.
+- `RingMap` uses this kernel only for eager (`compile=False`) CUDA maps. With
+  `compile=True`, compiled per-element kernels replayed in a CUDA graph were
+  faster at 1e2-1e5 particles on an RTX 3050 (MLS example: 0.8 vs 3.6 ms per
+  turn at 100 particles, 15 vs 25 ms at 1e5).
 
 ### `Model and numerical conventions`
 

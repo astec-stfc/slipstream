@@ -110,7 +110,11 @@ class RingMap:
 
     def _set_warp_params(self) -> None:
         self._warp_params = None
-        if not self.double_single and self.device.type == "cuda" and ring_warp.wk._HAVE_WARP:
+        # Compiled per-element kernels replayed in a CUDA graph beat the packed Warp turn at
+        # 1e2-1e5 particles (RTX 3050, MLS example: 0.8 vs 3.6 ms/turn at 100), so Warp
+        # serves only eager maps.
+        compiled = self._element is not _apply_one_element
+        if not compiled and not self.double_single and self.device.type == "cuda" and ring_warp.wk._HAVE_WARP:
             candidate = ring_warp.pack(self.params, self.device, self.dtype)
             if ring_warp.available(self.device, self.dtype, candidate):
                 self._warp_params = candidate

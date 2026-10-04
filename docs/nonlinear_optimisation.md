@@ -72,13 +72,25 @@ This is an envelope match: the inferred magnet positions do not reproduce
 the reference's peak locations or pointwise Twiss curves. Straights are
 dispersive; the earlier achromatic constraint has been removed.
 
-The optimisation varies the central Q1 quadrupole family and all three
-sextupole families; the other quadrupoles remain fixed. JSON output identifies
-the approximation, nominal optics, SI strengths and objective units (negative
-upper-half-plane DA polygon area in mm²). Default grids/budgets are deliberately
+The optimisation varies the central Q1 quadrupole family and the S3
+sextupole family; the other quadrupoles remain fixed. S1 and S2 hold the
+linear chromaticity at `--xi` (default `1 1`) through a float64 response
+matrix computed once at the lattice-file strengths. Chromaticity is affine in
+K2, and Q1's ±0.005 m⁻² range is treated linearly (checked to within 0.03 of
+the target at the Q1 bound). S3's bounds keep the derived S1/S2 within
+±150 m⁻³ at nominal Q1. Without this constraint,
+DA area alone rewards switching the sextupoles off. JSON output identifies
+the approximation, nominal optics, the lattice-file and target chromaticities,
+SI strengths (Q1, S1, S2, S3) and objective units (negative
+upper-half-plane DA polygon area in mm²). Per-evaluation progress goes to
+stderr, so stdout remains JSON. Default grids/budgets are deliberately
 small. Surrogate launches use 50/100 µm horizontal and 30/50 µm vertical
 offsets to stay within this approximation's stable region. The default DA
-scan extends to 2 mm (`--r-max` in metres), with one refinement pass.
+scan extends to 20 mm (`--r-max` in metres), with one refinement pass.
+The DA area is a staircase in the knobs (resolution
+`r_max / radii**(refine+1)` per ray), so tiny optimiser steps see no change.
+Differential evolution's initial population (5 × knobs) consumes most of a
+25-evaluation budget.
 For a finer study, increase `--turns`, `--budget`, `--angles`, `--radii`
 and `--refine`; vary `--r-max` to establish that the boundary is bracketed,
 and check convergence before interpreting acceptance. The bent ring is

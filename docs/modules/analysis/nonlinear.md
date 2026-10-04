@@ -135,6 +135,8 @@ passes subdivide each ray's bracketing interval by `n_r`, so the
 final resolution is `r_max / n_r**(refine+1)`. `batch_shape` prefixes
 the particle batch -- e.g. `(M,)` with a `with_strengths` error
 ensemble of shape `(M, 1)`, launched from the nominal closed orbit.
+Launches start at `opt.closed_orbit` when `opt` is given, otherwise at
+`closed_orbit(ring, delta)`; the scan does not compute Twiss parameters.
 
 ### `frequency_map`
 

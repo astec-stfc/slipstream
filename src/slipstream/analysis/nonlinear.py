@@ -259,7 +259,8 @@ def dynamic_aperture(
     opt: LinearOptics | None = None,
 ) -> DynamicAperture:
     """Compute dynamic aperture; see the module documentation for details."""
-    opt = opt or linear_optics(ring, delta)
+    # Launches need only the closed orbit; full optics costs a Jacobian per Newton step.
+    co = opt.closed_orbit if opt is not None else closed_orbit(ring, delta)
     dev, dt = ring.device, ring.dtype
     theta = torch.linspace(0, math.pi, n_angles, dtype=dt, device=dev)
     lo = torch.zeros(*batch_shape, n_angles, dtype=dt, device=dev)
@@ -267,7 +268,9 @@ def dynamic_aperture(
     frac = torch.arange(1, n_r + 1, dtype=dt, device=dev) / n_r
     for _ in range(refine + 1):
         r = lo.unsqueeze(-1) + width.unsqueeze(-1) * frac  # (..., n_angles, n_r)
-        state = launch(opt, r * torch.cos(theta).unsqueeze(-1), r * torch.sin(theta).unsqueeze(-1))
+        state = co.expand(*r.shape, 6).clone()
+        state[..., 0] += r * torch.cos(theta).unsqueeze(-1)
+        state[..., 2] += r * torch.sin(theta).unsqueeze(-1)
         with torch.no_grad():
             alive = ring.track(state, n_turns, aperture=aperture).loss_turn < 0
         # number of leading survivors along each ray = index of first loss
