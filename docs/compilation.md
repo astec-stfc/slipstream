@@ -150,9 +150,10 @@ used alongside Warp.
 
 Some native ring-map forward paths also select Warp automatically for CUDA
 tracking when the state does not require gradients and the map is eligible.
-Gradient-based or unsupported paths stay in PyTorch. `RingMap(compile=True)`
-skips Warp: its compiled kernels in a CUDA graph measured faster per turn,
-at the cost of a one-off compile on first tracking.
+Gradient-based or unsupported paths stay in PyTorch. This applies with
+`RingMap(compile=True)` too. The packed Warp turn was faster than compiled
+per-element kernels at 1e2-1e5 particles; see
+[ring_warp](modules/tracking/native/ring_warp.md).
 
 To inspect whether the optional Warp module is present and applicable:
 
