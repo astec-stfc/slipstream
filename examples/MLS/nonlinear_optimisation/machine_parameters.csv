@@ -1,0 +1,23 @@
+parameter,value,unit
+energy,629000000.0,eV
+kinetic_energy,628489001.05,eV
+momentum,628999792.4324563,eV/c
+gamma,1230.9222944587264,1
+beta_rel,0.9999996700039051,1
+circumference,48.0,m
+revolution_period,1.6011081853105784e-07,s
+revolution_frequency,6245674.147284575,Hz
+magnetic_rigidity,2.098117466425577,T m
+Qx_fractional,0.18000008615094773,1
+Qy_fractional,0.23000007670809458,1
+Qx_accumulated,3.1800000861509448,1
+Qy_accumulated,2.2300000767080954,1
+slip_factor,0.16306807314198132,1
+momentum_compaction,0.16306873313406228,1
+beta_x_max_sampled,15.200146842889017,m
+beta_y_max_sampled,9.033992621578468,m
+abs_Dx_max_sampled,1.673604049778406,m
+net_bending_angle,6.283185307179586,rad
+element_count,104.0,1
+chromaticity_x,2.6600741068838474,1
+chromaticity_y,-7.728008158911781,1

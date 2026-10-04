@@ -102,7 +102,37 @@ Install CMA-ES with `pip install 'slipstream-accel[optimise]'` and add
 CPU regression tests pass, including seeded CMA-ES quadratic convergence with anisotropic knob bounds.
 
 The example now writes reference optics, lattice and derived-parameter tables,
-plus Twiss/layout and nominal DA plots. See [ring reference outputs](ring_outputs.md)
+plus Twiss/layout and nominal DA plots. After optimisation it rescans the
+best candidate across all methods, writes `optimised_dynamic_aperture.csv`
+and overlays it on the nominal boundary in `dynamic_aperture_comparison.png`. See [ring reference outputs](ring_outputs.md)
 for the reusable package APIs. Run `python examples/nonlinear_optimisation.py
 --reference-only` for the lattice/parameter outputs without optimisation;
 `--no-plots` needs no Matplotlib, and `--output-dir` chooses the destination.
+
+## Diamond superperiod example
+
+`python examples/diamond/nonlinear_optimisation.py [--cma]` tracks the
+`SPERIOD` line of `examples/diamond/diamond.lte` at 3 GeV. This is one of
+six identical superperiods, so six period passes make one ring turn and
+`--turns` counts ring turns. `ring_parameters(..., periods=6)` reports
+whole-ring circumference, tunes and chromaticity, while the optics, lattice
+and Twiss/layout outputs show one superperiod. Outputs default to
+`examples/diamond`. The table and plot set matches the MLS example, plus
+`chromaticity_response.csv` with each family's K2 and ring
+d(xi_x, xi_y)/dK2 from float64 autograd.
+
+HALFS1A and S2A, the dispersive families with the largest and
+well-conditioned chromatic response, hold ring chromaticity at `--xi`
+(default `0 0`). Chromaticity is affine in K2 with fixed quadrupoles, so the
+solve is exact to float64 linear optics. The other six families are the DA
+knobs, bounded to |K2| <= 60 m⁻³. A candidate whose derived corrector
+exceeds that limit skips the scan and scores a positive penalty. The
+default DA uses 25 rays × 16 radii in one pass to 30 mm, over 512 turns.
+The MLS example's gradient-screening stage is omitted. With fixed linear
+optics, its tune/beta constraint has no sextupole gradient, and sub-mm
+action growth barely responds to sextupoles.
+
+The `.lte` file uses MAD-style `QUADRUPOLE`/`SEXTUPOLE` names, which the
+native parser accepts. Its `KICKER` and `MONIT` elements have zero kicks or
+length and become drifts or are dropped. Edge angles use the chromatic
+edge map in both PyTorch and Warp transport.

@@ -110,10 +110,13 @@ def main():
     args = parser.parse_args()
     if min(args.budget, args.turns, args.radii) < 1 or args.angles < 3 or args.refine < 0 or not 0 < args.r_max <= .02:
         parser.error('positive budget/turns/radii, at least three angles and nonnegative refine required')
+    # Warp prints its init/module banners on stdout; keep that stream for the JSON report.
+    stdout, sys.stdout = sys.stdout, sys.stderr
     base = RingMap(mls_specs(), energy_eV=629e6, device='cuda', dtype=torch.float32,
                    n_kicks=4, compile=True)
     parameters, reference_files = reference_outputs(base, args.output_dir, plots=not args.no_plots)
     if args.reference_only:
+        sys.stdout = stdout
         print(parameters.to_string(index=False))
         print(json.dumps({'reference_files': reference_files}, indent=2))
         return
@@ -193,12 +196,34 @@ def main():
     methods = ['Powell', 'Nelder-Mead', 'differential_evolution']
     if args.cma:
         methods.append('CMA-ES')
+    searches = [high]
     for method in methods:
         print(f"===  Using Method = {method}  ===", file=sys.stderr)
         result = gradient_free(aperture, theta, bounds, method=method,
                                max_evaluations=args.budget, seed=4)
+        searches.append(result)
         rows.append({'method': method, 'loss': result.loss, 'evaluations': result.evaluations,
                      'strengths': strengths(result.theta).tolist()})
+    best = min(searches, key=lambda r: r.loss)
+    best_da = scan(best.theta)
+    path = args.output_dir / 'optimised_dynamic_aperture.csv'
+    pd.DataFrame({name: value.detach().cpu().numpy() for name, value in
+                  [('angle_rad', best_da.angle_rad), ('radius_m', best_da.radius_m),
+                   ('x_m', best_da.x_m), ('y_m', best_da.y_m)]}).to_csv(path, index=False)
+    reference_files['optimised_dynamic_aperture'] = str(path)
+    if not args.no_plots:
+        fig = plot_dynamic_aperture(nominal_da)
+        ax = fig.axes[0]
+        ax.lines[0].set_label(f'nominal, {float(nominal_da.area_m2) * 1e6:.0f} mm²')
+        ax.plot(best_da.x_m.cpu().numpy() * 1e3, best_da.y_m.cpu().numpy() * 1e3, 's-',
+                label=f'best optimised ({best.method}), {float(best_da.area_m2) * 1e6:.0f} mm²')
+        ax.set_title('Sampled dynamic aperture: nominal and best optimised')
+        ax.legend()
+        path = args.output_dir / 'dynamic_aperture_comparison.png'
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        reference_files['dynamic_aperture_comparison_plot'] = str(path)
+    sys.stdout = stdout
     print(json.dumps({'model': 'MLS-inspired hard-edge approximation; not an operational lattice',
                       'energy_MeV': base.energy_eV / 1e6,
                       'circumference_m': base.circumference_m,
@@ -211,6 +236,8 @@ def main():
                       'reference_parameters': parameters.to_dict(orient='records'),
                       'reference_files': reference_files,
                       'nominal_DA_area_mm2': float(nominal_da.area_m2) * 1e6,
+                      'best_method': best.method,
+                      'best_DA_area_mm2': float(best_da.area_m2) * 1e6,
                       'results': rows}, indent=2))
 
 

@@ -109,6 +109,14 @@ def test_parser_keeps_hkick_vkick_moni_with_occurrence(lte_path):
     assert all(s.length == pytest.approx(0.05) for s in bpms)
 
 
+def test_parser_accepts_mad_quadrupole_sextupole_names(tmp_path):
+    # MADInput conversions (examples/diamond/diamond.lte) use these; they must not fall back to drifts.
+    p = tmp_path / "mad_names.lte"
+    p.write_text("Q: QUADRUPOLE, L=0.4, K1=1.2\nS: SEXTUPOLE, L=0.2, K2=30\nS0: SEXT, L=0.1, K2=-5\nRING: LINE=(Q,S,S0)\n")
+    specs = parse_elegant_lattice(p, "RING")
+    assert [(s.kind, s.k1, s.k2) for s in specs] == [("quad", 1.2, 0.0), ("sext", 0.0, 30.0), ("sext", 0.0, -5.0)]
+
+
 def test_zero_length_kick_is_not_dropped(tmp_path):
     p = tmp_path / "zero_length_kick.lte"
     p.write_text("HCM: HKICK, L=0, KICK=0.001;\nRING: LINE=(HCM)\n")

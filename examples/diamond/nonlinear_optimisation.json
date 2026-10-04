@@ -1,0 +1,227 @@
+{
+  "model": "Diamond SPERIOD hard-edge model from diamond.lte; one of six superperiods",
+  "energy_GeV": 3.0,
+  "periods": 6,
+  "circumference_m": 561.6,
+  "tunes": [
+    27.225638391774304,
+    12.363160246778362
+  ],
+  "chromaticity_lattice_file": [
+    0.06934455782175064,
+    0.8542237877845764
+  ],
+  "chromaticity_target": [
+    0.0,
+    0.0
+  ],
+  "chromaticity_correctors": [
+    "HALFS1A",
+    "S2A"
+  ],
+  "free_knobs": [
+    "S1B K2 [m^-3]",
+    "S1C K2 [m^-3]",
+    "S1D K2 [m^-3]",
+    "S2B K2 [m^-3]",
+    "S2C K2 [m^-3]",
+    "S2D K2 [m^-3]"
+  ],
+  "k2_limit_m3": 60.0,
+  "search_window_m3": 8.0,
+  "loss_units": "negative upper-half-plane DA area [mm^2]; positive = corrector beyond limit",
+  "reference_parameters": [
+    {
+      "parameter": "energy",
+      "value": 3000000000.0,
+      "unit": "eV"
+    },
+    {
+      "parameter": "kinetic_energy",
+      "value": 2999489001.05,
+      "unit": "eV"
+    },
+    {
+      "parameter": "momentum",
+      "value": 2999999956.480012,
+      "unit": "eV/c"
+    },
+    {
+      "parameter": "gamma",
+      "value": 5870.853550677551,
+      "unit": "1"
+    },
+    {
+      "parameter": "beta_rel",
+      "value": 0.9999999854933374,
+      "unit": "1"
+    },
+    {
+      "parameter": "circumference",
+      "value": 561.6,
+      "unit": "m"
+    },
+    {
+      "parameter": "revolution_period",
+      "value": 1.873295985808095e-06,
+      "unit": "s"
+    },
+    {
+      "parameter": "revolution_frequency",
+      "value": 533818.4716008047,
+      "unit": "Hz"
+    },
+    {
+      "parameter": "magnetic_rigidity",
+      "value": 10.006922710777507,
+      "unit": "T m"
+    },
+    {
+      "parameter": "Qx_fractional",
+      "value": 0.2256383917743201,
+      "unit": "1"
+    },
+    {
+      "parameter": "Qy_fractional",
+      "value": 0.3631602467783033,
+      "unit": "1"
+    },
+    {
+      "parameter": "Qx_accumulated",
+      "value": 27.225638391774304,
+      "unit": "1"
+    },
+    {
+      "parameter": "Qy_accumulated",
+      "value": 12.363160246778362,
+      "unit": "1"
+    },
+    {
+      "parameter": "slip_factor",
+      "value": 0.00017078580301664058,
+      "unit": "1"
+    },
+    {
+      "parameter": "momentum_compaction",
+      "value": 0.00017081481634185182,
+      "unit": "1"
+    },
+    {
+      "parameter": "beta_x_max_sampled",
+      "value": 22.59029162241476,
+      "unit": "m"
+    },
+    {
+      "parameter": "beta_y_max_sampled",
+      "value": 26.583063814992755,
+      "unit": "m"
+    },
+    {
+      "parameter": "abs_Dx_max_sampled",
+      "value": 0.31173830442201056,
+      "unit": "m"
+    },
+    {
+      "parameter": "net_bending_angle",
+      "value": 6.283199999999999,
+      "unit": "rad"
+    },
+    {
+      "parameter": "element_count",
+      "value": 1188.0,
+      "unit": "1"
+    },
+    {
+      "parameter": "periods",
+      "value": 6.0,
+      "unit": "1"
+    },
+    {
+      "parameter": "chromaticity_x",
+      "value": 0.06934455639706627,
+      "unit": "1"
+    },
+    {
+      "parameter": "chromaticity_y",
+      "value": 0.8542238149600312,
+      "unit": "1"
+    }
+  ],
+  "reference_files": {
+    "optics": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\optics.csv",
+    "lattice": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\lattice.csv",
+    "machine_parameters": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\machine_parameters.csv",
+    "twiss": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\twiss.png",
+    "layout": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\layout.png",
+    "chromaticity_response": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\chromaticity_response.csv",
+    "dynamic_aperture": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\nominal_dynamic_aperture.csv",
+    "optimised_dynamic_aperture": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\optimised_dynamic_aperture.csv",
+    "dynamic_aperture_plot": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\nominal_dynamic_aperture.png",
+    "dynamic_aperture_comparison_plot": "C:\\Users\\jkj62.CLRC\\Documents\\GitHub\\slipstream\\examples\\diamond\\dynamic_aperture_comparison.png"
+  },
+  "nominal_DA_area_mm2": 590.8095045015216,
+  "best_method": "Powell",
+  "best_DA_area_mm2": 869.5797296240926,
+  "results": [
+    {
+      "method": "Powell",
+      "loss": -869.5797296240926,
+      "evaluations": 25,
+      "k2_m3": {
+        "HALFS1A": 35.69719696044922,
+        "S1B": 18.220510482788086,
+        "S1C": 17.80802345275879,
+        "S1D": 12.378800392150879,
+        "S2A": -32.542808532714844,
+        "S2B": -30.831600189208984,
+        "S2C": -22.698699951171875,
+        "S2D": -26.025800704956055
+      }
+    },
+    {
+      "method": "Nelder-Mead",
+      "loss": -815.6612166203558,
+      "evaluations": 25,
+      "k2_m3": {
+        "HALFS1A": 35.081790924072266,
+        "S1B": 18.710065841674805,
+        "S1C": 17.0628662109375,
+        "S1D": 16.378799438476562,
+        "S2A": -32.17888259887695,
+        "S2B": -32.16493225097656,
+        "S2C": -24.032033920288086,
+        "S2D": -27.359134674072266
+      }
+    },
+    {
+      "method": "differential_evolution",
+      "loss": -607.55864251405,
+      "evaluations": 25,
+      "k2_m3": {
+        "HALFS1A": 34.63633728027344,
+        "S1B": 20.39909553527832,
+        "S1C": 23.49056053161621,
+        "S1D": 13.242229461669922,
+        "S2A": -31.987255096435547,
+        "S2B": -36.608680725097656,
+        "S2C": -24.229801177978516,
+        "S2D": -26.064882278442383
+      }
+    },
+    {
+      "method": "CMA-ES",
+      "loss": -806.9424657151103,
+      "evaluations": 25,
+      "k2_m3": {
+        "HALFS1A": 35.57597351074219,
+        "S1B": 19.0383358001709,
+        "S1C": 19.321151733398438,
+        "S1D": 10.364103317260742,
+        "S2A": -32.22575378417969,
+        "S2B": -32.12080764770508,
+        "S2C": -26.03905487060547,
+        "S2D": -25.56593132019043
+      }
+    }
+  ]
+}

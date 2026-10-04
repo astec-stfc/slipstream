@@ -20,7 +20,7 @@ Use `ring_optics_table`, `ring_parameters` and `ring_lattice_table` for detached
 
 ```python
 def ring_optics_table(ring: RingMap, drift_samples: int=8) -> pd.DataFrame: ...
-def ring_parameters(ring: RingMap, optics: pd.DataFrame | None=None, charge_e: float=1.0, include_chromaticity: bool=True) -> pd.DataFrame: ...
+def ring_parameters(ring: RingMap, optics: pd.DataFrame | None=None, charge_e: float=1.0, include_chromaticity: bool=True, periods: int=1) -> pd.DataFrame: ...
 def ring_lattice_table(ring: RingMap) -> pd.DataFrame: ...
 def plot_ring_twiss(optics: pd.DataFrame, lattice: pd.DataFrame | None=None): ...
 def plot_ring_layout(lattice: pd.DataFrame): ...
@@ -47,6 +47,10 @@ Slip factor includes the closed-orbit dispersion, and momentum compaction
 follows eta = alpha_c - 1/gamma**2 for relative momentum delta. No RF,
 damping or equilibrium-emittance values are inferred from a frozen map.
 Supply a table from the same ring to avoid recomputing its optics.
+`periods` treats `ring` as one of that many identical superperiods:
+circumference, revolution time, tunes, chromaticity, bending angle and
+element count describe the whole machine. Slip factor and momentum
+compaction are per-length quantities and do not change.
 
 ### `ring_lattice_table`
 

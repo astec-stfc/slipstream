@@ -17,7 +17,7 @@ Converts supported elegant lattice declarations into native `ElementSpec` physic
 
 Minimal, covering exactly the element/line syntax real CLARA/Diamond-II
 lattices use: `NAME: TYPE, PARAM=VAL,...;` element definitions
-(`DRIFT`, `KQUAD`, `CSBEND`/`CSBEN`, `KSEXT`; anything else with
+(`DRIFT`, `KQUAD`/`QUAD`/`QUADRUPOLE`, `CSBEND`/`CSBEN`/`SBEND`, `KSEXT`/`SEXT`/`SEXTUPOLE`; anything else with
 a nonzero `L=` becomes a plain drift of that length -- RF/charge/watch/
 clean elements carry no transverse/longitudinal transport physics of their
 own), `NAME: LINE=(...)` with recursive line-name expansion,

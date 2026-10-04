@@ -17,8 +17,9 @@ _STMT_START_RE = re.compile(r"(?m)^[ \t]*([A-Za-z_][\w.-]*)[ \t]*:")
 _TYPE_RE = re.compile(r"\s*([A-Za-z_]\w*)\s*(.*)", re.DOTALL)
 _PARAM_RE = re.compile(r'([A-Za-z_]\w*)\s*=\s*("[^"]*"|[^,]+)')
 
-_QUAD_TYPES = {"KQUAD", "QUAD"}
-_SEXT_TYPES = {"KSEXT"}
+# MAD-style QUADRUPOLE/SEXTUPOLE names (e.g. MADInput conversions) share K1/K2 field names.
+_QUAD_TYPES = {"KQUAD", "QUAD", "QUADRUPOLE"}
+_SEXT_TYPES = {"KSEXT", "SEXT", "SEXTUPOLE"}
 _BEND_TYPES = {"CSBEND", "CSBEN", "CSRCSBEND", "CSRCSBEN", "SBEND", "SBEN"}
 _CSR_BEND_TYPES = {"CSRCSBEND", "CSRCSBEN"}  # the subset that gets a CSR kick, see ElementSpec.csr
 _LINE_TYPES = {"LINE"}
