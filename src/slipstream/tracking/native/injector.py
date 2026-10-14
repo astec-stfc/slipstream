@@ -611,10 +611,12 @@ class Injector:
         verbose: bool = True,
         dump_dir: str | Path | None = None,
         return_particles: bool = False,
+        screen_z_m: float | None = None,
     ) -> dict:
         """Track the distribution from the cathode to ``z_stop_m`` (default: the machine's own)."""
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+        _check_screen_plane(screen_z_m)
         sc = dataclasses.replace(self.space_charge, mesh=mesh or self.space_charge.mesh)
         z_target = self.z_stop_m if z_stop_m is None else z_stop_m
         dt = self.dt_s
@@ -650,6 +652,9 @@ class Injector:
             sc.every_step_until = max(0, int(math.ceil((emission_end_s - t) / dt)))
         all_active = torch.ones(n, device=device, dtype=torch.bool)
         alive = torch.ones(n, device=device, dtype=torch.bool)  # not yet lost on an aperture
+        screen_state = _empty_screen_state(x) if screen_z_m is not None else None
+        screen_fn = (_record_screen_crossing if not (use_compile and device == "cuda" and screen_z_m is not None)
+                     else torch.compile(_record_screen_crossing, dynamic=False))
         sc_cache: dict = {}
         c2_inv = 1.0 / C_LIGHT**2
         # 0-d device tensors, not Python floats/scalars -- see docs/tracking_native.md's
@@ -763,12 +768,21 @@ class Injector:
             # Warp wants plain floats, not the recompile-avoidance tensors -- see
             # docs/tracking_native.md's "Injector warp backend".
             dt_arg, qmdt2_arg = (dt, qmdt2) if using_warp else (dt_ten, qmdt2_ten)
+            if screen_state is not None:
+                screen_prev = (x, y, z, ux, uy, uz)
+                if using_warp and emitted_all:
+                    screen_prev = tuple(v.clone() for v in screen_prev)  # Warp pushes state in place.
+                alive_prev = alive.clone() if using_warp and apertures else alive
             (x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz, alive) = step_fn(
                 alive, apertures,
                 x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,
                 Ex_sc, Ey_sc, Ez_sc, Bx_sc, By_sc, Bz_sc,
                 sw, tw, sol, quad, t_ten, dt_arg, qmdt2_arg, emitted_all, active, c2_inv, magnets,
             )
+            if screen_state is not None:
+                screen_state = screen_fn(
+                    screen_state, screen_prev, (x, y, z, ux, uy, uz), active, alive_prev,
+                    apertures, screen_z_m, t_ten, dt_ten)
             t += dt
             t_ten.add_(dt)
             dt_steps.append(dt)
@@ -817,7 +831,8 @@ class Injector:
                                 safety=f"{safety * 1e12:.3f}")
                 dt_min_seen, dt_max_seen = dt, dt
             if step > 50 and centroid_z >= z_target:
-                break
+                if screen_state is None or bool((screen_state[-1] | ~alive).all()):
+                    break
 
         if verbose:
             bar.update(bar.total - bar.n)
@@ -859,6 +874,8 @@ class Injector:
             "trajectory": traj,
             "dump_dir": str(dump_dir_path) if dump_dir_path is not None else None,
         }
+        if screen_state is not None:
+            out["screen"] = _screen_result(screen_state, q, alive, screen_z_m)
         if return_particles:
             out.update(
                 x=x[alive], y=y[alive], z=z[alive], ux=ux[alive], uy=uy[alive], uz=uz[alive], q=q[alive], t_s=t,
@@ -901,10 +918,12 @@ class Injector:
         sc_image_steps: int = 0,
         checkpoint_every: int = 0,
         return_particles: bool = False,
+        screen_z_m: float | None = None,
     ) -> dict:
         """Compute track differentiable; see the module documentation for details."""
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+        _check_screen_plane(screen_z_m)
         self._check_knobs(params or {})
         # 0-d float64 on the tracking device: an RF phase needs float64 (see _rf_cos_sin).
         params = {k: torch.as_tensor(v, dtype=torch.float64, device=device) for k, v in (params or {}).items()}
@@ -943,6 +962,8 @@ class Injector:
             torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 64)
         step_fn = torch.compile(_fused_step, dynamic=False) if use_compile else _fused_step
         ap_fn = torch.compile(_apply_apertures, dynamic=False) if use_compile else _apply_apertures
+        screen_fn = (torch.compile(_record_screen_crossing, dynamic=False)
+                     if use_compile and screen_z_m is not None else _record_screen_crossing)
 
         if sc_on:
             nz = sc.nz + 1 - sc.nz % 2 if sc_image_steps else sc.nz  # image: the cathode on the centre node (odd nz)
@@ -978,6 +999,7 @@ class Injector:
             appended), so ``checkpoint`` can rerun it during backward."""
             x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz = state[:12]
             E_sc, t_ten = state[12:18], state[18]
+            screen_state = state[19:] if screen_z_m is not None else None
             rows, rec_t_ns = [], []
             dt = dt_schedule[step0] if dt_schedule else self.dt_s
             dt_ten, qmdt2_ten = step_tensors(dt)
@@ -994,10 +1016,16 @@ class Injector:
                         cathode_z if step < sc_image_steps else None, sc, sc_fn)
                     box_overflow = torch.maximum(box_overflow, overflow)
                 prev = (x, y, z)
+                if screen_state is not None:
+                    screen_prev = (x, y, z, ux, uy, uz)
                 (x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz) = step_fn(
                     x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz, *E_sc,
                     sw, tw, sol, quad, t_ten, dt_ten, qmdt2_ten, emitted_all, active, c2_inv, magnets,
                 )
+                if screen_state is not None:
+                    screen_state = screen_fn(
+                        screen_state, screen_prev, (x, y, z, ux, uy, uz), active, alive,
+                        apertures, screen_z_m, t_ten, dt_ten)
                 if apertures:
                     with torch.no_grad():
                         alive = ap_fn(x, y, z, alive, apertures, prev=prev)
@@ -1008,11 +1036,13 @@ class Injector:
                     rows.append(_traj_stats(*sel, sol, *stats_frame))
                     rec_t_ns.append(t * 1e9)
             return t, alive, box_overflow, rows, rec_t_ns, (x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,
-                                                            *E_sc, t_ten)
+                                                            *E_sc, t_ten, *(screen_state or ()))
 
         # Particles, their Kahan terms, the held space-charge field, the clock.
         state = (x, y, z, ux, uy, uz, *(zero_n.clone() for _ in range(12)),
                  torch.full((), t, device=device, dtype=torch.float64))
+        if screen_z_m is not None:
+            state += _empty_screen_state(x)
         alive = all_active.clone()
         box_overflow = torch.zeros((), device=device, dtype=dtype)
         rows, rec_t_ns = [], []
@@ -1037,9 +1067,47 @@ class Injector:
         if rows:
             traj = torch.stack(rows)
             out["trajectory"] = {k: traj[:, i] for i, k in enumerate(TRAJ_KEYS)} | {"t_ns": rec_t_ns}
+        if screen_z_m is not None:
+            out["screen"] = _screen_result(state[19:], q, alive, screen_z_m)
         if return_particles:
             out.update(x=x, y=y, z=z, ux=ux, uy=uy, uz=uz, q=q, alive=alive, t_s=t)
         return out
+
+
+def _check_screen_plane(screen_z_m):
+    if screen_z_m is not None and not math.isfinite(screen_z_m):
+        raise ValueError("screen_z_m must be a finite lab-frame plane in metres")
+
+
+def _empty_screen_state(x):
+    return (*(torch.zeros_like(x) for _ in range(6)),
+            torch.zeros_like(x, dtype=torch.float64), torch.zeros_like(x, dtype=torch.bool))
+
+
+def _record_screen_crossing(state, prev, current, active, alive, apertures, z_plane, t, dt):
+    """Record the first forward crossing on the pusher's straight step segment."""
+    dz = current[2] - prev[2]
+    forward = dz > 0.0
+    fraction = ((z_plane - prev[2]) / torch.where(forward, dz, torch.ones_like(dz))).clamp(0.0, 1.0)
+    at_plane = tuple(a + fraction * (b - a) for a, b in zip(prev, current))
+    with torch.no_grad():
+        hit = ~state[-1] & active & alive & forward & (prev[2] <= z_plane) & (current[2] >= z_plane)
+        if apertures:
+            # Check only the segment up to the plane: later losses do not erase a screen observation.
+            hit = hit & _apply_apertures(*at_plane[:3], alive, apertures, prev=prev[:3])
+    values = (*at_plane[:2], torch.full_like(prev[2], z_plane), *at_plane[3:], t + fraction.double() * dt)
+    return (*(torch.where(hit, new, old) for old, new in zip(state[:-1], values)), state[-1] | hit)
+
+
+def _screen_result(state, q, alive, z_plane):
+    crossed = state[-1]
+    missing = ~crossed & alive
+    return dict(zip(("x", "y", "z", "ux", "uy", "uz", "t_s"), state[:-1])) | {
+        "z_plane_m": z_plane, "crossed": crossed, "q": torch.where(crossed, q, 0.0),
+        "n_crossed": int(crossed.sum()), "n_unobserved_alive": int(missing.sum()),
+        "n_lost_before_screen": int((~crossed & ~alive).sum()),
+        "incomplete_charge_C": float(q[missing].detach().abs().sum()),
+    }
 
 
 # Knobs track_differentiable accepts, per element list ("cavities[i].phase_deg" ...) -- plus "charge_scale".

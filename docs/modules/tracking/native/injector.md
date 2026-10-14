@@ -421,8 +421,8 @@ class Injector:
     def magnet_elements(self, device='cpu', dtype=torch.float64, frame_all: bool | None=None) -> tuple[tuple, tuple]: ...
     def auto_phase(self, verbose: bool=True) -> list[float]: ...
     def initial_beam(self, n_particles: int | None, device, dtype: torch.dtype, verbose: bool=False) -> dict: ...
-    def track(self, n_particles: int | None=None, device: str | None=None, dtype: torch.dtype | str=torch.float64, use_compile: bool=True, record_every: int=10, z_stop_m: float | None=None, mesh: str | None=None, verbose: bool=True, dump_dir: str | Path | None=None, return_particles: bool=False) -> dict: ...
-    def track_differentiable(self, params: dict | None=None, *, n_steps: int | None=None, dt_schedule=None, beam: dict | None=None, n_particles: int | None=None, device: str | None=None, dtype: torch.dtype | str=torch.float64, use_compile: bool=False, record_every: int=0, space_charge: bool | None=None, sc_box_m: tuple[float, float] | None=None, sc_image_steps: int=0, checkpoint_every: int=0, return_particles: bool=False) -> dict: ...
+    def track(self, n_particles: int | None=None, device: str | None=None, dtype: torch.dtype | str=torch.float64, use_compile: bool=True, record_every: int=10, z_stop_m: float | None=None, mesh: str | None=None, verbose: bool=True, dump_dir: str | Path | None=None, return_particles: bool=False, screen_z_m: float | None=None) -> dict: ...
+    def track_differentiable(self, params: dict | None=None, *, n_steps: int | None=None, dt_schedule=None, beam: dict | None=None, n_particles: int | None=None, device: str | None=None, dtype: torch.dtype | str=torch.float64, use_compile: bool=False, record_every: int=0, space_charge: bool | None=None, sc_box_m: tuple[float, float] | None=None, sc_image_steps: int=0, checkpoint_every: int=0, return_particles: bool=False, screen_z_m: float | None=None) -> dict: ...
 def parabolic_vertex(degs: torch.Tensor, gains: torch.Tensor, i: int, h: float) -> float: ...
 ```
 
@@ -727,6 +727,41 @@ one block, instead of every step (~255 B per particle-step in float32), for one 
 `use_compile` compiles the per-step kernels (not the outer loop). `record_every`
 adds `"trajectory"` (`TRAJ_KEYS` columns as tensors, plus `t_ns`); `return_particles`
 the final state (all particles, plus the `alive` mask).
+
+### Screen-plane observation
+
+Both trackers accept `screen_z_m=<finite lab z in metres>`. The optional `out["screen"]`
+records each emitted particle's first forward crossing, interpolated on the pusher's straight
+step segment. It returns full-length `x`, `y`, `z`, `ux`, `uy`, `uz` (metres and proper
+velocities in m/s), per-particle `t_s` (float64 seconds), signed `q` (C) and boolean
+`crossed`. Unobserved coordinates/time and charge are zero; always use `crossed` when
+selecting observations. The supplied macroparticle charge is retained exactly for observed
+particles, including those lost downstream after crossing. A swept aperture check up to
+the plane excludes losses before observation. Particles remain in the tracker after
+crossing; the monitor does not remove bunch charge from space-charge deposition.
+
+`z_plane_m`, `n_crossed`, `n_unobserved_alive`, `n_lost_before_screen` and
+`incomplete_charge_C` distinguish observation, aperture loss and unfinished transport.
+Missing observations are reported, never silently interpreted as physical transmission
+loss. Require `n_unobserved_alive == 0` before treating a screen image as complete.
+Backward, stationary, not-yet-emitted or initially downstream particles may remain
+unobserved. No backward projection or new crossing is fabricated for them.
+
+Ordinary tracking with this option stops after its centroid reaches `z_stop_m` **and**
+every particle has crossed or been lost, subject to its existing maximum step count.
+Default stopping is unchanged. Differentiable tracking retains its fixed schedule; select
+or replay a schedule long enough over the complete fit bounds and check completeness.
+The crossing state passes through checkpoint blocks, with no additional per-step host
+synchronization. `use_compile` also compiles the crossing helper on CUDA.
+
+This is a finite-step observation, not an exact event solver under within-step acceleration.
+Converge the step size against the intended image/observable error budget. Derivatives
+are piecewise smooth while the crossing and loss masks stay fixed; loss/crossing transitions
+and emission-time comparisons have no useful gradient. Screen monitoring does not change
+the differentiable tracker's existing treatment of aperture-lost particles in space charge
+or endpoint statistics; use a loss-free fit domain or validate ordinary tracking separately.
+The common-time endpoint and dump files remain unchanged and should not be confused
+with this plane observation.
 
 ### `parabolic_vertex`
 
