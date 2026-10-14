@@ -96,7 +96,9 @@ documented in [`docs/ring6d.md`](docs/ring6d.md).
 - `NativeTracker` models ring transport and turn-by-turn effects.
 - `LinacTracker` models one-pass element-by-element transport.
 - `Injector` models ASTRA-style gun, cavity, solenoid, space-charge, and
-  aperture transport.
+  aperture transport. An optional `Photocathode` derives its emission from
+  laser energy, quantum efficiency (with the Schottky effect) and the
+  space-charge-limited surface field.
 - `warp-lang` accelerates supported CUDA paths; it is not required for CPU
   execution.
 

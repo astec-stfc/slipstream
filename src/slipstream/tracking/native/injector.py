@@ -35,6 +35,7 @@ from .magnets import (
     Dipole, beam_angle, dipole_element, hard_quad_element, lateral_ok, lerp_tables, magnet_fields, placement,
     placement3, profile_quad_element, rotate_to_beam, solenoid_element, to_local, to_local3,
 )
+from .photocathode import PhotoEmitter, Photocathode
 from .space_charge import SC3D_MAX_GRID_CELLS, CylindricalSpaceCharge, SpaceCharge3D, smooth_rho
 from . import warp_kernels
 
@@ -197,6 +198,7 @@ class Injector:
     generator_overrides: dict = field(default_factory=dict)  # generator.in fields (ASTRA names/units, e.g.
     # ``{"sig_x": 0.3, "sig_y": 0.3, "q_total": 0.05}``) replacing the file's own values -- for scans
     phasing_key: str | None = None  # see auto_phase
+    photocathode: Photocathode | None = None  # laser-driven emission (``track`` only); None: charges from the beam
     base_dir: Path = field(default=Path("."), repr=False, compare=False)
 
     @property
@@ -421,6 +423,8 @@ class Injector:
         data["apertures"] = [Aperture(**a) for a in data.get("apertures", [])]
         data["dipoles"] = [Dipole(**d) for d in data.get("dipoles", [])]
         data["space_charge"] = SpaceChargeSettings(**data.get("space_charge", {}))
+        if data.get("photocathode"):
+            data["photocathode"] = Photocathode(**data["photocathode"])
         return cls(**data, base_dir=path.parent)
 
     # -- fields --------------------------------------------------------------
@@ -613,7 +617,10 @@ class Injector:
         return_particles: bool = False,
         screen_z_m: float | None = None,
     ) -> dict:
-        """Track the distribution from the cathode to ``z_stop_m`` (default: the machine's own)."""
+        """Track the distribution from the cathode to ``z_stop_m`` (default: the machine's own).
+
+        With ``self.photocathode`` set, the laser model assigns each macroparticle's charge as it is emitted and
+        ``"emission"`` reports the charges."""
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
         _check_screen_plane(screen_z_m)
@@ -629,6 +636,16 @@ class Injector:
             beam[k] for k in ("x", "y", "z", "q", "ux", "uy", "uz", "emission_time_s"))
         n = x.shape[0]
         cathode_z = self._reference_particle()[0]
+        emitter = None
+        if self.photocathode is not None:  # the beam's charges only weight the laser pulse; emission assigns them
+            if float(z.max()) - cathode_z > 1e-4:
+                raise ValueError("photocathode emission needs a cathode distribution (macroparticles on the cathode)")
+            emitter = PhotoEmitter(self.photocathode, torch.hypot(x, y), q)
+            q = torch.zeros_like(q)
+            z_wall = min(cathode_z, float(z.min()))  # a particle falling back through it is absorbed
+            prev_active = torch.zeros(n, device=device, dtype=torch.bool)
+            suppressed, returned = torch.zeros_like(prev_active), torch.zeros_like(prev_active)
+            emission_pending = True
 
         bent = bool(self.dipoles)
         cav_fields, sol_fields = self.fields(device, dtype)
@@ -652,6 +669,7 @@ class Injector:
             sc.every_step_until = max(0, int(math.ceil((emission_end_s - t) / dt)))
         all_active = torch.ones(n, device=device, dtype=torch.bool)
         alive = torch.ones(n, device=device, dtype=torch.bool)  # not yet lost on an aperture
+        track_alive = bool(apertures) or emitter is not None  # losses are possible: mask the live particles
         screen_state = _empty_screen_state(x) if screen_z_m is not None else None
         screen_fn = (_record_screen_crossing if not (use_compile and device == "cuda" and screen_z_m is not None)
                      else torch.compile(_record_screen_crossing, dynamic=False))
@@ -720,7 +738,23 @@ class Injector:
             # identities -- skip them.
             emitted_all = t >= emission_end_s
             active = all_active if emitted_all else emission_time_s <= t
-            counted = (alive if emitted_all else active & alive) if apertures else active
+            if emitter is not None and emission_pending:
+                new_idx = (active & ~prev_active).nonzero().squeeze(1)
+                if new_idx.numel():  # the laser frees these macroparticles this step
+                    xn, yn, zn = x[new_idx], y[new_idx], z[new_idx]
+                    # the field at each macroparticle's own emission time, not at the step that releases it
+                    t_emit = emission_time_s[new_idx].to(torch.float64)
+                    e_ext = self.charge_sign * _applied_fields(xn, yn, zn, sw, tw, sol, quad, t_emit, c2_inv, magnets)[2]
+                    src = prev_active & alive
+                    cloud = (torch.hypot(x[src], y[src]).double(), (z[src] - cathode_z).clamp_min(0.0).double(),
+                             q[src].abs().double())
+                    q_new, _ = emitter.emit(new_idx, torch.hypot(xn, yn), e_ext, cloud)
+                    q[new_idx] = (self.charge_sign * q_new).to(dtype)
+                    gone = new_idx[q_new <= 0.0]  # no extracting field left: its photoelectrons return
+                    alive[gone], suppressed[gone] = False, True
+                prev_active = active
+                emission_pending = not bool(active.all())
+            counted = (alive if emitted_all else active & alive) if track_alive else active
             if sc.enabled and (not emitted_all or step < sc.every_step_until or step % sc.subcycle_steps == 0):
                 # A bent beam is solved in its own frame -- see docs/tracking_native.md's "Bends and
                 # off-axis elements".
@@ -729,7 +763,7 @@ class Injector:
                     frame_angle = float(beam_angle(ux[alive], uz[alive]))
                 # Excludes aperture-lost particles from SC deposition once any have been lost -- see
                 # docs/tracking_native.md's Aperture note (ghost charge otherwise).
-                sc_emitted_all = emitted_all and not (apertures and not bool(alive.all()))
+                sc_emitted_all = emitted_all and not (track_alive and not bool(alive.all()))
                 if abs(frame_angle) > 1e-6:
                     (Ex_sc, Ey_sc, Ez_sc, Bx_sc, By_sc, Bz_sc), omega = _compute_space_charge_in_beam_frame(
                         frame_angle, x, y, z, q, ux, uy, uz, counted, device, dtype, sc_cache, sc, cathode_z,
@@ -783,6 +817,9 @@ class Injector:
                 screen_state = screen_fn(
                     screen_state, screen_prev, (x, y, z, ux, uy, uz), active, alive_prev,
                     apertures, screen_z_m, t_ten, dt_ten)
+            if emitter is not None:
+                fell_back = active & alive & (z < z_wall)  # absorbed by the cathode
+                alive, returned = alive & ~fell_back, returned | fell_back
             t += dt
             t_ten.add_(dt)
             dt_steps.append(dt)
@@ -790,7 +827,13 @@ class Injector:
             # Host-synced centroid only every 10 steps -- enough for the
             # stop check, and drops a per-step GPU->CPU sync.
             if step % 10 == 0:
-                if emitted_all:
+                if emitter is not None:  # the centroid of the particles still in the machine
+                    live = alive if emitted_all else active & alive
+                    if emitted_all and not bool(live.any()):
+                        break  # everything returned to the cathode or was lost
+                    if live.any():
+                        centroid_z = float(z[live].mean())
+                elif emitted_all:
                     centroid_z = float(z.mean())
                 elif active.any():
                     centroid_z = float(z[active].mean())
@@ -814,9 +857,10 @@ class Injector:
                     if emitted_all:
                         # Unfiltered (fixed-shape, compiled rec_fn) until the first aperture loss, then
                         # alive-masked eagerly -- see docs/tracking_native.md's Aperture note.
-                        if apertures and not bool(alive.all()):
-                            rec_rows.append(_traj_stats(x[alive], y[alive], z[alive], ux[alive], uy[alive],
-                                                        uz[alive], sol, *stats_frame))
+                        if track_alive and not bool(alive.all()):
+                            if bool(alive.any()):
+                                rec_rows.append(_traj_stats(x[alive], y[alive], z[alive], ux[alive], uy[alive],
+                                                            uz[alive], sol, *stats_frame))
                         else:
                             rec_rows.append(rec_fn(x, y, z, ux, uy, uz, sol, *stats_frame))
                     else:
@@ -844,7 +888,8 @@ class Injector:
             _write_twiss_hdf5(dump_dir_path / f"{stem}.twiss.h5", twiss_rows, source=self.source)
 
         # Final snapshot at the actual stop point (the loop breaks between record events).
-        if not rec_rows or abs(float(z.mean()) - float(rec_rows[-1][0])) > 1e-6:
+        n_alive = int(alive.sum())
+        if n_alive and (not rec_rows or abs(float(z.mean()) - float(rec_rows[-1][0])) > 1e-6):
             rec_rows.append(_traj_stats(x[alive], y[alive], z[alive], ux[alive], uy[alive], uz[alive], sol,
                                         *stats_frame))
             rec_t_ns.append(float(t) * 1e9)
@@ -852,7 +897,6 @@ class Injector:
         traj: dict[str, list] = {k: [r[i] for r in rows] for i, k in enumerate(TRAJ_KEYS)}
         traj["t_ns"] = rec_t_ns
 
-        n_alive = int(alive.sum())
         gamma = torch.sqrt(1.0 + (ux[alive] ** 2 + uy[alive] ** 2 + uz[alive] ** 2) / C_LIGHT**2)
         x_b, z_b = x[alive], z[alive]
         if bent:  # sizes in the beam's own frame (the lab x of a bent beam is not a transverse coordinate)
@@ -868,12 +912,26 @@ class Injector:
             "n_particles_alive": n_alive,
             "n_lost_on_aperture": n - n_alive,
             "Ekin_MeV": float((gamma - 1.0).mean()) * self.mc2_eV / 1e6,
-            "sigma_x_mm": float(x_b.std()) * 1e3,
-            "sigma_y_mm": float(y[alive].std()) * 1e3,
-            "sigma_z_mm": float(z_b.std()) * 1e3,
+            "sigma_x_mm": _std_mm(x_b),
+            "sigma_y_mm": _std_mm(y[alive]),
+            "sigma_z_mm": _std_mm(z_b),
             "trajectory": traj,
             "dump_dir": str(dump_dir_path) if dump_dir_path is not None else None,
         }
+        if emitter is not None:
+            charge = q.abs()
+            n_suppressed, n_returned = int(suppressed.sum()), int(returned.sum())
+            out["n_lost_on_aperture"] = n - n_alive - n_suppressed - n_returned
+            out["emission"] = {
+                "photons": self.photocathode.photons,
+                "ideal_charge_C": float(emitter.ideal_C),  # applied-field quantum efficiency, no screening
+                "emitted_charge_C": float(charge.sum()),
+                "returned_charge_C": float(charge[returned].sum()),
+                "charge_C": float(charge[alive].sum()),  # still in the machine at the end
+                "n_suppressed": n_suppressed,
+                "n_returned": n_returned,
+                "q": q,  # signed charge of every macroparticle (0: never emitted)
+            }
         if screen_state is not None:
             out["screen"] = _screen_result(screen_state, q, alive, screen_z_m)
         if return_particles:
@@ -924,6 +982,8 @@ class Injector:
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
         _check_screen_plane(screen_z_m)
+        if self.photocathode is not None:
+            raise NotImplementedError("photocathode emission is only supported by track()")
         self._check_knobs(params or {})
         # 0-d float64 on the tracking device: an RF phase needs float64 (see _rf_cos_sin).
         params = {k: torch.as_tensor(v, dtype=torch.float64, device=device) for k, v in (params or {}).items()}
@@ -1077,6 +1137,11 @@ class Injector:
 def _check_screen_plane(screen_z_m):
     if screen_z_m is not None and not math.isfinite(screen_z_m):
         raise ValueError("screen_z_m must be a finite lab-frame plane in metres")
+
+
+def _std_mm(values: torch.Tensor) -> float:
+    """RMS size in mm, NaN (not a warning) when fewer than two particles remain."""
+    return float(values.std()) * 1e3 if values.numel() > 1 else float("nan")
 
 
 def _empty_screen_state(x):

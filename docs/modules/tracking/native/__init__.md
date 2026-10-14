@@ -8,4 +8,4 @@ Exports ring, linac and injector transport and elegant-lattice import. Each trac
 
 ## Usage
 
-Import `NativeTracker`, `LinacTracker`, `Injector`, `ElementSpec`, `parse_elegant_lattice` or low-level `track_element`.
+Import `NativeTracker`, `LinacTracker`, `Injector`, `Photocathode` (optional laser-driven emission for `Injector`), `ElementSpec`, `parse_elegant_lattice` or low-level `track_element`.

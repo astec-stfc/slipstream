@@ -93,6 +93,18 @@ trajectory, and accepts `n_particles` for a reweighted sample. Use
 state. `track_differentiable()` exposes the fixed-step autograd path for
 parameter studies.
 
+## Photocathode emission
+
+By default the distribution file or `generator.in` fixes the bunch charge. Set
+`injector.photocathode = Photocathode(pulse_energy_J=..., wavelength_nm=...,
+qe=..., ...)` (`from slipstream import Photocathode`) to derive it from the laser energy and a quantum efficiency that
+follows the Schottky-lowered work function, limited by the net field at the
+cathode surface (space charge) and by electrons falling back onto the cathode.
+Read `result["emission"]` and track with `screen_z_m` at the charge monitor to
+reproduce a Schottky scan, or scan laser energy and spot size for the
+space-charge limit. See the [`photocathode`](modules/tracking/native/photocathode.md)
+page and `examples/photocathode/`. Only `track()` supports it.
+
 ## Space charge and mesh sizing
 
 Injector space charge is enabled by default through `SpaceChargeSettings`.

@@ -1,0 +1,18 @@
+! CLARA 400 Hz gun laser as a macroparticle distribution (ASTRA generator.in, read natively by slipstream).
+! Only the shape of the laser pulse matters when the Injector has a Photocathode: the charge comes from the
+! laser energy and quantum efficiency, Q_total merely weights the macroparticles.
+&INPUT
+  FName = 'generator.txt',
+  Ipart = 4000,
+  Species = 'electrons',
+  Probe = .true.,
+  Noise_reduc = .true.,
+  High_res = .true.,
+  Cathode = .true.,
+  Q_total = 0.12,            ! nC
+  Dist_z = 'p', Lt = 0.003, rt = 0.0002,   ! emission time: 3 ps flat-top with 0.2 ps edges (ns)
+  Dist_x = 'g', sig_x = 0.25, C_sig_x = 3.0,   ! mm, gaussian cut at 3 sigma
+  Dist_y = 'g', sig_y = 0.25, C_sig_y = 3.0,
+  Dist_pz = 'i', LE = 0.00062,             ! isotropic emission at 0.62 eV (keV)
+  Ref_zpos = 0.0, Ref_Ekin = 0.0
+/

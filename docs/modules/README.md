@@ -75,6 +75,7 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 - [linac_twiss](tracking/native/linac_twiss.md): Propagates nonperiodic linear Twiss/dispersion or extracts ensemble statistics from tracked trajectories.
 - [magnets](tracking/native/magnets.md): Evaluates lab-frame static dipole, solenoid and quadrupole fields, including element offsets/rotations.
 - [optics](tracking/native/optics.md): Linearizes actual native per-element transport using autograd, solves periodic per-plane Twiss and dispersion and propagates element-local values.
+- [photocathode](tracking/native/photocathode.md): Opt-in laser-driven emission with Schottky-dependent quantum efficiency, limited by the net cathode surface field and by fall-back onto the cathode.
 - [ring](tracking/native/ring.md): Provides frozen-energy one-turn nonlinear transport with fixed delta and no RF, radiation damping/excitation or wakes.
 - [ring_physics](tracking/native/ring_physics.md): Native ring kicks apply sinusoidal RF, radiation damping/excitation and effective IBS damping times.
 - [ring_warp](tracking/native/ring_warp.md): Implements selected fixed-lattice one-turn ring transport using a packed Warp kernel.

@@ -4,11 +4,13 @@ from .elements import track_element
 from .injector import Injector
 from .lattice_import import ElementSpec, parse_elegant_lattice
 from .linac import LinacTracker
+from .photocathode import Photocathode
 from .tracker import NativeTracker, NativeTrackResult
 
 __all__ = [
     "track_element",
     "Injector",
+    "Photocathode",
     "LinacTracker",
     "ElementSpec",
     "parse_elegant_lattice",

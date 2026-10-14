@@ -683,6 +683,14 @@ full 6D macroparticle file in openPMD-beamphysics format
 h5py so simba isn't a dependency here) and a copy of the machine
 alongside them for reproducibility.
 
+With `Injector.photocathode` set (see [`photocathode`](photocathode.md)) the macroparticle
+charges come from the laser pulse energy and the Schottky-dependent quantum efficiency,
+limited by the surface field of the charge already emitted, instead of from the beam file.
+Macroparticles that cannot be extracted are dropped (`n_suppressed`), those that fall back
+through the cathode plane are absorbed (`n_returned`), and `out["emission"]` reports the
+ideal, emitted, returned and surviving charge. `track_differentiable` does not support it.
+Trajectory statistics remain macroparticle averages, not charge-weighted.
+
 ### `Injector.track_differentiable`
 
 `track` as one autograd graph: the same `_fused_step`, `_fused_sc_fields` and
