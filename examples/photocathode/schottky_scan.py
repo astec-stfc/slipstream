@@ -8,11 +8,13 @@ Needs the optional LAURA packages (``laura``, ``laura_lattices``) for the CLARA 
    monitor baseline through the same quantum-efficiency law the tracker uses. Tracking then adds space-charge-limited
    emission, electrons falling back onto the cathode and aperture losses.
 2. Saturation: extracted charge against laser energy for several rms spot sizes at the gun phase of maximum field. The
-   spots are round gaussians cut at 3 sigma whatever ``generator.in`` holds; its pulse shape is kept.
+   spots are round gaussians cut at 3 sigma on a circle whatever ``generator.in`` holds; its pulse shape is kept.
 
-The laser profile comes from ``generator.in``: the transverse cut gaussian is fitted to a virtual-cathode image by
-``fit_laser_image.py``, the pulse length and emission energy are assumed, not measured. Pass your own with
-``--generator``. Install ``slipstream-accel[plot]`` for figures or use ``--no-plots``.
+The laser profile comes from ``generator.in``: the transverse gaussian cut on an ellipse is fitted to a virtual-cathode
+image by ``fit_laser_image.py``, the pulse length and emission energy are assumed, not measured. The laser energy is the
+energy-meter readback stored with that image (``--laser-energy-uJ`` replaces it, ``--qe`` fixes the quantum efficiency
+instead and fits the energy), so the fit gives the quantum efficiency. The gun field and solenoid default to the current
+best fit. Pass your own with ``--generator``. Install ``slipstream-accel[plot]`` for figures or use ``--no-plots``.
 """
 
 import argparse
@@ -41,7 +43,12 @@ except ImportError:
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "104459_Schottky_approx_crestingData.h5"
+IMAGE = HERE / "CLA-VCA-DIA-CAM-01_2022-04-29_10-14-01UTC_1_images.hdf5"
 SECTIONS = ("HRG1", "S01", "L01")
+GUN_FIELD_MV = 105.0  # peak gun field of the current best fit (LAURA's design value: 120)
+SOLENOID_T = 0.310  # gun solenoid peak field of the current best fit (LAURA's: 0.345)
+SOLENOID_T_PER_A = 0.0022  # experimental calibration of the gun solenoid in 2022 (it changed later)
+QE_START = 1e-4  # quantum efficiency while fitting: only its product with the laser energy is fixed
 FIELD_FLANK = (
     -170.0,
     -70.0,
@@ -93,11 +100,19 @@ def parse_args():
         help="charge monitor plane [m], past the 10 mm L01 aperture",
     )
     p.add_argument("--wavelength-nm", type=float, default=266.0)
-    p.add_argument(
+    energy = p.add_mutually_exclusive_group()
+    energy.add_argument(
+        "--laser-energy-uJ",
+        type=float,
+        default=None,
+        help="laser pulse energy [uJ]: the fit then gives the QE at the gun's peak field "
+        "(default: the energy-meter readback stored with the laser camera frame)",
+    )
+    energy.add_argument(
         "--qe",
         type=float,
-        default=1e-4,
-        help="QE at the gun's peak field (the laser energy is fitted for it)",
+        default=None,
+        help="QE at the gun's peak field: the fit then gives the laser energy",
     )
     p.add_argument(
         "--beta",
@@ -108,14 +123,21 @@ def parse_args():
     p.add_argument(
         "--gun-field-MV",
         type=float,
-        default=None,
-        help="gun peak field [MV/m] (default: LAURA's)",
+        default=GUN_FIELD_MV,
+        help="gun peak field [MV/m] (default: the current best fit; LAURA's is 120)",
     )
     p.add_argument(
         "--solenoid-T",
         type=float,
+        default=SOLENOID_T,
+        help="gun solenoid peak field [T] (default: the current best fit; LAURA's is 0.345)",
+    )
+    p.add_argument(
+        "--solenoid-T-per-A",
+        type=float,
         default=None,
-        help="gun solenoid peak field (default: LAURA's)",
+        help="take the solenoid field from the current stored with the laser camera frame times "
+        "this calibration (0.0022 was measured in 2022) instead of --solenoid-T",
     )
     p.add_argument(
         "--step",
@@ -252,11 +274,48 @@ def track_charge(machine, delta_deg, args, monitor_z, z_stop_m=None):
     return out["emission"], out["screen"]
 
 
+def capture_settings(path=IMAGE):
+    """Machine settings stored as attributes of the laser camera frame: laser energy-meter readback [uJ], gun solenoid
+    current [A], gun phase [deg] and charge monitor [pC]. Empty if the frame is not there."""
+    if not Path(path).is_file():
+        return {}
+    with h5py.File(path, "r") as f:
+        attrs = f["Capture000001"].attrs
+        return dict(
+            laser_energy_uJ=float(attrs["CLA-LAS-DIA-EM-06:E_RB"]),
+            gun_solenoid_A=float(attrs["CLA-GUN-MAG-SOL-02:READI"]),
+            gun_phase_deg=float(attrs["CLA-GUN-LRF-CTRL-01:phase"]),
+            charge_pC=float(attrs["CLA-S01-DIA-WCM-01:Q"]),
+        )
+
+
+def apply_capture(args, capture):
+    """Fill in from the camera frame's settings what the command line left open: the laser energy (unless ``--qe`` fixes
+    the quantum efficiency) and, with ``--solenoid-T-per-A``, the solenoid field."""
+    if args.solenoid_T_per_A is not None:
+        if not capture:
+            raise SystemExit(f"--solenoid-T-per-A needs the laser camera frame {IMAGE}")
+        args.solenoid_T = capture["gun_solenoid_A"] * args.solenoid_T_per_A
+    if capture and args.qe is None and args.laser_energy_uJ is None:
+        args.laser_energy_uJ = capture["laser_energy_uJ"]
+
+
+def split_energy_and_qe(photo, args):
+    """The fit fixes only the product of laser energy and QE. Take the energy from ``--laser-energy-uJ`` and give the rest
+    to the QE, or take ``--qe`` (``QE_START`` if neither is given) and give the rest to the energy."""
+    product = photo.pulse_energy_J * photo.qe
+    if args.laser_energy_uJ is not None:
+        energy = args.laser_energy_uJ * 1e-6
+        return dataclasses.replace(photo, pulse_energy_J=energy, qe=product / energy)
+    qe = args.qe or QE_START
+    return dataclasses.replace(photo, pulse_energy_J=product / qe, qe=qe)
+
+
 def schottky_scan(args, x, y, s, out_dir):
     photo = Photocathode(
         pulse_energy_J=3e-6,
         wavelength_nm=args.wavelength_nm,
-        qe=args.qe,
+        qe=QE_START,
         work_function_eV=4.5,
         qe_field_V_per_m=120e6,
         field_enhancement=args.beta,
@@ -274,8 +333,8 @@ def schottky_scan(args, x, y, s, out_dir):
 
     fit = fit_emission(emission, photo, x, y, s)
     print(
-        "emission-law fit on the field-limited flank (no transport, no space charge):\n  "
-        + ", ".join(f"{k} = {v:.4g}" for k, v in fit.items()),
+        "emission-law fit on the field-limited flank (no transport, no space charge; the energy is for "
+        f"QE {QE_START:g}):\n  " + ", ".join(f"{k} = {v:.4g}" for k, v in fit.items()),
         flush=True,
     )
     photo = dataclasses.replace(
@@ -294,11 +353,14 @@ def schottky_scan(args, x, y, s, out_dir):
         machine, delta_peak, args, 0.19, z_stop_m=0.22
     )  # emission is complete just past the gun
     ratio = em["emitted_charge_C"] * 1e12 / target
-    photo = dataclasses.replace(photo, pulse_energy_J=photo.pulse_energy_J / ratio)
+    photo = split_energy_and_qe(
+        dataclasses.replace(photo, pulse_energy_J=photo.pulse_energy_J / ratio), args
+    )
     machine.photocathode = photo
     print(
         f"space-charge-limited emission keeps {ratio:.3f} of the ideal charge at the field maximum; "
-        f"laser energy {photo.pulse_energy_J * 1e6:.3f} uJ for QE {args.qe:g}",
+        f"laser energy {photo.pulse_energy_J * 1e6:.3f} uJ and QE {photo.qe:.3g} at the {peak / 1e6:.0f} MV/m "
+        "cathode field",
         flush=True,
     )
 
@@ -334,7 +396,7 @@ def schottky_scan(args, x, y, s, out_dir):
     write_csv(out_dir / "schottky_scan.csv", rows)
     fit |= dict(
         pulse_energy_J=photo.pulse_energy_J,
-        qe=args.qe,
+        qe=photo.qe,
         qe_field_V_per_m=peak,
         wavelength_nm=args.wavelength_nm,
         field_enhancement=args.beta,
@@ -365,6 +427,7 @@ def saturation_scan(args, out_dir, fit):
             "sig_y": sigma,
             "c_sig_x": SPOT_CUT,
             "c_sig_y": SPOT_CUT,
+            "cut_shape": "ellipse",  # a circle here: what gauss_cap_pC assumes
         }
         for scale in scales:
             machine.photocathode = dataclasses.replace(
@@ -508,6 +571,16 @@ def main():
     if args.quick:
         args.particles = min(args.particles, 600)
     warnings.filterwarnings("ignore")
+    capture = capture_settings()
+    apply_capture(args, capture)
+    if capture:
+        print(
+            f"camera frame: laser energy readback {capture['laser_energy_uJ']:.3f} uJ, gun solenoid "
+            f"{capture['gun_solenoid_A']:.2f} A = {capture['gun_solenoid_A'] * SOLENOID_T_PER_A:.3f} T at "
+            f"{SOLENOID_T_PER_A:g} T/A (this run uses {args.solenoid_T:.3f} T), charge monitor "
+            f"{capture['charge_pC']:.1f} pC at gun phase {capture['gun_phase_deg']:.2f} deg",
+            flush=True,
+        )
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with h5py.File(DATA, "r") as f:

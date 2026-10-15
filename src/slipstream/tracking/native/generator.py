@@ -90,6 +90,10 @@ class GeneratorInput:
     lpy: float = 0.0
     rpy: float = 0.0
     cor_py: float = 0.0
+    # Native extension, not an ASTRA key (an ASTRA run needs the line removed, which gives the rectangle): the shape of the
+    # cut of ``Dist_x = Dist_y = 'g'``. 'rectangle' is ASTRA's independent cuts at +-C_sig_x sig_x and +-C_sig_y sig_y;
+    # 'ellipse' cuts the 2D gaussian on the ellipse with those semi-axes (what a round aperture clipping the laser gives).
+    cut_shape: str = "rectangle"
 
     @property
     def n_probe(self) -> int:
@@ -203,6 +207,41 @@ def _ndtri_cut(v: torch.Tensor, cut: float) -> torch.Tensor:
         p = 0.5 * math.erfc(cut / math.sqrt(2.0))
         v = p + v * (1.0 - 2.0 * p)
     return -torch.special.ndtri(v)
+
+
+def _cut_shape(name: str) -> str:
+    """``Cut_shape`` -> ``'rectangle'`` (ASTRA's independent cuts) or ``'ellipse'``; matched on the first letter."""
+    s = name.strip().lower()
+    if s.startswith(("r", "b")):  # rectangle, rectangular, box
+        return "rectangle"
+    if s.startswith("e"):
+        return "ellipse"
+    raise ValueError(f"unknown Cut_shape {name!r}: use 'rectangle' or 'ellipse'")
+
+
+def _ellipse_gauss(u_r: torch.Tensor, u_phi: torch.Tensor, cut_x: float, cut_y: float, grid: int = 1 << 14):
+    """``(u, v)`` of a unit-variance 2D gaussian cut on the ellipse ``(u/cut_x)^2 + (v/cut_y)^2 <= 1``, from the unit-interval
+    points ``u_r`` and ``u_phi``. A cut of 0 (or less) leaves that axis uncut: a strip, or no cut at all for both.
+
+    In polar coordinates the density is ``r exp(-r^2/2)`` out to ``R(phi)^2 = 1/(cos^2 phi/cut_x^2 + sin^2 phi/cut_y^2)``. So
+    ``phi`` has the density ``1 - exp(-R^2/2)``, inverted from a tabulated CDF (uniform for a circle), and for that ``phi``
+    ``r`` is a Rayleigh variable cut at ``R``: for a circle this is ``2D Gaussian``'s mapping, point for point."""
+    inv_x = 1.0 / cut_x**2 if cut_x > 0 else 0.0
+    inv_y = 1.0 / cut_y**2 if cut_y > 0 else 0.0
+
+    def inside(phi):  # fraction of the Rayleigh law inside R(phi); 1 where no cut reaches the ray
+        inv = inv_x * torch.cos(phi) ** 2 + inv_y * torch.sin(phi) ** 2
+        return -torch.expm1(-0.5 / inv.clamp_min(1e-300))
+
+    nodes = torch.linspace(0.0, 2.0 * math.pi, grid + 1, dtype=torch.float64)
+    w = inside(nodes)
+    cdf = torch.cat([torch.zeros(1, dtype=torch.float64), torch.cumsum(0.5 * (w[1:] + w[:-1]), 0)])
+    cdf = cdf / cdf[-1]
+    u_phi = u_phi.contiguous()  # the Sobol'/random columns are strided views
+    k = torch.searchsorted(cdf, u_phi, right=True).clamp(1, grid)
+    phi = nodes[k - 1] + (u_phi - cdf[k - 1]) / (cdf[k] - cdf[k - 1]) * (nodes[k] - nodes[k - 1])
+    r = torch.sqrt(-2.0 * torch.log1p(-u_r * inside(phi)))
+    return r * torch.cos(phi), r * torch.sin(phi)
 
 
 def _plateau_ppf(u: torch.Tensor, length: float, rise: float) -> torch.Tensor:
@@ -319,6 +358,10 @@ def _block(inp: GeneratorInput, ipart: int, sequence: str, seed: int, normalise:
     k_x, k_y, k_z = _kind(inp.dist_x, "x"), _kind(inp.dist_y, "y"), _kind(inp.dist_z, "z")
     k_px, k_py, k_pz = _kind(inp.dist_px, "px"), _kind(inp.dist_py, "py"), _kind(inp.dist_pz, "pz")
     two_d = k_x in ("radial", "gauss2d")  # x and y are then one 2D distribution (sig_y unused)
+    ellipse = _cut_shape(inp.cut_shape) == "ellipse"  # x and y are then one 2D gaussian cut on an ellipse
+    if ellipse and not (k_x == k_y == "gauss"):
+        raise ValueError(f"Cut_shape = 'ellipse' cuts a 2D gaussian, so Dist_x and Dist_y must both be 'g', not "
+                         f"{inp.dist_x!r} and {inp.dist_y!r}")
     # the longitudinal axis is the emission time [ns] from a cathode, else the position [mm]
     z_sig, z_cut, z_L, z_r = ((inp.sig_clock, inp.c_sig_clock, inp.lt, inp.rt) if cathode
                               else (inp.sig_z, inp.c_sig_z, inp.lz, inp.rz))
@@ -345,6 +388,9 @@ def _block(inp: GeneratorInput, ipart: int, sequence: str, seed: int, normalise:
                 keep = -math.expm1(-0.5 * inp.c_sig_x ** 2) if inp.c_sig_x > 0 else 1.0
                 r = sx * torch.sqrt(-2.0 * torch.log1p(-U["x"] * keep))
             x, y = r * torch.cos(phi), r * torch.sin(phi)
+        elif ellipse:  # r from the x dimension, phi from the y one, as for 2D Gaussian
+            u, v = _ellipse_gauss(U["x"], U["y"], inp.c_sig_x, inp.c_sig_y)
+            x, y = inp.sig_x * u, inp.sig_y * v
         else:
             x = _sample1d(k_x, U["x"], inp.sig_x, inp.c_sig_x, inp.lx, inp.rx)
             y = _sample1d(k_y, U["y"], inp.sig_y, inp.c_sig_y, inp.ly, inp.ry)

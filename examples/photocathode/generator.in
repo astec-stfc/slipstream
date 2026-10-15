@@ -1,9 +1,10 @@
 ! CLARA 400 Hz gun laser as a macroparticle distribution (ASTRA generator.in, read natively by slipstream).
 ! Only the shape of the laser pulse matters when the Injector has a Photocathode: the charge comes from the
 ! laser energy and quantum efficiency, Q_total merely weights the macroparticles.
-! The transverse profile is the cut Gaussian fitted to the virtual-cathode image of 2022-04-29 10:14 UTC by
-! fit_laser_image.py (+-0.04 mm on sig_x, +-0.02 mm on sig_y, +-0.15 on C_sig_x, +-0.3 on C_sig_y); the emission
-! time and energy are assumed, not measured.
+! The transverse profile is the Gaussian cut on an ellipse that fit_laser_image.py fits to the virtual-cathode image of
+! 2022-04-29 10:14 UTC (+-0.04 mm on sig_x, +-0.01 mm on sig_y, +-0.1 on C_sig_x and C_sig_y). Cut_shape is a native key of
+! slipstream's generator: delete it for ASTRA, whose cut is a rectangle (sig_x = 0.565, C_sig_x = 1.55, sig_y = 0.344,
+! C_sig_y = 2.32 fit best). The emission time and energy are assumed, not measured.
 &INPUT
   FName = 'generator.txt',
   Ipart = 4000,
@@ -14,8 +15,9 @@
   Cathode = .true.,
   Q_total = 0.12,            ! nC
   Dist_z = 'p', Lt = 0.002, rt = 0.0002,   ! emission time: 2 ps flat-top with 0.2 ps edges (ns)
-  Dist_x = 'g', sig_x = 0.565, C_sig_x = 1.55,   ! mm, gaussian cut at 1.55 sigma = +-0.875 mm
-  Dist_y = 'g', sig_y = 0.344, C_sig_y = 2.32,   ! mm, gaussian cut at 2.32 sigma = +-0.797 mm
+  Dist_x = 'g', sig_x = 0.564, C_sig_x = 1.60,   ! mm, gaussian cut at 1.60 sigma = +-0.905 mm
+  Dist_y = 'g', sig_y = 0.350, C_sig_y = 2.37,   ! mm, gaussian cut at 2.37 sigma = +-0.832 mm
+  Cut_shape = 'ellipse',                         ! native: cut on the ellipse with these semi-axes
   Dist_pz = 'i', LE = 0.00062,             ! isotropic emission at 0.62 eV (keV)
   Ref_zpos = 0.0, Ref_Ekin = 0.0
 /

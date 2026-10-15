@@ -32,6 +32,19 @@ Hammersley set (bases `E`:2, `t`:3, `z`:5, `py`:7, `px`:11, `y`:13, `x`:17).
 `Beam.particles` returns the probes' charge share to the tracked particles so the tracked
 total is exactly `Q_total` at any N (ASTRA's is short by `7/Ipart`).
 
+**Elliptical cut** (a native namelist key, `Cut_shape`, that ASTRA does not have: delete the line for an ASTRA run, which
+gives the rectangle). `Dist_x = Dist_y = 'g'` cut each axis on its own, at `+-C_sig_x sig_x` and `+-C_sig_y sig_y`, so the
+cut is a rectangle. A laser clipped by a round aperture is a gaussian cut on an ellipse, which the rectangle only
+approximates: its corners hold charge (5 % of the particles for cuts of 1.6 and 2.4 sigma). `Cut_shape = 'ellipse'`
+draws `x` and `y` as one 2D gaussian of rms `sig_x`, `sig_y`, uncorrelated, cut on the ellipse
+`(x / (C_sig_x sig_x))^2 + (y / (C_sig_y sig_y))^2 <= 1`. `C_sig_x` and `C_sig_y` keep their meaning, the semi-axes in
+sigma; a `C_sig` of 0 leaves that axis uncut (a strip for one, a plain 2D gaussian for both). `'rectangle'` is the
+default; the first letter picks the shape (`r` or `b`, `e`). Any `Dist_x`/`Dist_y` but `'g'` raises. As for `2D-Gaussian` the
+radius comes from the `x` Halton dimension and the angle from the `y` one, and a cut turns the rms rescale off (the
+cut gaussian's rms is smaller than `sig`: 0.69 and 0.81 sigma for cuts at 1.5 and 2 sigma, against 0.74 and 0.88 for the
+rectangle's independent cuts) while the means are still zeroed. With equal axes it is `2D-Gaussian`'s circular cut, point
+for point.
+
 ### `_plateau_ppf`
 
 Inverse CDF of ASTRA's plateau `f(x) = 1/(1 + exp(4 (|x| - L/2)/rt))` (manual 7.2.2; measured: the
@@ -67,7 +80,8 @@ def main(argv: list[str] | None=None) -> Beam: ...
 One `&INPUT` namelist. Field names are ASTRA's, lower-cased; units are ASTRA's (manual
 ch. 7): lengths in mm (`ref_zpos` and `r_cathode` in m, `disp_*` in m), times in ns,
 `sig_ekin`/`le`/`re`/`cor_ekin` in keV, `ref_ekin` in MeV, momenta in eV/c,
-`nemit_*` in mm mrad, `cor_p*` in mrad, charge in nC. Defaults are the manual's.
+`nemit_*` in mm mrad, `cor_p*` in mrad, charge in nC. Defaults are the manual's. The one native field is `cut_shape`
+(`'rectangle'` or `'ellipse'`, see the elliptical cut above); `Injector.generator_overrides` can set it like any other.
 
 ### `Beam.particles`
 
@@ -93,6 +107,14 @@ still zeroed) to leave the raw sampling noise in.
 ### `Module constants`
 
 constants measured from the ASTRA generator (see model description)
+
+### `_ellipse_gauss`
+
+The elliptical cut's sampler. In polar coordinates of the unit 2D gaussian (`u = x/sig_x`, `v = y/sig_y`) the density is
+`r exp(-r^2/2)` out to `R(phi)^2 = 1/(cos^2 phi/C_x^2 + sin^2 phi/C_y^2)`. The angle then has the density
+`1 - exp(-R^2/2)` (inverted from a CDF tabulated at 16384 nodes with linear interpolation: the position error is about
+1e-8 sigma for cuts of 1.6 and 2.4 and below 2e-7 sigma for 0.7 and 3; exactly uniform for a circle) and, given the angle, `r = sqrt(-2 ln(1 - U (1 - exp(-R^2/2))))` is a Rayleigh variable cut at `R`.
+This is a Rosenblatt transform, so two Halton points give a low-discrepancy fill of the ellipse.
 
 ### `_block`
 

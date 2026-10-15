@@ -157,8 +157,10 @@ above gives `hw - phi_w` (given `beta`), the product of `qe` and the laser energ
 baseline. `examples/photocathode/schottky_scan.py` does this for the CLARA HRRG and then tracks the whole scan (emission,
 space charge, fall-back, apertures). The same example scans extracted charge against laser energy for several spot sizes.
 `examples/photocathode/fit_laser_image.py` fits a virtual-cathode camera image of the laser to the `Dist_x = Dist_y = 'g'`
-cut gaussian of `generator.in` (`sig` and the n-sigma cut `C_sig` per axis), which is the transverse laser profile the
-example uses.
+gaussian of `generator.in` (`sig` and the n-sigma cut `C_sig` per axis) cut on an ellipse (the generator's native
+`Cut_shape = 'ellipse'`, see [`generator`](generator.md)), which is the transverse laser profile the example uses. The
+example takes the laser energy from the energy-meter readback stored with that image, so the fit gives the quantum
+efficiency (`--qe` fixes it instead and the fit gives the energy).
 
 ## Numerical and implementation notes
 
