@@ -9,7 +9,8 @@ import torch
 import yaml
 
 from slipstream.constants import E_CHARGE_C, EPS0_F_PER_M
-from slipstream.tracking.native.injector import Cavity, Injector, SpaceChargeSettings
+import slipstream.tracking.native.injector as injector_module
+from slipstream.tracking.native.injector import Aperture, Cavity, Injector, SpaceChargeSettings
 from slipstream.tracking.native.photocathode import Photocathode, PhotoEmitter, schottky_lowering_eV
 
 HW_266 = 1239.841984 / 266.0  # photon energy, eV
@@ -272,15 +273,77 @@ def test_injector_yaml_keeps_the_photocathode(tmp_path):
     assert Injector.load(tmp_path / "plain.yaml").photocathode is None
 
 
+def test_needed_checks_skip_only_what_is_out_of_reach():
+    needed = injector_module._needed_checks
+    slabs = [(0.0, 0.001), (0.32, 0.321)]
+    assert needed((-math.inf, math.inf), 0.0, 0.5, slabs, 0.0) == (True, True, True)  # no host sync yet
+    beam, travel = (0.10, 0.20), 0.001  # live particles at the last sync; farthest anything can have moved since
+    assert needed(beam, travel, 0.5, slabs, 0.0) == (False, False, False)
+    assert needed(beam, travel, 0.2005, slabs, 0.0)[0]  # the plane is within one step of the lead particle
+    assert needed(beam, travel, None, slabs, 0.0)[0] is False  # no screen requested
+    assert needed(beam, travel, 0.5, [(0.2005, 0.201)], 0.0)[1]  # a slab the lead particle can reach
+    assert needed(beam, travel, 0.5, [(0.0, 0.098)], 0.0)[1] is False  # a slab behind the tail, out of reach
+    assert needed(beam, travel, 0.5, None, 0.0)[1]  # placed apertures: lab extent unknown, always checked
+    assert needed((0.0005, 0.20), travel, 0.5, slabs, 0.0)[2]  # a tail particle can still reach the cathode wall
+
+
+@pytest.mark.parametrize("theta_e", [45.0, 120.0])
+def test_skipping_idle_checks_changes_nothing(tmp_path, monkeypatch, theta_e):
+    # theta 45: electrons escape, a slab clips part of the beam, a plane at 12 mm records the survivors.
+    # theta 120: every electron falls back onto the cathode after flying a few mm (no aperture here).
+    r, theta = disc(300, 0.3e-3)
+    results, flags = {}, []
+    real = injector_module._needed_checks
+
+    def recording(*args, **kwargs):
+        flags.append(real(*args, **kwargs))
+        return flags[-1]
+
+    for name, rule in (("gated", recording), ("forced", lambda *args, **kwargs: (True, True, True))):
+        monkeypatch.setattr(injector_module, "_needed_checks", rule)
+        machine = dc_gap(tmp_path, monkeypatch, 60e6, constant_qe(0.02, 60e6, 0.3e-3), r, theta, 0.05e-12, dt=0.1e-12,
+                         frequency=3e9, crest=90.0, phase=theta_e, z_stop=0.02, sc=False)
+        machine.apertures = [Aperture("RAD", 0.004, 0.0045, 0.15e-3)] if theta_e < 90.0 else []
+        results[name] = track(machine, screen_z_m=0.012)
+    gated, forced = results["gated"], results["forced"]
+    assert gated["n_steps"] == forced["n_steps"] and gated["n_lost_on_aperture"] == forced["n_lost_on_aperture"]
+    assert gated["emission"]["n_returned"] == forced["emission"]["n_returned"]
+    assert torch.equal(gated["emission"]["q"], forced["emission"]["q"])
+    for key in ("x", "y", "z", "ux", "uy", "uz", "t_s", "q", "crossed"):
+        assert torch.equal(gated["screen"][key], forced["screen"][key]), key
+    assert any(not f[0] for f in flags)  # the plane check really was skipped while the beam was far from it
+    if theta_e < 90.0:
+        assert gated["n_lost_on_aperture"] > 0 and gated["screen"]["n_crossed"] > 0 and any(f[0] for f in flags)
+    else:
+        assert gated["emission"]["n_returned"] == 300 and gated["n_lost_on_aperture"] == 0
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
-def test_cuda_float32_emission_matches_cpu_float64(tmp_path, monkeypatch):
+@pytest.mark.parametrize("use_warp", [True, False])
+def test_cuda_float32_emission_matches_cpu_float64(tmp_path, monkeypatch, use_warp):
     # overdriven short pulse: emission limit, suppressed macroparticles, SC image solve and the compiled/Warp step
     field, radius = 50e6, 1e-3
     r, theta = disc(1500, radius)
     machine = dc_gap(tmp_path, monkeypatch, field, constant_qe(3.0, field, radius), r, theta, 0.2e-12, dt=0.02e-12)
     reference = track(machine)["emission"]
-    candidate = track(machine, device="cuda", dtype=torch.float32, use_compile=True)["emission"]
+    candidate = track(machine, device="cuda", dtype=torch.float32, use_compile=True, use_warp=use_warp)["emission"]
     assert candidate["emitted_charge_C"] == pytest.approx(reference["emitted_charge_C"], rel=2e-3)
     assert candidate["charge_C"] == pytest.approx(reference["charge_C"], rel=2e-3)
     assert candidate["n_suppressed"] == reference["n_suppressed"]
     assert candidate["q"].device.type == "cuda" and candidate["q"].dtype == torch.float32
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
+def test_a_new_rf_phase_reuses_the_compiled_cuda_step(tmp_path, monkeypatch):
+    # The RF phase is a 0-d tensor input of the compiled step: as a Python float it was a compile-time constant and
+    # every point of a phase scan recompiled the step (then torch._dynamo's recompile limit fell back to eager).
+    import torch._dynamo.utils as dynamo_utils
+
+    r, theta = disc(300, 0.3e-3)
+    graphs = []
+    for phase in (40.0, 45.0, 50.0):
+        machine = dc_gap(tmp_path, monkeypatch, 60e6, constant_qe(0.05, 60e6, 0.3e-3), r, theta, 0.05e-12, dt=0.1e-12,
+                         frequency=3e9, crest=90.0, phase=phase, z_stop=0.01, sc=False)
+        track(machine, device="cuda", dtype=torch.float32, use_compile=True, use_warp=False)
+        graphs.append(dynamo_utils.counters["stats"]["unique_graphs"])
+    assert graphs[0] == graphs[1] == graphs[2]

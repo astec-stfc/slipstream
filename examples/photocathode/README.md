@@ -8,19 +8,65 @@ repetition rate gun, then scans the extracted charge against laser energy for se
 | --- | --- |
 | `104459_Schottky_approx_crestingData.h5` | measured scan: `xData` gun phase [deg], `yData` charge [pC], `yStd` [pC] |
 | `Example_Shottky_Scan.jpg` | a plot of this scan with the phase axis shifted by +167 deg (0 at the start of the plateau) |
-| `generator.in` | the laser profile the model assumes (not measured): 3 ps flat-top, 0.25 mm rms gaussian, 0.62 eV emission |
+| `CLA-VCA-DIA-CAM-01_2022-04-29_10-14-01UTC_1_images.hdf5` | camera frame of the laser at the virtual cathode (`Capture000001`, 188.5 px/mm, x along the columns, y along the rows); the attributes hold the machine settings at the capture |
+| `generator.in` | the laser profile: the transverse cut gaussian fitted to that frame, an assumed 2 ps flat-top and 0.62 eV emission |
+| `fit_laser_image.py` | fits the frame and prints the `generator.in` lines |
 | `schottky_scan.py` | the fit, the tracked scan and the saturation scan |
-| `reference/` | outputs of `python examples/photocathode/schottky_scan.py` (CUDA, float32, 1500 macroparticles) |
+| `reference/` | `schottky_scan.py` outputs (CUDA, float32, 1500 macroparticles, made with the laser assumed before the spot was measured: 3 ps flat-top, 0.25 mm rms round gaussian) and `fit_laser_image.py` outputs |
 
 ```bash
-python examples/photocathode/schottky_scan.py            # about 20 minutes on a laptop GPU (RTX 3050)
-python examples/photocathode/schottky_scan.py --quick    # coarser, 600 macroparticles
+python examples/photocathode/fit_laser_image.py                    # about 10 seconds, no GPU
+python examples/photocathode/schottky_scan.py                      # about 9 minutes on a laptop GPU (RTX 3050)
+python examples/photocathode/schottky_scan.py --dt-ceiling-ps 2    # about 3 minutes, charges within 1.2 pC rms
+python examples/photocathode/schottky_scan.py --quick              # coarser, 600 macroparticles
 python examples/photocathode/schottky_scan.py --only saturation --no-plots
 ```
+
+The tracking is `torch.compile`d on CUDA (`--no-compile` for the eager path, about 10 times slower per step; `--warp` adds the
+Warp kernels, which cost more than they save on this GPU). `--dt-ceiling-ps 2` lets the step grow with the space-charge
+frequency after emission, about 4 times fewer steps; against the fixed 0.4 ps step of `reference/` the monitor charge
+changes by 1.2 pC rms (at most 6.7 pC in the sparse tail of the cut-off, +1 pC in the ramp).
 
 It needs the optional `laura` and `laura_lattices` packages (CLARA gun, solenoid and apertures) and, for plots,
 `slipstream-accel[plot]`. Without CUDA use `--device cpu` (much slower). `--generator`, `--wavelength-nm`, `--qe`, `--beta`,
 `--gun-field-MV`, `--solenoid-T` and `--monitor-z` replace the assumed laser, photocathode, gun, solenoid and monitor plane.
+
+## Laser spot
+
+`fit_laser_image.py` fits the virtual-cathode frame (captured 2022-04-29 10:14 UTC, the day of the Schottky scan) with the
+distribution `generator.in` can draw, `Dist_x = Dist_y = 'g'`: two independent gaussians cut at `C_sig` sigma,
+convolved with an edge blur that the generator's sharp cut leaves out. The frame is a clipped gaussian: an uncut gaussian
+leaves a 26 % larger residual (40.0 against 31.6 counts rms on a 976 count peak).
+
+| | x | y |
+| --- | --- | --- |
+| `sig` [mm] | 0.565 +- 0.043 | 0.344 +- 0.018 |
+| `C_sig`, the n-sigma cut | 1.55 +- 0.15 | 2.3 +- 0.3 |
+| cut at [mm] | +-0.875 | +-0.797 |
+| rms size of the cut distribution [mm] | 0.429 | 0.321 |
+
+The uncertainties are a block jackknife, which includes the hot spots in the laser profile. The edge is well defined (0.875
+and 0.80 mm are where the image falls to half its edge value), but `sig` and `C_sig` trade off through those hot spots:
+`C_sig_x` can be lower (1.2 with `sig_x` 0.68 mm leaves a residual only 1.6 % larger) but not higher (2.0 leaves 10 % more).
+The y cut at 2.3 sigma, where a gaussian holds only 7 % of its peak, barely changes the residual (anything from 2 sigma to no
+cut at all is within 1.8 %); the faint edge seen in the image sets it. The edge blur is 0.10 mm rms (imaging and
+diffraction). The spot centre is at (-1.09, +0.44) mm from the sensor centre; that is not applied (`x_off`, `y_off` stay 0)
+because the position of the cathode axis on the sensor is not known.
+
+The edge of the image is round, and two independent cuts give a rounded rectangle. A gaussian clipped by an ellipse of
+semi-axes 0.910 x 0.812 mm fits better (27.0 counts rms, `sig` 0.575 and 0.357 mm). ASTRA's generator cannot draw that, so
+`generator.in` has the independent-cut fit; its rms sizes are 2 % larger than the second moments of the image
+(0.429 x 0.321 mm against 0.420 x 0.314 mm), the excess being the corners.
+
+![Laser spot fit](reference/laser_fit.png)
+
+Effect on the scan. Against the 0.25 mm rms round gaussian that `reference/` assumed (both 3 ps, `--dt-ceiling-ps 2`, 131072
+macroparticles), space-charge-limited emission keeps 0.977 of the ideal charge at the field maximum instead of 0.944, and the
+laser energy that matches the plateau falls from 5.80 to 5.61 uJ for QE 1e-4. The plateau, the field-limited flank and the zero
+crossing change by 0.3 pC rms. The aperture-limited low-phase end (-168 to -204 deg) changes by 7 pC rms (16 pC at most) and
+ends 3 pC rms closer to the measurement (26.6 to 23.8 pC rms); the ramp is still late. The 2 ps flat-top now in `generator.in`,
+against 3 ps, changes the field-limited part by 0.3 pC rms and the low-phase end by 2.3 pC rms (7.4 pC at most); the
+emission-law fit has chi2 per point 1.37 against 1.40.
 
 ## What the scan contains
 
@@ -29,7 +75,8 @@ The laser is fixed and the gun phase is scanned, so the charge combines three th
 - **Emission.** The cathode field is `E0 sin` of the RF phase. Copper at 266 nm sits just above its Schottky-lowered
   threshold, so the quantum efficiency rises steeply with field: charge follows the field through the plateau at the
   field maximum and falls to zero at the field's zero crossing (scan phase -76 deg).
-- **Space charge.** At 120 pC in a 0.25 mm rms spot the surface field is reduced a few percent while the pulse emits.
+- **Space charge.** At 120 pC the field of the emitted cloud cuts the emission at the field maximum by 2.4 % in the
+  measured spot (5.6 % in the 0.25 mm rms round spot assumed before it was measured).
 - **Transport.** Electrons emitted late in the RF half-cycle leave the gun with low energy and a large divergence. They
   fall back onto the cathode or are clipped by the 10 mm L01 aperture at z = 1.0577 m, which gives the measured ramp,
   shoulder, dip and satellite peak at the low-phase end (-170 to -200 deg).
@@ -72,8 +119,9 @@ in this ramp, so use the real settings (`--gun-field-MV`, `--solenoid-T`).
 
 ![Schottky scan](reference/schottky_scan.png)
 
-Saturation (`reference/saturation_scan.png`): at the field maximum a 3 ps pulse extracts the unscreened photoemission
-only while the laser's areal density stays well below the Gauss density `eps0 E`. At 157 pC unscreened (1.3 times the
+Saturation (`reference/saturation_scan.png`; round gaussian spots cut at 3 sigma, not the measured spot, with the pulse
+shape of `generator.in`): at the field maximum a 3 ps pulse extracts the unscreened photoemission only while the laser's
+areal density stays well below the Gauss density `eps0 E`. At 157 pC unscreened (1.3 times the
 measured plateau) a 0.5 mm rms spot extracts 98 %, 0.25 mm 93 %, 0.15 mm 82 %, 0.1 mm 68 % and 0.05 mm 39 %; at 2 nC
 unscreened they extract 79, 48, 27, 16 and 6 %. The dotted lines are the Gauss-law cap of an instantaneous sheet. The
 tracked charge lies below it at moderate overdrive (the screened surface field also lowers the Schottky yield) and above it
@@ -83,9 +131,12 @@ at strong overdrive, where the cloud leaves the surface during the 3 ps pulse.
 
 ## Assumptions to replace
 
-- Laser: 3 ps flat-top, 0.25 mm rms gaussian (`generator.in`), 266 nm. The emission flank limits the pulse length to a
-  few ps; the spot size only weakly (the laser energy absorbs the few-percent space-charge reduction).
+- Laser: the transverse profile is measured (see Laser spot); the 2 ps flat-top and the 0.62 eV emission energy
+  (`generator.in`) and 266 nm are assumed. The emission flank limits the pulse length to a few ps; the spot size only
+  weakly (the laser energy absorbs the few-percent space-charge reduction).
 - Gun: 120 MV/m peak field and the LAURA CLARA field map, solenoid 0.345 T, apertures from LAURA. The charge monitor is
   taken to lie downstream of the 10 mm L01 aperture (the WCM at 0.676 m would not see it).
-- Quantum efficiency: `qe = 1e-4` at the cathode field is a placeholder; the fit fixes `qe x energy` = 5.8e-10 J, so a
-  measured laser energy gives the quantum efficiency directly (`qe = 5.8e-10 J / E_laser`).
+- Quantum efficiency: `qe = 1e-4` at the cathode field is a placeholder; the fit fixes `qe x energy` = 5.8e-10 J (5.6e-10 J
+  with the measured spot), so a measured laser energy gives the quantum efficiency directly (`qe = 5.8e-10 J / E_laser`).
+  The attributes of the camera frame record a laser energy readback `CLA-LAS-DIA-EM-06:E_RB` = 0.539 (no unit stored; in uJ
+  at the cathode it would give `qe` = 1.0e-3) and the charge monitor `CLA-S01-DIA-WCM-01:Q` = 99.7 pC.

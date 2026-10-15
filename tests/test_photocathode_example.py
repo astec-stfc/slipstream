@@ -52,7 +52,7 @@ def test_example_machine_tracks_the_gun_and_apertures_with_laura_conventions(exa
     if example["CLARA"] is None:
         pytest.skip("laura_lattices.CLARA not installed")
     args = SimpleNamespace(generator=str(EXAMPLE.with_name("generator.in")), gun_field_MV=None, solenoid_T=None,
-                           particles=120, device="cpu", dtype="float64")
+                           particles=120, device="cpu", dtype="float64", compile=False, warp=False, dt_ceiling_ps=0.0)
     photo = Photocathode(pulse_energy_J=5.8e-6, wavelength_nm=266.0, qe=1e-4, work_function_eV=4.6,
                          qe_field_V_per_m=120e6)
     machine, peak, omega = example["build_machine"](args, 0.1, photo, 0.5)

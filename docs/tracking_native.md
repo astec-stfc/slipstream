@@ -133,6 +133,35 @@ cost of repeated fixed-shape CUDA steps. Compilation is shape-sensitive:
 keep particle count and mesh buckets stable within a run. Use
 `track_differentiable()` with a fixed `n_steps` when gradients are required.
 
+### Scans and step cost
+
+Up to a few hundred thousand macroparticles a CUDA step is launch-bound: the
+host spends about 1 ms per step issuing kernels while the GPU is mostly idle.
+Measured on an RTX 3050 laptop GPU (Windows, PyTorch 2.14, Warp 1.17, 1500
+macroparticles, float32, one gun phase to z = 0.45 m, screen and apertures on):
+eager 3.1 ms/step (13 before idle checks were skipped), Warp-backed
+0.65-0.72 ms/step (1.1-1.6 before), plain `torch.compile` 0.33-0.54 ms/step,
+with identical charges. `track(use_warp=False)` keeps the step and the
+space-charge deposit on `torch.compile` where Warp's Python argument handling
+costs more than it saves (it did at 1.5k to 1M macroparticles here: 25-35 %
+slower per step); the default is unchanged.
+
+Scanning an RF phase must not recompile: the cavity phases enter the compiled
+step as 0-d tensors. As Python floats they were compile-time constants, so each
+new phase recompiled the step (about 10 s) until `torch._dynamo`'s recompile
+limit silently dropped it to eager. The screen plane, the aperture slabs and
+the cathode wall are only checked on steps where a live particle can reach
+them (the live z-range at the last 10-step sync, widened by `c*dt` per step);
+this skips idle work without changing any result.
+
+For a scan that needs only the charge, `dt_adaptive=True` with a larger
+`dt_safety` (5e7 against the 5e5 default) and `dt_ceiling_s=2e-12` keeps the
+fine step while space charge is strong and cuts the step count about fourfold:
+the CLARA Schottky scan changes by 1.2 pC rms (at most 6.7 pC in the sparse tail
+of the cut-off) against a fixed 0.4 ps step. Over six phases of the aperture-limited
+ramp it deviates from a fixed 0.1 ps step by 1.7 pC rms, as the fixed 0.4 ps step
+does (1.6 pC); a 4 ps ceiling is visibly worse (2.7 pC).
+
 ## Bends, apertures, and external programs
 
 Injector bends and placed elements are evaluated in their local beam frame;

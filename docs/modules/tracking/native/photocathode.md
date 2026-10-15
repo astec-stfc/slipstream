@@ -156,6 +156,9 @@ to the monitor. The flank where the field falls toward its zero crossing is tran
 above gives `hw - phi_w` (given `beta`), the product of `qe` and the laser energy, the phase origin and any monitor
 baseline. `examples/photocathode/schottky_scan.py` does this for the CLARA HRRG and then tracks the whole scan (emission,
 space charge, fall-back, apertures). The same example scans extracted charge against laser energy for several spot sizes.
+`examples/photocathode/fit_laser_image.py` fits a virtual-cathode camera image of the laser to the `Dist_x = Dist_y = 'g'`
+cut gaussian of `generator.in` (`sig` and the n-sigma cut `C_sig` per axis), which is the transverse laser profile the
+example uses.
 
 ## Numerical and implementation notes
 

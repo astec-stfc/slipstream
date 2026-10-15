@@ -616,11 +616,13 @@ class Injector:
         dump_dir: str | Path | None = None,
         return_particles: bool = False,
         screen_z_m: float | None = None,
+        use_warp: bool = True,
     ) -> dict:
         """Track the distribution from the cathode to ``z_stop_m`` (default: the machine's own).
 
         With ``self.photocathode`` set, the laser model assigns each macroparticle's charge as it is emitted and
-        ``"emission"`` reports the charges."""
+        ``"emission"`` reports the charges. ``use_warp=False`` keeps the CUDA step and space-charge deposit on
+        ``torch.compile`` even where Warp is installed (faster where Python launch overhead dominates)."""
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
         _check_screen_plane(screen_z_m)
@@ -653,6 +655,10 @@ class Injector:
         if bent:  # every solenoid/quadrupole is in `magnets` (framed); _fused_step's own tables stay empty
             sol_fields = []
         sw, tw, sol = _field_tables(cav_fields, sol_fields)
+        # RF phases as 0-d tensors: a Python float is a compile-time constant, so every new phase of a scan would
+        # recompile the step (~10 s each, then torch._dynamo's recompile limit drops it to eager).
+        sw, tw = (tuple((*e[:-1], torch.as_tensor(e[-1], dtype=torch.float64, device=device)) for e in tab)
+                  for tab in (sw, tw))
         quad = _quad_tables([q for q in self.quadrupoles
                              if not (bent or q.profile or q.multipoles or q.x_m or q.xrot_rad)])
         apertures = _aperture_tables(self.apertures)
@@ -695,7 +701,7 @@ class Injector:
                 4 * (len(SC_NR_BUCKETS) + len(SC_NZ_BUCKETS) + len(SC_IMAGE_NZ_BUCKETS)),
             )
             rec_fn = torch.compile(_traj_stats, dynamic=False)
-            using_warp = warp_kernels.available(device, dtype)
+            using_warp = use_warp and warp_kernels.available(device, dtype)
             if using_warp:
                 step_fn = _step_with_apertures_warp
                 sc_fn = _fused_sc_fields_warp
@@ -716,6 +722,10 @@ class Injector:
         dt_steps: list = []  # the step actually taken, every step -- track_differentiable(dt_schedule=) replays it
         image_steps = 0  # steps up to the last space-charge solve that used the cathode image (ditto, sc_image_steps)
         sc_precision_checked = False
+        # Per-step observers (screen plane, aperture slabs, cathode wall) only act near their plane: after emission the
+        # live z-range seen at the last host sync, widened by c*dt per step since, tells which can be skipped.
+        z_extent, dt_since = (-math.inf, math.inf), 0.0
+        slabs = None if any(len(ap) > 4 for ap in apertures) else [(ap[1], ap[2]) for ap in apertures]
 
         dump_dir_path = self.resolve(dump_dir) if dump_dir is not None else None
         stem = Path(self.source).stem if self.source else "injector"
@@ -788,8 +798,9 @@ class Injector:
                     sc_precision_checked = True
                     _warn_if_sc_kick_unresolvable(Ez_sc, uz, dt, dtype, self.qm_C_per_kg)
 
-                if omega is None:
-                    omega = _local_sc_omega(x, y, ux, uy, uz, Ex_sc, Ey_sc, Bx_sc, By_sc, counted, self.qm_C_per_kg)
+                if omega is None:  # only the adaptive step and the progress bar read it; it costs ~10 host syncs
+                    omega = (_local_sc_omega(x, y, ux, uy, uz, Ex_sc, Ey_sc, Bx_sc, By_sc, counted, self.qm_C_per_kg)
+                             if sc.dt_adaptive or verbose else 0.0)
                 # dt stays at its pre-loop starting value through emission regardless of dt_adaptive -- see
                 # docs/tracking_native.md's "Injector adaptive time-stepping".
                 if sc.dt_adaptive and emitted_all:
@@ -802,27 +813,34 @@ class Injector:
             # Warp wants plain floats, not the recompile-avoidance tensors -- see
             # docs/tracking_native.md's "Injector warp backend".
             dt_arg, qmdt2_arg = (dt, qmdt2) if using_warp else (dt_ten, qmdt2_ten)
-            if screen_state is not None:
+            if emitted_all:
+                check_screen, check_aper, check_wall = _needed_checks(
+                    z_extent, C_LIGHT * (dt_since + dt), screen_z_m if screen_state is not None else None, slabs,
+                    z_wall if emitter is not None else -math.inf)
+            else:
+                check_screen = check_aper = check_wall = True
+            if check_screen and screen_state is not None:
                 screen_prev = (x, y, z, ux, uy, uz)
                 if using_warp and emitted_all:
                     screen_prev = tuple(v.clone() for v in screen_prev)  # Warp pushes state in place.
-                alive_prev = alive.clone() if using_warp and apertures else alive
+                alive_prev = alive.clone() if using_warp and check_aper and apertures else alive
             (x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz, alive) = step_fn(
-                alive, apertures,
+                alive, apertures if check_aper else (),
                 x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,
                 Ex_sc, Ey_sc, Ez_sc, Bx_sc, By_sc, Bz_sc,
                 sw, tw, sol, quad, t_ten, dt_arg, qmdt2_arg, emitted_all, active, c2_inv, magnets,
             )
-            if screen_state is not None:
+            if check_screen and screen_state is not None:
                 screen_state = screen_fn(
                     screen_state, screen_prev, (x, y, z, ux, uy, uz), active, alive_prev,
                     apertures, screen_z_m, t_ten, dt_ten)
-            if emitter is not None:
+            if check_wall and emitter is not None:
                 fell_back = active & alive & (z < z_wall)  # absorbed by the cathode
                 alive, returned = alive & ~fell_back, returned | fell_back
             t += dt
             t_ten.add_(dt)
             dt_steps.append(dt)
+            dt_since += dt
 
             # Host-synced centroid only every 10 steps -- enough for the
             # stop check, and drops a per-step GPU->CPU sync.
@@ -837,6 +855,10 @@ class Injector:
                     centroid_z = float(z.mean())
                 elif active.any():
                     centroid_z = float(z[active].mean())
+                if emitted_all and (apertures or screen_state is not None or emitter is not None):
+                    z_extent = tuple(torch.stack([torch.where(alive, z, math.inf).min(),
+                                                  torch.where(alive, z, -math.inf).max()]).tolist())
+                    dt_since = 0.0
                 while dump_plan and centroid_z >= dump_plan[0][0]:
                     _, label = dump_plan.pop(0)
                     if int(counted.sum()) < 4:
@@ -1137,6 +1159,17 @@ class Injector:
 def _check_screen_plane(screen_z_m):
     if screen_z_m is not None and not math.isfinite(screen_z_m):
         raise ValueError("screen_z_m must be a finite lab-frame plane in metres")
+
+
+def _needed_checks(extent, travel, screen_z_m, slabs, z_wall, margin: float = 1e-5):
+    """``(screen, apertures, wall)``: which per-step observers can act. ``extent`` is the ``(z_lo, z_hi)`` of the live
+    particles at the last host sync and ``travel`` the farthest any can have moved since (``c*dt`` per step), so a
+    plane, aperture slab or cathode wall out of reach cannot be crossed and its check is skipped without changing any
+    result. ``slabs`` is ``None`` for placed apertures (their lab extent is not tracked): always checked."""
+    z_lo, z_hi = extent[0] - travel - margin, extent[1] + travel + margin
+    return (screen_z_m is not None and z_hi >= screen_z_m,
+            slabs is None or any(z_hi >= a and z_lo <= b for a, b in slabs),
+            z_lo < z_wall)
 
 
 def _std_mm(values: torch.Tensor) -> float:
@@ -1646,6 +1679,16 @@ def _fused_step(
 _applied_fields_compiled = torch.compile(_applied_fields, dynamic=False)
 
 
+def _total_fields(x, y, z, sw, tw, sol, quad, t, c2_inv, magnets, Ex_sc, Ey_sc, Ez_sc, Bx_sc, By_sc, Bz_sc):
+    """``_applied_fields`` plus the space-charge fields; compiled, the six adds fuse into the field kernels
+    instead of costing six eager launches per step."""
+    Ex, Ey, Ez, Bx, By, Bz = _applied_fields(x, y, z, sw, tw, sol, quad, t, c2_inv, magnets)
+    return Ex + Ex_sc, Ey + Ey_sc, Ez + Ez_sc, Bx + Bx_sc, By + By_sc, Bz + Bz_sc
+
+
+_total_fields_compiled = torch.compile(_total_fields, dynamic=False)
+
+
 def _applied_fields_warp(x, y, z, sw, tw, sol, quad, t, c2_inv, magnets=()):
     """Same as ``_applied_fields``, but ``sw``/``tw``/``sol`` run as warp kernel launches
     (``warp_kernels.applied_fields``) instead of through ``_applied_fields_compiled``."""
@@ -1663,10 +1706,8 @@ def _fused_step_warp(
     (``warp_kernels.push``) instead of inline torch ops -- CUDA only, see
     ``warp_kernels.available``."""
     # See docs/tracking_native.md's "Injector warp backend" for the measured numbers behind this choice.
-    Ex, Ey, Ez, Bx, By, Bz = _applied_fields_compiled(x, y, z, sw, tw, sol, quad, t, c2_inv, magnets)
-
-    Ex, Ey, Ez = Ex + Ex_sc, Ey + Ey_sc, Ez + Ez_sc
-    Bx, By, Bz = Bx + Bx_sc, By + By_sc, Bz + Bz_sc
+    Ex, Ey, Ez, Bx, By, Bz = _total_fields_compiled(x, y, z, sw, tw, sol, quad, t, c2_inv, magnets,
+                                                     Ex_sc, Ey_sc, Ez_sc, Bx_sc, By_sc, Bz_sc)
 
     if emitted_all:
         # push_inplace, not push: no old/new blend follows -- see docs/tracking_native.md's
