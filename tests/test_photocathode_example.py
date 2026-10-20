@@ -53,7 +53,8 @@ def test_example_machine_tracks_the_gun_and_apertures_with_laura_conventions(exa
     if example["CLARA"] is None:
         pytest.skip("laura_lattices.CLARA not installed")
     args = SimpleNamespace(generator=str(EXAMPLE.with_name("generator.in")), gun_field_MV=None, solenoid_T=None,
-                           particles=120, device="cpu", dtype="float64", compile=False, warp=False, dt_ceiling_ps=0.0)
+                           particles=120, device="cpu", dtype="float64", compile=False, warp=False, dt_ceiling_ps=0.0,
+                           flatness=None, solenoid_offset_mm=0.0, solenoid_tilt_mrad=0.0, steering=False, reference_offset_deg=-4.0)
     photo = Photocathode(pulse_energy_J=5.8e-6, wavelength_nm=266.0, qe=1e-4, work_function_eV=4.6,
                          qe_field_V_per_m=120e6)
     machine, peak, omega = example["build_machine"](args, 0.1, photo, 0.5)
@@ -117,7 +118,127 @@ def test_capture_fills_in_the_laser_energy_and_optionally_the_solenoid(example):
 def test_default_gun_settings_are_the_best_fit_and_a_given_qe_excludes_a_given_energy(example, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["schottky_scan.py"])
     args = example["parse_args"]()
-    assert (args.gun_field_MV, args.solenoid_T, args.qe, args.laser_energy_uJ) == (105.0, 0.310, None, None)
+    assert (args.gun_field_MV, args.solenoid_T, args.qe, args.laser_energy_uJ) == (109.0, 0.3053, None, None)
+    assert (args.flatness, args.solenoid_offset_mm, args.solenoid_tilt_mrad) == (0.942, 0.87, -0.77)  # fit_structure's best
+    assert args.steering is True and args.reference_offset_deg == -4.0
+    monkeypatch.setattr(sys, "argv", ["schottky_scan.py", "--flatness", "1.0", "--solenoid-offset-mm", "0",
+                                      "--solenoid-tilt-mrad", "0.5", "--no-steering", "--reference-offset-deg", "0"])
+    args = example["parse_args"]()
+    assert (args.flatness, args.solenoid_offset_mm, args.solenoid_tilt_mrad) == (1.0, 0.0, 0.5)
+    assert args.steering is False and args.reference_offset_deg == 0.0
     monkeypatch.setattr(sys, "argv", ["schottky_scan.py", "--qe", "1e-3", "--laser-energy-uJ", "0.5"])
     with pytest.raises(SystemExit):
         example["parse_args"]()
+
+
+class _GunStub:
+    """A machine whose gun passes the electrons emitted before 30 deg of gun phase offset and stops the rest."""
+
+    def __init__(self):
+        self.cavities = [SimpleNamespace(frequency_hz=2.9985e9, phase_deg=7.0)]
+        self.photocathode, self.space_charge, self.generator_overrides = "photo", "sc", {"sig_x": 0.4}
+        self.seen = None
+
+    def initial_beam(self, n, device, dtype):
+        lt_s = self.generator_overrides["lt"] * 1e-9
+        t = (torch.arange(n, dtype=torch.float64) + 0.5) / n * lt_s - 0.5 * lt_s  # uniform over the window, centred
+        return {"emission_time_s": t, "q": torch.full((n,), 1e-15, dtype=torch.float64)}
+
+    def track(self, n_particles, **kwargs):
+        beam = self.initial_beam(n_particles, "cpu", torch.float64)
+        self.seen = (self.photocathode, self.space_charge, dict(self.generator_overrides), self.cavities[0].phase_deg)
+        offset = self.cavities[0].phase_deg + 360.0 * self.cavities[0].frequency_hz * beam["emission_time_s"]
+        return {"screen": {"q": -beam["q"] * (offset < 30.0)}}
+
+
+def test_transmission_function_bins_the_tracers_by_emission_phase_and_leaves_the_machine_as_it_was(example):
+    machine = _GunStub()
+    args = SimpleNamespace(particles=20000, device="cpu", dtype="float64", compile=False, warp=False, monitor_z=1.1)
+    centres, transmission = example["transmission_function"](machine, args, window=(-60.0, 85.0), bin_deg=0.5)
+    assert centres[0] == pytest.approx(-59.75) and centres[-1] == pytest.approx(84.75) and len(centres) == 290
+    assert transmission[centres < 29.5].min() == pytest.approx(1.0) and transmission[centres > 30.5].max() == 0.0
+    assert 0.0 < transmission[np.abs(centres - 30.0) < 0.3].mean() < 1.0  # only the bin holding the edge is partial
+    photocathode, space_charge, overrides, phase = machine.seen  # what the run itself used: tracers without space charge
+    assert photocathode is None and space_charge.enabled is False and phase == pytest.approx(12.5)
+    assert overrides["lt"] == pytest.approx(145.0 / (360.0 * 2.9985e9) * 1e9) and overrides["sig_x"] == 0.4
+    assert (machine.photocathode, machine.space_charge, machine.generator_overrides) == ("photo", "sc", {"sig_x": 0.4})
+    assert machine.cavities[0].phase_deg == 7.0
+
+
+def test_scan_from_transmission_averages_over_the_laser_pulse(example):
+    centres = 0.125 + 0.25 * np.arange(400)  # 0 to 100 deg in 0.25 deg bins
+    transmission = np.where(centres < 50.0, 1.0, 0.5)
+    deltas, emitted = np.array([10.0, 50.0, 90.0, 150.0]), np.array([100.0, 100.0, 80.0, 100.0])
+    scan = example["scan_from_transmission"](centres, transmission, deltas, emitted, pulse_deg=2.0)
+    # a 2 deg pulse centred on the step sees four bins of each: 0.75; outside the phases covered there is nothing
+    assert scan[:3] == pytest.approx([100.0, 75.0, 40.0]) and np.isnan(scan[3])
+    narrow = example["scan_from_transmission"](centres, transmission, [10.0], [100.0], pulse_deg=0.0)
+    assert narrow == pytest.approx([100.0])  # never narrower than a bin
+
+
+def test_transmission_function_of_the_gun_is_zero_before_extraction_and_one_until_fall_back(example):
+    pytest.importorskip("laura.laura")
+    if example["CLARA"] is None:
+        pytest.skip("laura_lattices.CLARA not installed")
+    args = SimpleNamespace(generator=str(EXAMPLE.with_name("generator.in")), gun_field_MV=105.0, solenoid_T=0.310,
+                           particles=200, device="cpu", dtype="float64", compile=False, warp=False, dt_ceiling_ps=2.0,
+                           monitor_z=0.03, flatness=None, solenoid_offset_mm=0.0, solenoid_tilt_mrad=0.0, steering=False, reference_offset_deg=-4.0)
+    machine, _, _ = example["build_machine"](args, 0.03, None, 0.5)
+    centres, transmission = example["transmission_function"](machine, args, window=(-70.0, 90.0), bin_deg=20.0)
+    assert list(centres) == [-60.0, -40.0, -20.0, 0.0, 20.0, 40.0, 60.0, 80.0]
+    # the cathode field is zero at -53 deg: nothing before it leaves (the first bin straddles it), everything does up to
+    # the late phases, where the field has reversed before the electron leaves the half cell and it falls back
+    assert transmission[0] < 0.6 and transmission[1:7].min() > 0.95 and transmission[7] < 0.1
+
+
+def _build_args(tmp_path, **kw):
+    args = dict(generator=str(EXAMPLE.with_name("generator.in")), gun_field_MV=105.0, solenoid_T=0.310, particles=200,
+                device="cpu", dtype="float64", compile=False, warp=False, dt_ceiling_ps=2.0, monitor_z=1.1,
+                flatness=None, solenoid_offset_mm=0.0, solenoid_tilt_mrad=0.0, steering=True, reference_offset_deg=-4.0,
+                output_dir=str(tmp_path))  # fmt: skip
+    return SimpleNamespace(**{**args, **kw})
+
+
+def test_build_machine_applies_the_flatness_and_the_solenoid_placement_and_steers_only_a_misaligned_one(
+    example, tmp_path, monkeypatch
+):
+    pytest.importorskip("laura.laura")
+    if example["CLARA"] is None:
+        pytest.skip("laura_lattices.CLARA not installed")
+    steered = []
+    monkeypatch.setitem(example["build_machine"].__globals__, "steer_correctors", lambda m, a: steered.append(m))
+    build = example["build_machine"]
+    machine, peak, _ = build(_build_args(tmp_path), 1.1, None, 0.5)  # aligned, the design map
+    assert peak == pytest.approx(105e6, rel=1e-6) and not machine.solenoids[0].placed and not steered
+    machine, peak, _ = build(_build_args(tmp_path, flatness=0.90, solenoid_offset_mm=0.6, solenoid_tilt_mrad=-1.2), 1.1, None, 0.5)
+    assert peak == pytest.approx(105e6, rel=1e-6)  # the cathode field is the one asked for, whatever the flatness
+    assert Path(machine.cavities[0].file).parent == tmp_path / "flat_maps" and Path(machine.cavities[0].file).is_file()
+    assert (machine.solenoids[0].x_m, machine.solenoids[0].yrot_rad) == (0.6e-3, -1.2e-3) and steered == [machine]
+    machine, peak, _ = build(_build_args(tmp_path, flatness=1.2), 1.1, None, 0.5)  # the full cell is the largest field
+    assert peak == pytest.approx(105e6, rel=1e-6) and machine.cavities[0].e_max_V_per_m < 0.0
+    steered.clear()
+    build(_build_args(tmp_path, solenoid_offset_mm=0.6, steering=False), 1.1, None, 0.5)  # --no-steering
+    build(_build_args(tmp_path, solenoid_offset_mm=0.6), 0.5, None, 0.5)  # a machine that ends before the screen
+    assert not steered
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
+def test_steering_centres_the_beam_on_the_bpm_and_screen_at_the_reference_phase_only(example, tmp_path):
+    pytest.importorskip("laura.laura")
+    if example["CLARA"] is None:
+        pytest.skip("laura_lattices.CLARA not installed")
+    args = _build_args(tmp_path, particles=4000, device="cuda", dtype="float32", compile=True, solenoid_offset_mm=0.8,
+                       solenoid_tilt_mrad=-0.7)  # fmt: skip
+    machine, _, _ = example["build_machine"](args, 1.1, None, 0.4)
+    assert len(machine.correctors) == 2 and any(abs(c.bx_T) + abs(c.by_T) > 1e-6 for c in machine.correctors)
+
+    def centroid(offset, z):
+        machine.cavities[0].phase_deg = offset
+        out = machine.track(n_particles=4000, device="cuda", dtype=torch.float32, verbose=False, record_every=0,
+                            screen_z_m=z, z_stop_m=z + 0.005, use_compile=True, use_warp=False)["screen"]  # fmt: skip
+        q = out["q"].abs().double()
+        return [float((out[k].double() * q).sum() / q.sum()) for k in ("x", "y")]
+
+    for z in example["OBSERVATION_Z"]:
+        assert max(abs(v) for v in centroid(-4.0, z)) < 2e-4  # centred where the correctors were set
+        assert max(abs(v) for v in centroid(58.0, z)) > 3e-3  # and several mm off for the slow late-phase electrons

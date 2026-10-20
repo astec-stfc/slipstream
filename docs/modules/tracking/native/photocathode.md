@@ -161,6 +161,12 @@ gaussian of `generator.in` (`sig` and the n-sigma cut `C_sig` per axis) cut on a
 `Cut_shape = 'ellipse'`, see [`generator`](generator.md)), which is the transverse laser profile the example uses. The
 example takes the laser energy from the energy-meter readback stored with that image, so the fit gives the quantum
 efficiency (`--qe` fixes it instead and the fit gives the energy).
+`schottky_scan.py --only transmission` tracks tracer electrons emitted uniformly in RF phase, without space charge, and
+gives the fraction that reaches the monitor against emission phase (`transmission_function`); the scan's aperture-limited
+end is that transmission times the emitted charge, for a bunch of vanishing charge (the 100 pC bunch is transmitted much
+less). `fit_structure.py` fits the gun field, solenoid field, RF flatness and solenoid misalignment to that end of the scan,
+and its best point is the example's default machine: the solenoid offset and tilt are steered by two S01 `Corrector`s
+set at a reference phase (`--solenoid-offset-mm`, `--solenoid-tilt-mrad`, `--flatness`, `--no-steering`).
 
 ## Numerical and implementation notes
 

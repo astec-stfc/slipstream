@@ -406,6 +406,8 @@ class SpaceChargeSettings:
     ...
 class Quadrupole:
     ...
+class Corrector:
+    ...
 class Aperture:
     ...
 class Injector:
@@ -624,10 +626,18 @@ are left to `magnet_elements`. Needs `crest_deg` set -- see
 `"cavities[i].e_max_V_per_m"`, `"solenoids[i].b_max_T"`, `i` the list index) onto the
 built fields as tensors, so gradients reach them; the crest stays the nominal one.
 
+### `Corrector`
+
+A steering magnet: the uniform transverse field `bx_T`, `by_T` over `length_m` centred on `z_m` (`Injector.correctors`). It
+kicks a particle of charge `q` by `dp_x = -q B_y L` and `dp_y = +q B_x L` whatever its energy, so settings that centre a
+beam at one gun phase leave the slower electrons of another phase off axis. The strengths are tensors in the compiled
+step: changing them does not recompile. The CLARA example sets the two S01 correctors to centre the beam on the BPM and
+the screen at a reference phase (`examples/photocathode/schottky_scan.py`).
+
 ### `Injector.magnet_elements`
 
 The lab-frame magnets `magnets.magnet_fields` evaluates: dipoles, quadrupoles that are
-placed, profile-table or carry multipoles, and placed solenoids -- plus `placed_sol`, the
+placed, profile-table or carry multipoles, placed solenoids and the steering `Injector.correctors` -- plus `placed_sol`, the
 `(place, table)` pairs of the solenoids among them (for the canonical-emittance `Bz`).
 
 `frame_all` (default: whether the machine has any dipole) also routes the *unplaced* solenoids

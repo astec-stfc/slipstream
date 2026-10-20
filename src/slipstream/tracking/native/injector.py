@@ -32,8 +32,8 @@ from .generator import generate, read_generator_input
 from .fields import RFCavityField, SolenoidField, TravelingWaveField, read_astra_field_file
 from .gun import kahan_add, relativistic_space_charge_field
 from .magnets import (
-    Dipole, beam_angle, dipole_element, hard_quad_element, lateral_ok, lerp_tables, magnet_fields, placement,
-    placement3, profile_quad_element, rotate_to_beam, solenoid_element, to_local, to_local3,
+    Dipole, beam_angle, corrector_element, dipole_element, hard_quad_element, lateral_ok, lerp_tables, magnet_fields, placement,
+    place_as_tensors, placement3, profile_quad_element, rotate_to_beam, solenoid_element, to_local, to_local3,
 )
 from .photocathode import PhotoEmitter, Photocathode
 from .space_charge import SC3D_MAX_GRID_CELLS, CylindricalSpaceCharge, SpaceCharge3D, smooth_rho
@@ -163,6 +163,16 @@ class Quadrupole:
 
 
 @dataclass
+class Corrector:
+    """A steering magnet: the uniform transverse field ``bx_T``, ``by_T`` over ``length_m`` centred on ``z_m``. It deflects
+    an electron by ``q B L / p`` whatever its energy, so settings that centre a beam at one gun phase do not at another."""
+    z_m: float
+    length_m: float
+    bx_T: float = 0.0
+    by_T: float = 0.0
+
+
+@dataclass
 class Aperture:
     """Describe Aperture; see the module documentation for details."""
     kind: str
@@ -199,6 +209,7 @@ class Injector:
     # ``{"sig_x": 0.3, "sig_y": 0.3, "q_total": 0.05}``) replacing the file's own values -- for scans
     phasing_key: str | None = None  # see auto_phase
     photocathode: Photocathode | None = None  # laser-driven emission (``track`` only); None: charges from the beam
+    correctors: list[Corrector] = field(default_factory=list)  # steering magnets (lab-frame uniform fields)
     base_dir: Path = field(default=Path("."), repr=False, compare=False)
 
     @property
@@ -422,6 +433,7 @@ class Injector:
         data["quadrupoles"] = [Quadrupole(**q) for q in data.get("quadrupoles", [])]
         data["apertures"] = [Aperture(**a) for a in data.get("apertures", [])]
         data["dipoles"] = [Dipole(**d) for d in data.get("dipoles", [])]
+        data["correctors"] = [Corrector(**c) for c in data.get("correctors", [])]
         data["space_charge"] = SpaceChargeSettings(**data.get("space_charge", {}))
         if data.get("photocathode"):
             data["photocathode"] = Photocathode(**data["photocathode"])
@@ -488,7 +500,8 @@ class Injector:
             f = self._solenoid_field(s, device, dtype)
             z0 = f.map.z0 + f.z_offset
             zend = z0 + f.map.dz * (f.map.n - 1)
-            place = placement3(s.x_m, s.y_m, 0.5 * (z0 + zend), s.xrot_rad, s.yrot_rad, force=frame_all)
+            place = place_as_tensors(
+                placement3(s.x_m, s.y_m, 0.5 * (z0 + zend), s.xrot_rad, s.yrot_rad, force=frame_all), device, dtype)
             el = solenoid_element(f.map.f * f.scale, f.map.df * f.scale, f.map.d2f * f.scale,
                                   z0, f.map.dz, f.map.n, zend, place)
             elements.append(el)
@@ -501,14 +514,19 @@ class Injector:
                 continue  # _fused_step's own hard-edge tables
             if q.profile is None:
                 zc = q.z_m
-                place = placement(q.x_m, zc, q.xrot_rad, force=frame_all)
+                place = place_as_tensors(placement(q.x_m, zc, q.xrot_rad, force=frame_all), device, dtype)
                 elements.append(hard_quad_element(q.grad_T_per_m, zc - q.length_m / 2.0, zc + q.length_m / 2.0, place))
             else:
                 z_file, prof = read_astra_field_file(self.resolve(q.profile))
                 z_abs = q.z_m + z_file
-                place = placement(q.x_m, 0.5 * (z_abs[0] + z_abs[-1]), q.xrot_rad, force=frame_all)
+                place = place_as_tensors(
+                    placement(q.x_m, 0.5 * (z_abs[0] + z_abs[-1]), q.xrot_rad, force=frame_all), device, dtype)
                 elements.append(profile_quad_element(z_abs, prof, q.grad_T_per_m, q.noscale, dict(q.multipoles),
                                                      place, device, dtype))
+        for c in self.correctors:
+            elements.append(corrector_element(
+                torch.as_tensor(c.bx_T, device=device, dtype=dtype), torch.as_tensor(c.by_T, device=device, dtype=dtype),
+                c.z_m - 0.5 * c.length_m, c.z_m + 0.5 * c.length_m))
         return tuple(elements), tuple(placed_sol)
 
     def _reference_particle(self) -> tuple[float, float, float]:
@@ -677,6 +695,8 @@ class Injector:
         alive = torch.ones(n, device=device, dtype=torch.bool)  # not yet lost on an aperture
         track_alive = bool(apertures) or emitter is not None  # losses are possible: mask the live particles
         screen_state = _empty_screen_state(x) if screen_z_m is not None else None
+        # the plane is a tensor input of the compiled recorder: as a float every new plane would recompile it
+        screen_plane = torch.as_tensor(screen_z_m, device=x.device, dtype=x.dtype) if screen_z_m is not None else None
         screen_fn = (_record_screen_crossing if not (use_compile and device == "cuda" and screen_z_m is not None)
                      else torch.compile(_record_screen_crossing, dynamic=False))
         sc_cache: dict = {}
@@ -833,7 +853,7 @@ class Injector:
             if check_screen and screen_state is not None:
                 screen_state = screen_fn(
                     screen_state, screen_prev, (x, y, z, ux, uy, uz), active, alive_prev,
-                    apertures, screen_z_m, t_ten, dt_ten)
+                    apertures, screen_plane, t_ten, dt_ten)
             if check_wall and emitter is not None:
                 fell_back = active & alive & (z < z_wall)  # absorbed by the cathode
                 alive, returned = alive & ~fell_back, returned | fell_back
@@ -1046,6 +1066,7 @@ class Injector:
         ap_fn = torch.compile(_apply_apertures, dynamic=False) if use_compile else _apply_apertures
         screen_fn = (torch.compile(_record_screen_crossing, dynamic=False)
                      if use_compile and screen_z_m is not None else _record_screen_crossing)
+        screen_plane = torch.as_tensor(screen_z_m, device=x.device, dtype=x.dtype) if screen_z_m is not None else None
 
         if sc_on:
             nz = sc.nz + 1 - sc.nz % 2 if sc_image_steps else sc.nz  # image: the cathode on the centre node (odd nz)
@@ -1107,7 +1128,7 @@ class Injector:
                 if screen_state is not None:
                     screen_state = screen_fn(
                         screen_state, screen_prev, (x, y, z, ux, uy, uz), active, alive,
-                        apertures, screen_z_m, t_ten, dt_ten)
+                        apertures, screen_plane, t_ten, dt_ten)
                 if apertures:
                     with torch.no_grad():
                         alive = ap_fn(x, y, z, alive, apertures, prev=prev)
@@ -1193,7 +1214,7 @@ def _record_screen_crossing(state, prev, current, active, alive, apertures, z_pl
         if apertures:
             # Check only the segment up to the plane: later losses do not erase a screen observation.
             hit = hit & _apply_apertures(*at_plane[:3], alive, apertures, prev=prev[:3])
-    values = (*at_plane[:2], torch.full_like(prev[2], z_plane), *at_plane[3:], t + fraction.double() * dt)
+    values = (*at_plane[:2], torch.zeros_like(prev[2]) + z_plane, *at_plane[3:], t + fraction.double() * dt)
     return (*(torch.where(hit, new, old) for old, new in zip(state[:-1], values)), state[-1] | hit)
 
 

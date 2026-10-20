@@ -41,6 +41,17 @@ def placement3(x_m: float, y_m: float, z_m: float, xrot_rad: float, yrot_rad: fl
     return (x_m, y_m, z_m, (cb, 0.0, sb, -sa * sb, ca, sa * cb, -ca * sb, -sa, ca * cb))
 
 
+def place_as_tensors(place, device, dtype):
+    """``placement``/``placement3`` with every number a 0-d tensor (``None`` stays ``None``). A Python float handed to a
+    compiled step is a compile-time constant, so every new offset or tilt of a scan or fit would recompile it; a tensor
+    is an input of the compiled graph and any value reuses it."""
+    if place is None:
+        return None
+    if isinstance(place, tuple):
+        return tuple(place_as_tensors(v, device, dtype) for v in place)
+    return torch.as_tensor(place, device=device, dtype=dtype)
+
+
 def to_local3(x, y, z, place):
     """``to_local`` for a ``placement3`` frame: lab ``(x, y, z)`` -> ``(x_l, y_l, z_equivalent)``."""
     x_m, y_m, z_m, (r00, r01, r02, r10, r11, r12, r20, r21, r22) = place
@@ -200,6 +211,18 @@ def _quad_table_field(x, y, z, place, payload):
     return bx, by, bz
 
 
+def corrector_element(bx_T, by_T, z0, zend) -> tuple:
+    """A steering magnet: a uniform transverse field ``(bx_T, by_T)`` over ``z0 <= z <= zend``, in the lab frame. The
+    field strengths are 0-d tensors (inputs of the compiled step: changing them does not recompile)."""
+    return ("corrector", None, (bx_T, by_T, z0, zend))
+
+
+def _corrector_field(x, z, payload):
+    bx, by, z0, zend = payload
+    inside = ((z >= z0) & (z <= zend)).to(x.dtype)
+    return bx * inside, by * inside, torch.zeros_like(x)
+
+
 def _hard_quad_field(x, y, z, place, payload):
     g, z0, zend = payload
     xl, zl = to_local(x, z, place)
@@ -223,6 +246,8 @@ def magnet_fields(x, y, z, elements):
             fx, fy, fz = _quad_table_field(x, y, z, place, payload)
         elif kind == "quad_hard":
             fx, fy, fz = _hard_quad_field(x, y, z, place, payload)
+        elif kind == "corrector":
+            fx, fy, fz = _corrector_field(x, z, payload)
         else:  # pragma: no cover - programmer error
             raise ValueError(f"unknown magnet kind {kind!r}")
         bx, by, bz = bx + fx, by + fy, bz + fz

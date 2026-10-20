@@ -9,12 +9,21 @@ Needs the optional LAURA packages (``laura``, ``laura_lattices``) for the CLARA 
    emission, electrons falling back onto the cathode and aperture losses.
 2. Saturation: extracted charge against laser energy for several rms spot sizes at the gun phase of maximum field. The
    spots are round gaussians cut at 3 sigma on a circle whatever ``generator.in`` holds; its pulse shape is kept.
+3. Transmission (``--only transmission``): the fraction of electrons emitted at each gun phase that reach the monitor,
+   from one run of tracers emitted uniformly in RF phase without space charge. It is the scan's structure at the
+   aperture-limited end for a bunch of vanishing charge; ``fit_structure.py`` fits the gun to that end of the scan.
 
 The laser profile comes from ``generator.in``: the transverse gaussian cut on an ellipse is fitted to a virtual-cathode
 image by ``fit_laser_image.py``, the pulse length and emission energy are assumed, not measured. The laser energy is the
 energy-meter readback stored with that image (``--laser-energy-uJ`` replaces it, ``--qe`` fixes the quantum efficiency
-instead and fits the energy), so the fit gives the quantum efficiency. The gun field and solenoid default to the current
-best fit. Pass your own with ``--generator``. Install ``slipstream-accel[plot]`` for figures or use ``--no-plots``.
+instead and fits the energy), so the fit gives the quantum efficiency.
+
+The gun defaults to the best point of ``fit_structure.py``: the cathode field, the solenoid field, the flatness of the
+RF field and the offset and tilt of the gun solenoid (``--gun-field-MV``, ``--solenoid-T``, ``--flatness``,
+``--solenoid-offset-mm``, ``--solenoid-tilt-mrad``). A misaligned solenoid is steered as the operators steer it: the two
+S01 correctors are set to centre the beam on the BPM and the screen at ``--reference-offset-deg`` and then stay
+fixed (``--no-steering`` leaves the misalignment uncorrected). Pass your own laser profile with ``--generator``. Install
+``slipstream-accel[plot]`` for figures or use ``--no-plots``.
 """
 
 import argparse
@@ -22,6 +31,8 @@ import csv
 import dataclasses
 import json
 import math
+import os
+import tempfile
 import time
 import warnings
 from pathlib import Path
@@ -32,7 +43,8 @@ import torch
 from scipy.optimize import least_squares
 
 from slipstream.constants import E_CHARGE_C, EPS0_F_PER_M
-from slipstream.tracking.native.injector import SpaceChargeSettings
+from slipstream.tracking.native.generator import read_generator_input
+from slipstream.tracking.native.injector import Corrector, SpaceChargeSettings
 from slipstream.tracking.native.laura_injector import from_laura
 from slipstream.tracking.native.photocathode import Photocathode
 
@@ -45,9 +57,19 @@ HERE = Path(__file__).resolve().parent
 DATA = HERE / "104459_Schottky_approx_crestingData.h5"
 IMAGE = HERE / "CLA-VCA-DIA-CAM-01_2022-04-29_10-14-01UTC_1_images.hdf5"
 SECTIONS = ("HRG1", "S01", "L01")
-GUN_FIELD_MV = 105.0  # peak gun field of the current best fit (LAURA's design value: 120)
-SOLENOID_T = 0.310  # gun solenoid peak field of the current best fit (LAURA's: 0.345)
-SOLENOID_T_PER_A = 0.0022  # experimental calibration of the gun solenoid in 2022 (it changed later)
+GUN_FIELD_MV = (
+    109.0  # peak gun field of the current best fit (LAURA's design value: 120)
+)
+SOLENOID_T = 0.3053  # gun solenoid peak field of the current best fit (LAURA's: 0.345)
+FLATNESS = 0.942  # full cell's peak field over the cathode's, current best fit (LAURA's map: 0.941)
+SOLENOID_OFFSET_MM = 0.87  # gun solenoid axis offset along x of the current best fit
+SOLENOID_TILT_MRAD = -0.77  # gun solenoid axis tilt in the x-z plane of the current best fit
+REFERENCE_OFFSET_DEG = -4.0  # gun phase offset from the crest at which the correctors centre the beam
+CORRECTORS = ((0.335, 0.03), (0.8136, 0.075))  # centre and length [m] of CLA-S01-MAG-HVCOR-01 and -02
+OBSERVATION_Z = (0.894, 0.9803)  # the BPM and the screen the operators centre the beam on
+SOLENOID_T_PER_A = (
+    0.0022  # experimental calibration of the gun solenoid in 2022 (it changed later)
+)
 QE_START = 1e-4  # quantum efficiency while fitting: only its product with the laser energy is fixed
 FIELD_FLANK = (
     -170.0,
@@ -58,6 +80,10 @@ APERTURE_FLANK = (
     72.0,
 )  # gun phase offsets [deg] where the L01 aperture and the cut-off shape the scan
 SPOT_CUT = 3.0  # the saturation scan's round gaussian spots are cut at this many sigma
+TRANSMISSION_WINDOW = (
+    -60.0,
+    85.0,
+)  # gun phase offsets [deg] emitted by the uniform-phase run
 
 
 def parse_args():
@@ -66,7 +92,9 @@ def parse_args():
         formatter_class=argparse.RawTextHelpFormatter,
     )
     p.add_argument(
-        "--only", choices=["schottky", "saturation", "both"], default="schottky"
+        "--only",
+        choices=["schottky", "saturation", "both", "transmission"],
+        default="schottky",
     )
     p.add_argument(
         "--output-dir", default=str(HERE.parents[1] / ".cache" / "photocathode")
@@ -133,6 +161,38 @@ def parse_args():
         help="gun solenoid peak field [T] (default: the current best fit; LAURA's is 0.345)",
     )
     p.add_argument(
+        "--flatness",
+        type=float,
+        default=FLATNESS,
+        help="flatness of the gun's RF field, the full cell's peak over the cathode's "
+        "(default: the current best fit; LAURA's map has 0.941)",
+    )
+    p.add_argument(
+        "--solenoid-offset-mm",
+        type=float,
+        default=SOLENOID_OFFSET_MM,
+        help="offset of the gun solenoid's axis along x [mm] (default: the current best fit)",
+    )
+    p.add_argument(
+        "--solenoid-tilt-mrad",
+        type=float,
+        default=SOLENOID_TILT_MRAD,
+        help="tilt of the gun solenoid's axis in the x-z plane [mrad] (default: the current best fit)",
+    )
+    p.add_argument(
+        "--steering",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="with a misaligned solenoid, centre the beam on the S01 BPM and screen at --reference-offset-deg "
+        "with the two S01 correctors and keep them fixed (default); --no-steering leaves it uncorrected",
+    )
+    p.add_argument(
+        "--reference-offset-deg",
+        type=float,
+        default=REFERENCE_OFFSET_DEG,
+        help="gun phase offset from the crest at which the correctors centre the beam",
+    )
+    p.add_argument(
         "--solenoid-T-per-A",
         type=float,
         default=None,
@@ -147,6 +207,12 @@ def parse_args():
     )
     p.add_argument(
         "--quick", action="store_true", help="fewer particles and phase points"
+    )
+    p.add_argument(
+        "--transmission-bin-deg",
+        type=float,
+        default=0.25,
+        help="phase bin of the uniform-phase transmission function [deg]",
     )
     p.add_argument("--no-plots", action="store_true")
     p.add_argument(
@@ -170,8 +236,91 @@ def parse_args():
     return p.parse_args()
 
 
+def flat_map(machine, ratio, directory):
+    """The gun's Ez map with the full cell scaled so that its peak is ``ratio`` of the cathode field, cached on disk.
+    Returns its path and the factor that ``MaxE`` needs for the cathode field to be the one asked for: the map is
+    normalised to its largest value, which is the full cell's (and negative) when ``ratio`` > 1."""
+    if abs(ratio - 1.0) < 2e-3:  # a tie between the cells would let the loader pick either as the largest
+        ratio = 1.0 + (2e-3 if ratio >= 1.0 else -2e-3)
+    source = Path(machine.cavities[0].file)
+    path = Path(directory) / f"{source.stem}_flat{ratio:.4f}.hdf5"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(source, "r") as f:
+            z, ez = f["z"][:], f["Ez"][:]
+            attrs = {k: dict(f[k].attrs) for k in f}
+            root = dict(f.attrs)
+        zero = z[np.argmax(np.sign(ez) != np.sign(ez[0]))]  # the half cell ends at the first zero crossing
+        full = np.abs(ez[z > zero]).max() / abs(ez[0])
+        partial = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
+        with h5py.File(partial, "w") as f:
+            f.attrs.update(root)
+            f["z"] = z
+            f["Ez"] = np.where(z > zero, ez * ratio / full, ez)
+            for k, a in attrs.items():
+                f[k].attrs.update(a)
+        os.replace(partial, path)  # parallel runs share the cache
+    with h5py.File(path, "r") as f:
+        ez = f["Ez"][:]
+    return str(path).replace("\\", "/"), float(ez[np.argmax(np.abs(ez))] / ez[0])
+
+
+def steer_correctors(machine, args):
+    """Add the two S01 correctors, set as the operators set them: so that the beam is centred on the BPM and the screen at
+    the gun phase ``--reference-offset-deg``. Their fields then stay fixed at every other phase, where the slower beam
+    is kicked harder by the misaligned solenoid and the correctors no longer cancel it.
+
+    A corrector is a thin momentum kick, ``dp = q B L``, so the centroid at a plane is linear in the kicks and a
+    least-squares solve (repeated to remove what the finite length leaves) gives the fields."""
+    cavity = machine.cavities[0]
+    phase, machine.correctors = cavity.phase_deg, []
+    cavity.phase_deg = args.reference_offset_deg
+    kick = np.zeros((2, len(CORRECTORS)))  # du = dp / m [m/s] per plane (x, y) and corrector
+    residual = 0.0
+    try:
+        for _ in range(3):
+            mean, weight = [], []
+            for z in OBSERVATION_Z:
+                out = machine.track(
+                    n_particles=min(args.particles, 8000),
+                    device=args.device,
+                    dtype=getattr(torch, args.dtype),
+                    verbose=False,
+                    record_every=0,
+                    screen_z_m=z,
+                    z_stop_m=z + 0.005,
+                    use_compile=args.compile,
+                    use_warp=args.warp,
+                )
+                screen = out["screen"]
+                q = screen["q"].abs().double().cpu().numpy()
+                u = np.sqrt(sum(screen[k].double().cpu().numpy() ** 2 for k in ("ux", "uy", "uz")))
+                mean.append([float((screen[k].double().cpu().numpy() * q).sum() / q.sum()) for k in ("x", "y")])
+                weight.append(float((q / u).sum() / q.sum()))
+            residual = float(np.abs(mean).max())
+            matrix = np.array([[(z - zc) * w for zc, _ in CORRECTORS] for z, w in zip(OBSERVATION_Z, weight)])
+            for plane in range(2):
+                kick[plane] += np.linalg.solve(matrix, -np.array([m[plane] for m in mean]))
+            machine.correctors = [
+                Corrector(  # dp_x = -q B_y L and dp_y = +q B_x L for a charge q moving along z
+                    zc, length, bx_T=machine.mass_kg * kick[1, j] / (machine.q_C * length),
+                    by_T=-machine.mass_kg * kick[0, j] / (machine.q_C * length),
+                )
+                for j, (zc, length) in enumerate(CORRECTORS)
+            ]  # fmt: skip
+    finally:
+        cavity.phase_deg = phase
+    print(
+        "steering: S01 correctors "
+        + ", ".join(f"{c.bx_T * 1e3:+.3f}/{c.by_T * 1e3:+.3f} mT (Bx/By)" for c in machine.correctors)
+        + f"; the beam was {residual * 1e3:.2f} mm off centre at the BPM and screen before the last step",
+        flush=True,
+    )
+
+
 def build_machine(args, monitor_z, photo, dt_ps):
-    """Gun, S01 and the L01 entrance aperture; the L01 cavity and solenoids lie beyond the monitor and are dropped."""
+    """Gun, S01 and the L01 entrance aperture; the L01 cavity and solenoids lie beyond the monitor and are dropped.
+    The gun's flatness, the solenoid's offset and tilt and the S01 steering follow ``args``."""
     machine = from_laura(
         CLARA,
         SECTIONS,
@@ -181,8 +330,13 @@ def build_machine(args, monitor_z, photo, dt_ps):
     )
     machine.cavities = [c for c in machine.cavities if c.z_m < monitor_z]
     machine.solenoids = [s for s in machine.solenoids if s.z_m < monitor_z]
+    cavity = machine.cavities[0]
     if args.gun_field_MV is not None:
-        machine.cavities[0].e_max_V_per_m = args.gun_field_MV * 1e6
+        cavity.e_max_V_per_m = args.gun_field_MV * 1e6
+    if args.flatness is not None:
+        maps = Path(getattr(args, "output_dir", tempfile.gettempdir())) / "flat_maps"
+        cavity.file, factor = flat_map(machine, args.flatness, maps)
+        cavity.e_max_V_per_m *= factor
     if args.solenoid_T is not None:
         machine.solenoids[0].b_max_T = args.solenoid_T
     machine.space_charge = (
@@ -197,6 +351,11 @@ def build_machine(args, monitor_z, photo, dt_ps):
         verbose=False
     )  # the gun's max-energy-gain crest; scan phases are offsets from it
     machine.absolute_phases = True  # keep that crest while the offset changes
+    if args.solenoid_offset_mm or args.solenoid_tilt_mrad:  # placed after the phasing: the crest is the aligned gun's
+        machine.solenoids[0].x_m = args.solenoid_offset_mm * 1e-3
+        machine.solenoids[0].yrot_rad = args.solenoid_tilt_mrad * 1e-3
+        if args.steering and monitor_z > OBSERVATION_Z[-1]:  # a shorter machine ends before the correctors
+            steer_correctors(machine, args)
     field = machine.fields()[0][0]
     return (
         machine,
@@ -276,7 +435,8 @@ def track_charge(machine, delta_deg, args, monitor_z, z_stop_m=None):
 
 def capture_settings(path=IMAGE):
     """Machine settings stored as attributes of the laser camera frame: laser energy-meter readback [uJ], gun solenoid
-    current [A], gun phase [deg] and charge monitor [pC]. Empty if the frame is not there."""
+    current [A], gun phase [deg] and charge monitor [pC]. Empty if the frame is not there.
+    """
     if not Path(path).is_file():
         return {}
     with h5py.File(path, "r") as f:
@@ -302,7 +462,8 @@ def apply_capture(args, capture):
 
 def split_energy_and_qe(photo, args):
     """The fit fixes only the product of laser energy and QE. Take the energy from ``--laser-energy-uJ`` and give the rest
-    to the QE, or take ``--qe`` (``QE_START`` if neither is given) and give the rest to the energy."""
+    to the QE, or take ``--qe`` (``QE_START`` if neither is given) and give the rest to the energy.
+    """
     product = photo.pulse_energy_J * photo.qe
     if args.laser_energy_uJ is not None:
         energy = args.laser_energy_uJ * 1e-6
@@ -452,6 +613,158 @@ def saturation_scan(args, out_dir, fit):
     return rows, peak
 
 
+def transmission_function(machine, args, window=TRANSMISSION_WINDOW, bin_deg=0.25):
+    """Fraction of the electrons emitted at each gun phase that reach the monitor, from one run with tracer particles
+    emitted uniformly in RF phase over ``window`` (gun phase offsets from the crest, [deg]): the single-particle acceptance
+    of the gun, solenoid and apertures. There is no photocathode weighting and no space charge, so it is the transmission
+    of a bunch of vanishing charge; the tracked scan's 100 pC bunch is transmitted less (see the README).
+    Returns the bin centres [deg] and the transmission."""
+    lo, hi = window
+    cavity = machine.cavities[0]
+    deg_per_s = 360.0 * cavity.frequency_hz
+    saved = (
+        machine.photocathode,
+        machine.space_charge,
+        machine.generator_overrides,
+        cavity.phase_deg,
+    )
+    machine.photocathode = None  # unit-weight tracers: the emission physics is not part of the transmission
+    machine.space_charge = SpaceChargeSettings(
+        enabled=False, dt_adaptive=True, dt_safety=5e7, dt_ceiling_s=2e-12
+    )
+    machine.generator_overrides = {
+        **saved[2],
+        "lt": (hi - lo) / deg_per_s * 1e9,  # ns
+        "rt": 2e-4,
+        "q_total": 1e-3,
+    }
+    centre = 0.5 * (lo + hi)
+    cavity.phase_deg = centre
+    try:
+        out = machine.track(
+            n_particles=args.particles,
+            device=args.device,
+            dtype=getattr(torch, args.dtype),
+            verbose=False,
+            record_every=0,
+            screen_z_m=args.monitor_z,
+            z_stop_m=args.monitor_z + 0.02,
+            use_compile=args.compile,
+            use_warp=args.warp,
+        )
+        beam = machine.initial_beam(args.particles, "cpu", torch.float64)
+    finally:
+        (
+            machine.photocathode,
+            machine.space_charge,
+            machine.generator_overrides,
+            cavity.phase_deg,
+        ) = saved
+    offsets = (
+        centre + deg_per_s * beam["emission_time_s"].numpy()
+    )  # the RF phase of each electron's emission
+    arrived = out["screen"]["q"].abs().double().cpu().numpy() / beam["q"].abs().numpy()
+    edges = np.arange(lo, hi + 0.5 * bin_deg, bin_deg)
+    emitted, _ = np.histogram(offsets, edges)
+    reached, _ = np.histogram(offsets, edges, weights=arrived)
+    return 0.5 * (edges[1:] + edges[:-1]), reached / np.maximum(emitted, 1)
+
+
+def scan_from_transmission(centres, transmission, deltas, emitted_pC, pulse_deg=2.0):
+    """The scan without space charge: the emitted charge at each gun phase ``deltas`` times the transmission averaged over
+    the laser pulse (``pulse_deg`` wide, centred on it). NaN where the pulse lies outside ``centres``.
+    """
+    half = max(0.5 * pulse_deg, 0.5 * float(np.min(np.diff(centres))))
+    return np.array(
+        [
+            (
+                e * transmission[sel].mean()
+                if (sel := np.abs(centres - d) <= half).any()
+                else np.nan
+            )
+            for d, e in zip(deltas, emitted_pC)
+        ]
+    )
+
+
+def transmission_scan(args, out_dir):
+    """``transmission_function`` of the best-fit machine, written to ``transmission.csv``; if a tracked scan is there,
+    its monitor charge / emitted charge (space charge included) is the comparison."""
+    machine, _, _ = build_machine(args, args.monitor_z, None, args.dt_ps)
+    t0 = time.time()
+    centres, transmission = transmission_function(
+        machine, args, bin_deg=args.transmission_bin_deg
+    )
+    print(
+        f"transmission function of {args.particles} electrons emitted over "
+        f"{TRANSMISSION_WINDOW[0]:g} to {TRANSMISSION_WINDOW[1]:g} deg [{time.time() - t0:.0f} s]",
+        flush=True,
+    )
+    rows = [
+        dict(offset_from_crest_deg=c, transmission=t)
+        for c, t in zip(centres, transmission)
+    ]
+    write_csv(out_dir / "transmission.csv", rows)
+    tracked = None
+    if (out_dir / "schottky_scan.csv").is_file():
+        with open(out_dir / "schottky_scan.csv") as fh:
+            tracked = list(csv.DictReader(fh))
+        deltas = np.array([float(r["offset_from_crest_deg"]) for r in tracked])
+        emitted = np.array([float(r["emitted_pC"]) for r in tracked])
+        monitor = np.array([float(r["monitor_pC"]) for r in tracked])
+        pulse_deg = (
+            read_generator_input(args.generator)[0].lt
+            * 1e-9
+            * 360.0
+            * machine.cavities[0].frequency_hz
+        )
+        predicted = scan_from_transmission(
+            centres, transmission, deltas, emitted, pulse_deg
+        )
+        late = deltas >= APERTURE_FLANK[0]
+        diff = predicted - monitor
+        print(
+            f"without space charge the scan is {np.nanmean(diff[late]):+.1f} pC on average above the tracked one over the "
+            f"aperture-limited phases ({np.nanmax(np.abs(diff[late])):.0f} pC at most)",
+            flush=True,
+        )
+    if not args.no_plots:
+        plot_transmission(centres, transmission, tracked, out_dir)
+    return rows
+
+
+def plot_transmission(centres, transmission, tracked, out_dir):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(
+        centres,
+        transmission,
+        color="C0",
+        label="uniform-phase tracers, no space charge",
+    )
+    if tracked:
+        ax.plot(
+            [float(r["offset_from_crest_deg"]) for r in tracked],
+            [
+                float(r["monitor_pC"]) / max(float(r["emitted_pC"]), 1e-9)
+                for r in tracked
+            ],
+            "o-",
+            color="C3",
+            ms=4,
+            label="tracked scan: monitor / emitted charge (space charge)",
+        )
+    ax.set_xlabel("gun phase offset from the crest at emission [deg]")
+    ax.set_ylabel("transmission to the monitor")
+    ax.set_xlim(20.0, TRANSMISSION_WINDOW[1])
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_dir / "transmission.png", dpi=150)
+    plt.close(fig)
+
+
 def write_csv(path, rows):
     with open(path, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
@@ -585,6 +898,10 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     with h5py.File(DATA, "r") as f:
         x, y, s = f["xData"][:], f["yData"][:], f["yStd"][:]
+    if args.only == "transmission":
+        transmission_scan(args, out_dir)
+        print(f"outputs in {out_dir}")
+        return
     fit_file = out_dir / "schottky_fit.json"
     if args.only in ("schottky", "both"):
         rows, fit = schottky_scan(args, x, y, s, out_dir)

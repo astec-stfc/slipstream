@@ -154,6 +154,13 @@ the cathode wall are only checked on steps where a live particle can reach
 them (the live z-range at the last 10-step sync, widened by `c*dt` per step);
 this skips idle work without changing any result.
 
+Offsets and tilts of placed solenoids and quadrupoles (`magnets.place_as_tensors`) and the screen plane are 0-d tensors
+too, for the same reason: a scan or a fit over a solenoid offset or tilt reuses the compiled step. As floats each new
+value recompiled (10 to 25 s) and, after the recompile limit, ran eager. A 24-phase trial of the CLARA gun with a
+displaced and tilted solenoid takes 38 s (65 to 150 s before), and changing the solenoid or gun field, the flatness, the
+offset or the tilt compiles nothing new; only switching between a placed and an unplaced solenoid does, once.
+Placed *apertures* still take their offset and rotation as floats.
+
 For a scan that needs only the charge, `dt_adaptive=True` with a larger
 `dt_safety` (5e7 against the 5e5 default) and `dt_ceiling_s=2e-12` keeps the
 fine step while space charge is strong and cuts the step count about fourfold:
