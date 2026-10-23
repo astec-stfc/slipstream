@@ -6,6 +6,11 @@
 
 Tracks cathode emission and Cartesian proper velocities through standing/traveling-wave cavities, solenoids, magnets, apertures and cylindrical or 3D space charge with optional cathode images. Cavity auto-phasing finds maximum energy gain sequentially.
 
+Optional local binary Coulomb collisions are configured by
+`Injector.ibs = InjectorIBSSettings(...)`; see [injector IBS](injector_ibs.md)
+for the model, physical cutoffs, float64 requirement and validation limits.
+IBS defaults off and is explicitly unsupported in `track_differentiable`.
+
 ### Limits and conventions
 
 - YAML paths are relative to the machine file and physical fields/settings use SI.

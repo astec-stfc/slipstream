@@ -31,6 +31,7 @@ from .astra_io import (
 from .generator import generate, read_generator_input
 from .fields import RFCavityField, SolenoidField, TravelingWaveField, read_astra_field_file
 from .gun import kahan_add, relativistic_space_charge_field
+from .injector_ibs import BinaryCollisionIBS, InjectorIBSSettings
 from .magnets import (
     Dipole, beam_angle, corrector_element, dipole_element, hard_quad_element, lateral_ok, lerp_tables, magnet_fields, placement,
     place_as_tensors, placement3, profile_quad_element, rotate_to_beam, solenoid_element, to_local, to_local3,
@@ -211,6 +212,7 @@ class Injector:
     photocathode: Photocathode | None = None  # laser-driven emission (``track`` only); None: charges from the beam
     correctors: list[Corrector] = field(default_factory=list)  # steering magnets (lab-frame uniform fields)
     base_dir: Path = field(default=Path("."), repr=False, compare=False)
+    ibs: InjectorIBSSettings = field(default_factory=InjectorIBSSettings)
 
     @property
     def mass_kg(self) -> float:
@@ -437,6 +439,7 @@ class Injector:
         data["space_charge"] = SpaceChargeSettings(**data.get("space_charge", {}))
         if data.get("photocathode"):
             data["photocathode"] = Photocathode(**data["photocathode"])
+        data["ibs"] = InjectorIBSSettings(**data.get("ibs", {}))
         return cls(**data, base_dir=path.parent)
 
     # -- fields --------------------------------------------------------------
@@ -643,6 +646,9 @@ class Injector:
         ``torch.compile`` even where Warp is installed (faster where Python launch overhead dominates)."""
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+        self.ibs.__post_init__()
+        if self.ibs.enabled and dtype != torch.float64:
+            raise ValueError("Injector IBS requires float64 tracking to resolve thermal collision impulses")
         _check_screen_plane(screen_z_m)
         sc = dataclasses.replace(self.space_charge, mesh=mesh or self.space_charge.mesh)
         z_target = self.z_stop_m if z_stop_m is None else z_stop_m
@@ -655,6 +661,7 @@ class Injector:
         x, y, z, q, ux, uy, uz, emission_time_s = (
             beam[k] for k in ("x", "y", "z", "q", "ux", "uy", "uz", "emission_time_s"))
         n = x.shape[0]
+        collisions = BinaryCollisionIBS(self.ibs, q, self.mass_kg, self.q_C) if self.ibs.enabled else None
         cathode_z = self._reference_particle()[0]
         emitter = None
         if self.photocathode is not None:  # the beam's charges only weight the laser pulse; emission assigns them
@@ -850,6 +857,10 @@ class Injector:
                 Ex_sc, Ey_sc, Ez_sc, Bx_sc, By_sc, Bz_sc,
                 sw, tw, sol, quad, t_ten, dt_arg, qmdt2_arg, emitted_all, active, c2_inv, magnets,
             )
+            if collisions is not None:
+                momentum = collisions.apply(torch.stack((x, y, z), -1), torch.stack((ux, uy, uz), -1),
+                                             dt, active & alive)
+                ux, uy, uz = momentum.unbind(-1)
             if check_screen and screen_state is not None:
                 screen_state = screen_fn(
                     screen_state, screen_prev, (x, y, z, ux, uy, uz), active, alive_prev,
@@ -980,6 +991,8 @@ class Injector:
             out.update(
                 x=x[alive], y=y[alive], z=z[alive], ux=ux[alive], uy=uy[alive], uz=uz[alive], q=q[alive], t_s=t,
             )
+        if collisions is not None:
+            out["ibs"] = dict(settings=dataclasses.asdict(self.ibs), **collisions.diagnostics())
         return out
 
     # -- differentiable tracking -------------------------------------------------------------
@@ -1021,6 +1034,8 @@ class Injector:
         screen_z_m: float | None = None,
     ) -> dict:
         """Compute track differentiable; see the module documentation for details."""
+        if self.ibs.enabled:
+            raise NotImplementedError("Injector IBS is stochastic and not supported by track_differentiable; use Injector.track or disable ibs")
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
         _check_screen_plane(screen_z_m)

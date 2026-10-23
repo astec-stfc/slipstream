@@ -3,6 +3,17 @@
 Read `AGENTS.md` first. This file is the shorter operational reference for
 working in this checkout with Claude or another coding agent.
 
+## Physics capability skills
+
+Capability skills in `.claude/skills/` are portable with this package.
+Use [/slipstream-injector-ibs](.claude/skills/slipstream-injector-ibs/SKILL.md)
+for local binary Coulomb collisions in photocathode/injector studies.
+Use [/slipstream-native-drift](.claude/skills/slipstream-native-drift/SKILL.md)
+when changing straight drift physics or its canonical time-of-flight checks.
+The parent workbench, when present, provides `/slipstream-skill-factory` for
+researching and creating further capability skills; it is optional for using
+this package's skills and tests.
+
 ## Quick facts
 
 - Package: `slipstream-accel`; import name: `slipstream`.

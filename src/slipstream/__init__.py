@@ -17,7 +17,7 @@ from .lattice.lattice import Lattice
 from .lattice.optics import TransverseOptics
 from .lattice.ramp import RampProfile
 from .tracking.native import (
-    ElementSpec, Injector, LinacTracker, NativeTracker, NativeTrackResult, Photocathode, parse_elegant_lattice,
+    ElementSpec, Injector, InjectorIBSSettings, LinacTracker, NativeTracker, NativeTrackResult, Photocathode, parse_elegant_lattice,
 )
 from .tracking.native.ring import RingLossMap, RingMap, RingTrackResult
 from .wakefields.chambers import FlatChamber, FreqScan, RoundChamber
@@ -53,6 +53,7 @@ __all__ = [
     "FreqScan",
     "Impedance",
     "Injector",
+    "InjectorIBSSettings",
     "Lattice",
     "LinacTracker",
     "LongRangeWake",

@@ -1,0 +1,284 @@
+schema_version: 1
+capability: injector-ibs
+skill_state: behavior_evaluated
+physics_state: validated_for_declared_regime
+scope: Synthetic operator and injector-integration checks for equal-weight, weakly coupled classical particles
+  with nonrelativistic pair motion (beta<=0.1), float64 CPU/CUDA. This is not real-machine convergence
+  or cathode calibration.
+source_state:
+  parent_revision: 065105a4b7343269bd3ce5bfc5a3a584d8d41311
+  package_revision: 7a03349f39c5aff4e6e0ace81c3fba7e68d571f5
+  relevant_dirty_paths:
+  - slipstream/src/slipstream/tracking/native/injector_ibs.py
+  - slipstream/src/slipstream/tracking/native/injector.py
+  - slipstream/src/slipstream/tracking/native/__init__.py
+  - slipstream/src/slipstream/__init__.py
+  - slipstream/tests/test_injector_ibs.py
+  - slipstream/docs/modules/tracking/native/injector_ibs.md
+  - slipstream/.claude/skills/slipstream-injector-ibs/
+  - slipstream_dev/examples/injector_ibs/
+  - slipstream_dev/tests/test_injector_ibs_study.py
+  - slipstream_dev/plans/IBS_INJECTOR_PLAN.md
+  working_tree_sha256:
+    slipstream/src/slipstream/tracking/native/injector_ibs.py: f2de508682c944dd1690c97c0e32be4eadabd8fe12222266c346dd1a48f283c1
+    slipstream/src/slipstream/tracking/native/injector.py: 8db31bd2efe0444e1a3dedac99654edecf41675aa58e011ef9c1588dd88aaa49
+    slipstream/tests/test_injector_ibs.py: e0219a826c9530972df3ace687bdf1aada34219aa9167c0eda934c07225355b9
+    slipstream/docs/modules/tracking/native/injector_ibs.md: c2fcc6803d8a771a27d93d33a7aaccf9dd39af557e40873fa6d8ca6e6d026c81
+    slipstream_dev/examples/injector_ibs/compare_ibs.py: cb4bf3c05a0f559f9720b043ae7a16dbe5dd26f621086a546e4dab742773d2f9
+    slipstream_dev/tests/test_injector_ibs_study.py: 3b7c5d6a41191516d80bb2f097bcfee3770570499c702364667261abfa3bdef7
+sources:
+- identifier: Gjonaj-DeGersem-Limberg-FEL2022-WEP14
+  location: https://epaper.kek.jp/fel2022/pdf/WEP14.pdf
+  sha256: BE6B912960EB71BDD56F6973DFDE09FB9FD666EEFB5BF7EAD64F76A9BA6B4857
+  verified_claim: Read pp. 400-404 and visually inspected p. 401. Equations (1), (2), (4), (5) specify
+    the local TA/Nanbu method; text specifies proper density/time and cutoff considerations. Exact conservative
+    pair kinematics replaces the approximate boost in Eq. (3), with derivation in the module documentation.
+    Original Indico URL returned a login page.
+- identifier: Caflisch-et-al-UCRL-JRNL-235460-2007
+  location: https://www.osti.gov/servlets/purl/941391
+  sha256: DCCE8BF4853C759E8F670863CA3ED9DC55EB10DD081FE83A17A97B515B2D7F64
+  verified_claim: Section 2.2 Eq. (5) independently confirms SI scattering variance and reduced-mass normalization.
+- identifier: equal-mass-Lorentz-derivation
+  location: docs/modules/tracking/native/injector_ibs.md
+  verified_claim: Exact pair center-of-momentum rotation and boost increment conserve total lab four-momentum.
+required_checks:
+- isotropic-mean
+- four-vector-energy
+- scientific-oracles
+- injector-integration
+- matched-study
+checks:
+- id: isotropic-mean
+  kind: quantitative
+  required: true
+  command:
+  - python
+  - .tmp-injector-ibs-forward/check.py
+  cwd: parent checkout
+  input_identity: Independent forward test, 100000 Nanbu samples, variance 100 through 1000, fixed private
+    seed; persistent regressions also cover parameter underflow.
+  expected: 0.0
+  measured: -0.0001583291845088415
+  tolerance:
+    rtol: 0.0
+    atol: 0.010955
+    rationale: Six standard errors for the isotropic mean with 100000 independent samples (variance 1/3).
+  status: pass
+  artifacts:
+  - .tmp-injector-ibs-forward/check.py
+  - .tmp-injector-ibs-forward/check.json
+  additional_result: Second moment 0.33336143032496723, target 1/3; no deterministic backscatter at parameter
+    underflow.
+- id: four-vector-energy
+  kind: quantitative
+  required: true
+  command:
+  - python
+  - .tmp-injector-ibs-forward/check.py
+  cwd: parent checkout
+  input_identity: Independent Lorentz four-vector oracle with arbitrary boost direction at bulk gamma
+    1, 5, 100.
+  expected: 0.0
+  measured: 4.440892098500626e-16
+  tolerance:
+    rtol: 0.0
+    atol: 2.0e-14
+    rationale: Relative total pair-energy error; float64 roundoff allowance for boosted additions.
+  status: pass
+  artifacts:
+  - .tmp-injector-ibs-forward/check.py
+  - .tmp-injector-ibs-forward/check.json
+  additional_result: Largest absolute proper-velocity sum error 7.62939453125e-6 m/s at bulk gamma 100;
+    persistent tests check momentum with scale-aware roundoff bounds.
+- id: scientific-oracles
+  kind: regression
+  required: true
+  command:
+  - python
+  - -m
+  - pytest
+  - slipstream/tests/test_injector_ibs.py
+  - -q
+  cwd: parent checkout
+  input_identity: Fixed analytic/scalar Rutherford integral, independent Langevin/TA quadrature, finite
+    transverse velocity lattice with fixed density/domain/time, CPU/CUDA pair and public-injector cases.
+  expected: Absolute SI rate within relative 3e-12 at gamma 1/5/100; angular means within six standard
+    errors; initial diffusion within six standard errors plus 0.5% weak-step budget; elastic invariants
+    at roundoff.
+  measured: All 37 package cases pass in the recorded final package suite, including particle/time refinement
+    and actual CPU/CUDA tracking.
+  status: pass
+  artifacts:
+  - .tmp-injector-ibs-artifacts/package-verified.xml
+- id: injector-integration
+  kind: integration
+  required: true
+  command:
+  - python
+  - -m
+  - pytest
+  - slipstream/tests
+  - -q
+  - --basetemp=.tmp-injector-ibs-package-verified
+  - --junitxml=.tmp-injector-ibs-artifacts/package-verified.xml
+  cwd: parent checkout
+  input_identity: Small native machine with distribution generated in each test; actual tracking, YAML
+    round-trip/legacy defaults, space charge, future emission and new aperture losses.
+  expected: Default-off identity, seeded replay, active-survivor masks, physical weights and unsupported-mode
+    failures.
+  measured: Integration cases pass as part of the full scientific-oracle suite; CPU/CUDA public tracking
+    exercised.
+  status: pass
+  artifacts:
+  - .tmp-injector-ibs-artifacts/package-verified.xml
+- id: matched-study
+  kind: integration
+  required: true
+  command:
+  - python
+  - -m
+  - pytest
+  - slipstream_dev/tests/test_injector_ibs_study.py
+  - -q
+  cwd: parent checkout
+  input_identity: Native 96-particle source, matched 64-particle subsample, four slices, fixed log 7,
+    actual YAML/CSV/JSON CLI round-trip.
+  expected: Matching populations, aligned columns and reproducible output with independent source/collision
+    seeds.
+  measured: One workbench test passes; independent 256-particle forward study retained all particles and
+    unchanged off columns when scanning collision seeds.
+  status: pass
+  artifacts:
+  - .tmp-injector-ibs-forward/workbench.py
+  - .tmp-injector-ibs-forward/workbench.csv
+  - .tmp-injector-ibs-forward/workbench.json
+  - .tmp-injector-ibs-artifacts/workbench-study.xml
+- id: mixed-compiled-pusher
+  kind: backend
+  required: false
+  command:
+  - python
+  - -c
+  - "import runpy\nfrom pathlib import Path\nimport torch\nimport warp as wp\nwp.config.kernel_cache_dir\
+    \ = str(Path('.tmp-injector-ibs-warp-cache').resolve())\ntests = runpy.run_path('slipstream/tests/test_injector_ibs.py')\n\
+    directory = Path('.tmp-injector-ibs-mixed-check').resolve()\ndirectory.mkdir(exist_ok=True)\nmachine\
+    \ = tests['make_machine'](directory)\nmachine.ibs = tests['settings'](coulomb_log=7., seed=2)\nargs\
+    \ = dict(device='cuda', dtype=torch.float64, verbose=False, return_particles=True)\neager = machine.track(use_compile=False,\
+    \ **args)\ncompiled = machine.track(use_compile=True, **args)\nfor key in ('x', 'y', 'z', 'ux', 'uy',\
+    \ 'uz'):\n    torch.testing.assert_close(eager[key], compiled[key], rtol=1e-12, atol=1e-14)\n    print(key,\
+    \ float((eager[key]-compiled[key]).abs().max()))\n"
+  cwd: parent checkout
+  input_identity: Small 52-step CUDA machine; seed 2, log 7, cells (1e-4,2e-4,3e-4) m; same eager collision
+    operator in both runs.
+  expected: Eager versus existing compiled/Warp field pushing agree at roundoff.
+  measured: Maximum position difference 2.710505431213761e-20 m; proper velocities identical; 1248 collision
+    pairs each.
+  status: pass
+  artifacts:
+  - .tmp-injector-ibs-artifacts/compiled-parity.json
+- id: package-regression
+  kind: regression
+  required: false
+  command:
+  - python
+  - -m
+  - pytest
+  - slipstream/tests
+  - -q
+  - --basetemp=.tmp-injector-ibs-package-verified
+  - --junitxml=.tmp-injector-ibs-artifacts/package-verified.xml
+  cwd: parent checkout
+  input_identity: Complete portable package suite on the final source tree, with CUDA available and workspace-local
+    compiler caches.
+  expected: No package regression; unavailable optional cases skip explicitly.
+  measured: 239 passed, 7 skipped, one existing torch.jit.script deprecation warning; 278.91 seconds.
+  status: pass
+  artifacts:
+  - .tmp-injector-ibs-artifacts/package-verified.xml
+- id: portable-workbench-regression
+  kind: regression
+  required: false
+  command:
+  - python
+  - -m
+  - pytest
+  - slipstream_dev/tests/test_native_injector.py
+  - -q
+  - -k
+  - from_astra_units or from_astra_lspch3d or rf_cos_sin or aperture_tables or aperture_kinds or step_apertures_use_updated_positions
+    or adaptive_mesh_defaults
+  cwd: parent checkout
+  input_identity: Nine synthetic injector conversion, fields, apertures and mesh-default checks that do
+    not require a missing CLARA fixture.
+  expected: All selected checks pass.
+  measured: 9 passed, 22 deselected.
+  status: pass
+  artifacts:
+  - .tmp-injector-ibs-artifacts/workbench-portable.xml
+- id: legacy-workbench-roundtrip
+  kind: regression
+  required: false
+  command:
+  - python
+  - -m
+  - pytest
+  - slipstream_dev/tests/test_native_injector.py
+  - -q
+  - -k
+  - save_load_round_trip_keeps_paths_resolvable
+  cwd: parent checkout
+  input_identity: Existing workbench fixture references slipstream_dev/backends/slipstream_dev/examples/clara_linac/ASTRA/5pC/injector400.in.
+  expected: Legacy fixture resolves to an existing input deck.
+  measured: Missing input path; failed in the initial affected-workbench selection (1 failed, 9 passed,
+    21 deselected).
+  status: fail
+  reason: Existing workbench relocation/fixture path failure; left outside this physics change.
+  artifacts: []
+- id: matched-machine-reference
+  kind: external
+  required: false
+  command:
+  - python
+  - -m
+  - slipstream_dev.examples.injector_ibs.compare_ibs
+  - injector.yaml
+  - --cell-size-m
+  - 5e-5
+  - 5e-5
+  - 1e-4
+  cwd: parent checkout
+  input_identity: Requires a selected machine/source, fields, observation plane and matched external dataset.
+  status: not_run
+  reason: Matched real-machine inputs/reference not supplied; example cell sizes are not calibrated defaults.
+  artifacts: []
+environment:
+  interpreter: C:\Users\jkj62.CLRC\.conda\envs\astec-accelerator-models\python.exe
+  OS: Windows-11-10.0.26200-SP0
+  device: CPU and CUDA NVIDIA GeForce RTX 3050 8GB
+  dtype: float64
+  backend: Eager torch collisions; existing compiled/Warp field pusher separately checked.
+  dependencies:
+    torch: 2.14.0+cu132
+    PyYAML: 6.0.3
+    warp: 1.17.0
+  import_setup: Every command pins process PYTHONPATH to this checkout's slipstream/src, overriding a
+    sibling editable install.
+  compiled_setup: CXX=clang-cl; workspace-local TORCHINDUCTOR_CACHE_DIR and TRITON_CACHE_DIR; process-local
+    warp.config.kernel_cache_dir.
+limitations:
+- Base revisions predate the implementation; working-tree source hashes accompany this record.
+- No full-machine cell/particle/time/space-charge convergence, matched external-reference comparison or
+  performance target is claimed.
+- Strong coupling, cathode DIH, quantum/degenerate physics, unequal weights and relativistic thermal rates
+  are outside the model.
+- Float32 and differentiable tracking are rejected; collisions run eagerly even when field pushing is
+  compiled.
+- CPU/CUDA seeded replay is local to the tested environment; no cross-device RNG equivalence is claimed.
+- Optional legacy workbench fixture failure is retained separately; the entire parent-workbench suite
+  was not certified.
+- Temporary artifacts are local and regenerable; portable scientific tests and derivations remain in the
+  package.
+- Original TA/Nanbu bibliographic records were verified, but their paywalled full texts were not used
+  as read evidence.
+next_action: Select matched real-machine inputs and run the remaining convergence/reference study gates
+  in IBS_INJECTOR_PLAN.md; rerun operator checks after source changes.

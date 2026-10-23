@@ -57,6 +57,9 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 
 ## tracking/native
 
+- [injector_ibs](tracking/native/injector_ibs.md): Local equal-weight binary Coulomb collisions for injector studies, with Takizuka–Abe/Nanbu angular laws and elastic pair kinematics.
+- [injector_ibs_warp](tracking/native/injector_ibs_warp.md): Optional float64 CUDA acceleration of disjoint collision pairs, sharing the PyTorch grouping and random draws.
+
 - [astra_io](tracking/native/astra_io.md): Converts ASTRA distribution rows from their reference-relative z/pz/time convention to absolute particle values.
 - [collective](tracking/native/collective.md): Implements local long-wavelength 1D LSC and steady-state 1D CSR momentum kicks.
 - [double_single](tracking/native/double_single.md): Represents selected frozen-energy ring coordinates as float32 high/low pairs for increased precision.

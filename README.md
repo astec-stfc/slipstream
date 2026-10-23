@@ -93,6 +93,11 @@ documented in [`docs/ring6d.md`](docs/ring6d.md).
 
 ## Scope
 
+For opt-in photocathode/injector intrabeam scattering, see
+[local binary collisions](docs/modules/tracking/native/injector_ibs.md).
+`InjectorIBSSettings` configures the collision cells, angular model, cutoff
+and seed independently of storage-ring IBS growth-rate models.
+
 - `NativeTracker` models ring transport and turn-by-turn effects.
 - `LinacTracker` models one-pass element-by-element transport.
 - `Injector` models ASTRA-style gun, cavity, solenoid, space-charge, and
