@@ -32,6 +32,13 @@ at rest under a strong field and needs the fine step; once `v~c` the
 push degenerates to a quadrature of `Ez` along the line). Fields no
 candidate is inside are skipped.
 
+The small trial batch runs in CPU float64 NumPy, evaluating only `Ez`
+from the same standing/traveling-wave tables used by particle tracking.
+Empty drift intervals are advanced analytically by summing whole time
+steps, stopping before any live candidate reaches the next field. The
+phase grids and integration steps inside fields are unchanged; each scan
+computes its results afresh without compilation or saved trajectories.
+
 A candidate whose `uz` reverses (phased to decelerate at the cathode)
 is retired at its current energy -- it cannot be the crest, and would
 otherwise drift backwards forever.

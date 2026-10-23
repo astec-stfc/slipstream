@@ -1286,48 +1286,74 @@ def _field_span(f) -> tuple[float, float]:
     return z0, z0 + f.map.dz * (f.map.n - 1)
 
 
-def _ez_on_axis(f, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    """On-axis ``Ez`` of either cavity type (paraxial ``Er``/``Bphi`` vanish
-    on-axis identically). ``f.phase_rad`` may be a tensor of trial phases,
-    broadcasting to one candidate per particle."""
+def _crest_field(f):
+    """CPU float64 Ez evaluator for a small phase batch; no transverse derivatives."""
+    m = f.map
+    zg = m.z0 + m.dz * np.arange(m.n)
+    real = m.f.detach().cpu().numpy() * float(f.scale)
+    phase = torch.as_tensor(f.phase_rad, dtype=torch.float64).detach().cpu().numpy()
     if isinstance(f, TravelingWaveField):
-        return f.on_axis(z, t)[0]
-    z0, zend = _field_span(f)
-    (ez0,) = _lerp_tables(z, z0, f.map.dz, f.map.n, zend, f.map.f)
-    return ez0 * f.scale * torch.cos(f.omega * t + f.phase_rad)
+        imag = f.map_imag.f.detach().cpu().numpy() * float(f.scale)
+
+        def ez(z, t):
+            local = z - f.z_offset
+            tile = np.clip(np.floor((local - f.z1) / f.period), 0, f.n_tiles - 1)
+            at = local - tile * f.period
+            angle = f.omega * t + phase
+            value = np.interp(at, zg, real) * np.cos(angle) - np.interp(at, zg, imag) * np.sin(angle)
+            return np.where((local >= 0.0) & (local <= f.length), value, 0.0)
+    else:
+        zg = m.z0 + f.z_offset + m.dz * np.arange(m.n)
+
+        def ez(z, t):
+            return np.interp(z, zg, real, left=0.0, right=0.0) * np.cos(f.omega * t + phase)
+    return ez
 
 
 def _on_axis_energy_MeV(fields, z0, uz0, t0, z_in, z_out, qm, mc2_eV, dt_fine=1.0e-13, dt_coarse=2.0e-12,
                         beta_coarse=0.9):
-    """Compute on axis energy MeV; see the module documentation for details."""
+    """Float64 leapfrog phase scan; see the module documentation for details."""
     n = max((torch.as_tensor(f.phase_rad).numel() for f in fields), default=1)
     spans = [_field_span(f) for f in fields]
-    z = torch.full((n,), z0, dtype=torch.float64)
-    uz = torch.full((n,), uz0, dtype=torch.float64)
-    e_in = torch.full((n,), math.nan, dtype=torch.float64)
-    e_out = torch.zeros(n, dtype=torch.float64)
-    done = torch.zeros(n, dtype=torch.bool)
+    evaluators = [_crest_field(f) for f in fields]
+    z = np.full(n, z0, dtype=np.float64)
+    uz = np.full(n, uz0, dtype=np.float64)
+    e_in = np.full(n, np.nan)
+    e_out = np.zeros(n)
+    done = np.zeros(n, dtype=bool)
+    entering = np.ones(n, dtype=bool)
+    gamma = np.sqrt(1.0 + (uz / C_LIGHT) ** 2)
+    velocity = uz / gamma
     u_coarse = beta_coarse / math.sqrt(1.0 - beta_coarse**2) * C_LIGHT
     t = t0
     t_max = t0 + 10.0 * (z_out - z0) / C_LIGHT + 1e-9
     while True:
-        z_lo, z_hi, u_min = torch.stack([z.min(), z.max(), torch.where(done, math.inf, uz).min()]).tolist()
+        z_live, u_live = z[~done], uz[~done]
+        z_lo, z_hi, u_min = z_live.min(), z_live.max(), u_live.min()
         dt = dt_coarse if u_min > u_coarse else dt_fine
-        z = z + uz / torch.sqrt(1.0 + (uz / C_LIGHT) ** 2) * (0.5 * dt)
-        t_half = torch.tensor(t + 0.5 * dt, dtype=torch.float64)
-        for f, (lo, hi) in zip(fields, spans):
+        if u_min > 0.0 and not any(z_hi >= lo and z_lo <= hi for lo, hi in spans):
+            # Sum whole field-free steps, stopping before the fastest particle reaches a field.
+            next_z = min([lo for lo, _ in spans if lo > z_hi] + [z_out])
+            steps = min(np.min((next_z - z_live) / velocity[~done]), t_max - t) / dt
+            dt *= max(1, math.floor(steps) - 1)
+        z = z + velocity * (0.5 * dt)
+        t_half = t + 0.5 * dt
+        for ez, (lo, hi) in zip(evaluators, spans):
             if z_hi >= lo and z_lo <= hi:
-                uz = uz + (qm * dt) * _ez_on_axis(f, z, t_half)
-        gamma = torch.sqrt(1.0 + (uz / C_LIGHT) ** 2)
-        z = z + uz / gamma * (0.5 * dt)
+                uz = uz + (qm * dt) * ez(z, t_half)
+        gamma = np.sqrt(1.0 + (uz / C_LIGHT) ** 2)
+        velocity = uz / gamma
+        z = z + velocity * (0.5 * dt)
         t += dt
-        ekin = (gamma - 1.0) * mc2_eV / 1e6
-        e_in = torch.where(torch.isnan(e_in) & (z >= z_in), ekin, e_in)
+        entry = entering & (z >= z_in)
+        e_in[entry] = (gamma[entry] - 1.0) * mc2_eV / 1e6
+        entering &= ~entry
         just = ~done & ((z >= z_out) | (uz < 0))
-        e_out = torch.where(just, ekin, e_out)
+        e_out[just] = (gamma[just] - 1.0) * mc2_eV / 1e6
         done |= just
-        if bool(done.all()) or t > t_max:
-            return e_in, torch.where(done, e_out, ekin)
+        if done.all() or t > t_max:
+            ekin = (gamma - 1.0) * mc2_eV / 1e6
+            return torch.from_numpy(e_in), torch.from_numpy(np.where(done, e_out, ekin))
 
 
 
