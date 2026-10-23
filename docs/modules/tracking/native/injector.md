@@ -518,11 +518,24 @@ Used only when `mesh="adaptive"`:
   macroparticle occupancy; set to zero to disable the noise guard.
 
 `smooth_r` / `smooth_z`: binomial `(1,2,1)/4` smoothing passes on
-the deposited charge-density grid before the Poisson solve, matching
-ASTRA's own `&CHARGE` `smooth_x`/`smooth_y`/`smooth_z`. Default
-0 (off) -- with it off, PIC deposition noise scales with charge per
-macroparticle and can dominate the native-vs-ASTRA emittance gap at
-high bunch charge.
+the deposited charge-density grid before the Poisson solve. Default
+0 (off). `Injector.from_astra` imports ASTRA's `&CHARGE`
+`smooth_x`/`smooth_y`/`smooth_z` only for `LSPCH3D = T`: ASTRA applies them to its
+3-D FFT algorithm only (manual section 6.6), so its cylindrical algorithm -- the one
+this solver is compared with -- never smooths. Importing them anyway blurred a density
+ASTRA does not blur: at the converged emission step it moved the CLARA 100 pC
+emittance by -9 % (see `Stories/CLARA_InjectorConvergence`).
+
+`emission_steps`: the number of steps across the emission window (latest minus earliest
+emission time of the beam); the emission-phase step is `min(Injector.dt_s, window /
+emission_steps)`, 0 keeps `dt_s`. A macroparticle is pushed from the first step at or
+after its emission time, so a step that is coarse against the window quantises the
+emission; ASTRA instead starts each particle at its own emission time. For the 2.9 ps
+CLARA window the 100 pC emittance is +14.7 % of ASTRA's at a 100 fs step and converged
+(-7.7 %, smoothing on; +1.2 %, off) at 50 fs and below, at no cost in run time. After
+emission a fixed-step run returns to `dt_s` and an adaptive one to its own rule. A
+`photocathode` run keeps `dt_s`: there it is the resolution of the emission law the
+caller chose. An in-flight beam has no window.
 
 `smooth_gamma_ref`: smoothing is blended in with weight
 `1 / (1 + (gamma/smooth_gamma_ref)**2)`, fading out at high gamma —
@@ -530,7 +543,7 @@ full-strength smoothing helps near the cathode but measurably hurts
 further downstream. Default 3.0 is a measured compromise across a
 5pC/100pC A/B, not a clean derivation from first principles.
 
-`dt_adaptive` (**experimental, not yet validated as a net win**):
+`dt_adaptive` (the default; step errors measured in `Stories/CLARA_InjectorConvergence`):
 re-derive the tracking step at every space-charge recompute from the
 *live* local transverse space-charge frequency instead of tracking the
 whole line at one fixed step. See `_local_sc_omega`:

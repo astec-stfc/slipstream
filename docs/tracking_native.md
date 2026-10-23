@@ -123,10 +123,21 @@ charge field is recomputed.
 
 ## Time stepping and compilation
 
-`dt_adaptive=True` derives the injector step from the local space-charge
-frequency and clamps it between `dt_floor_s` and `dt_ceiling_s`. Set it to
-`False` for a fixed-step comparison. The `dt_safety` setting is the main
-accuracy/performance knob.
+`dt_adaptive=True` derives the injector step after emission from the local
+space-charge frequency and clamps it between `dt_floor_s` and `dt_ceiling_s`. Set
+it to `False` for a fixed-step comparison. The `dt_safety` setting is the main
+accuracy/performance knob. The emission phase has its own step,
+`min(Injector.dt_s, emission window / emission_steps)`, because the first push of a
+macroparticle is quantised to it; see the `SpaceChargeSettings` page.
+
+The defaults (`dt_safety=3.5e5`, `dt_floor_s=15 fs`, `dt_ceiling_s=2 ps`,
+`subcycle_steps=20`) are the measured accuracy/time optimum on the CLARA decks at
+20, 100 and 250 pC (`Stories/CLARA_InjectorConvergence`): the final emittance is
+within 2.4 % of the converged value at all three charges, in 0.72-0.83 of the
+tracking-loop time of the previous settings (the process wall time, which also
+holds start-up, compile-cache load and beam generation, falls by 12-21 %). Where the step matters is the late gun and the drift to the
+linac (mean Lorentz factor 4 to 10.5); halving the step elsewhere changes nothing.
+Raising `dt_safety` to 1e6 puts the 250 pC emittance 13.5 % above the converged value.
 
 `use_compile=True` is the default for `Injector.track()` and can reduce the
 cost of repeated fixed-shape CUDA steps. Compilation is shape-sensitive:
@@ -162,7 +173,7 @@ offset or the tilt compiles nothing new; only switching between a placed and an 
 Placed *apertures* still take their offset and rotation as floats.
 
 For a scan that needs only the charge, `dt_adaptive=True` with a larger
-`dt_safety` (5e7 against the 5e5 default) and `dt_ceiling_s=2e-12` keeps the
+`dt_safety` (5e7 against the 3.5e5 default) and `dt_ceiling_s=2e-12` keeps the
 fine step while space charge is strong and cuts the step count about fourfold:
 the CLARA Schottky scan changes by 1.2 pC rms (at most 6.7 pC in the sparse tail
 of the cut-off) against a fixed 0.4 ps step. Over six phases of the aperture-limited

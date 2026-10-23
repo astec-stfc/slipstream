@@ -18,7 +18,7 @@ def beam(device='cpu', dtype=torch.float64):
 
 def injector():
     return Injector('', 0.012, absolute_phases=True, dt_s=1e-12,
-                    space_charge=SpaceChargeSettings(enabled=False))
+                    space_charge=SpaceChargeSettings(enabled=False, emission_steps=0))  # dt_s is the step: the tests count steps
 
 
 def run(b, checkpoint=0, **kwargs):

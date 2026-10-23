@@ -51,9 +51,6 @@ SC_IMAGE_NZ_BUCKETS = (33, 65, 129, 257, 513, 1025)
 SC_NR_BUCKETS = (64,)
 SC_NZ_BUCKETS = (64, 128, 192, 256, 384, 512, 768)
 
-_DT_REF_S = 10.0e-12
-
-
 
 def injector_exit_to_canonical6(
     result: dict, device: str | torch.device | None = None, dtype: torch.dtype = torch.float64,
@@ -134,20 +131,21 @@ class SpaceChargeSettings:
     cells_per_sigma_zs: float = 12.0
     min_particles_per_cell: float = 6.0
     every_step_until: int | None = None
-    subcycle_steps: int = 10
+    subcycle_steps: int = 20
     mesh: str = "adaptive"
     smooth_r: int = 0.0
     smooth_z: int = 0.0
     smooth_gamma_ref: float = 3.0
+    emission_steps: int = 100  # steps across the emission window, ``Injector.dt_s`` capping it; 0: dt_s throughout
     dt_adaptive: bool = True
     geometry: str = "cylindrical"
     n_xyz: list[int] = field(default_factory=lambda: [32, 32, 32])
     max_grid_cells_3d: int = SC3D_MAX_GRID_CELLS  # padded Hockney volume cap, deliberately not nx*ny*nz
-    dt_safety: float = 0.5e6
-    # ASTRA-inspired hard Min_dt-style backstop, fixes dt_adaptive's hang but not its speed yet --
-    # see docs/tracking_native.md's "Injector adaptive time-stepping".
-    dt_floor_s: float = 1e-15
-    dt_ceiling_s: float = _DT_REF_S
+    # The step after emission is clamp(dt_safety / omega, dt_floor_s, dt_ceiling_s). The values (and subcycle_steps)
+    # are the measured accuracy/time optimum on the CLARA decks at 20-250 pC: Stories/CLARA_InjectorConvergence.
+    dt_safety: float = 0.35e6
+    dt_floor_s: float = 1.5e-14  # a machine with a bunch of tens of fs needs a smaller floor
+    dt_ceiling_s: float = 2e-12
 
 
 @dataclass
@@ -385,8 +383,11 @@ class Injector:
             space_charge=SpaceChargeSettings(
                 enabled=bool(charge.get("lspch", True)),
                 cathode_image=bool(charge.get("lmirror", True)),
-                smooth_r=int(max(charge.get("smooth_x", 0) or 0, charge.get("smooth_y", 0) or 0)),
-                smooth_z=int(charge.get("smooth_z", 0) or 0),
+                # ASTRA applies Smooth_x/y/z to its 3-D FFT algorithm only (manual 6.6); the cylindrical one never
+                # smooths, so importing them there made the native solver blur a density ASTRA does not.
+                smooth_r=int(max(charge.get("smooth_x", 0) or 0, charge.get("smooth_y", 0) or 0))
+                if charge.get("lspch3d", False) else 0,
+                smooth_z=int(charge.get("smooth_z", 0) or 0) if charge.get("lspch3d", False) else 0,
                 geometry="3d" if charge.get("lspch3d", False) else "cylindrical",
                 n_xyz=[int(charge.get(k, 32)) for k in ("nxf", "nyf", "nzf")],
             ),
@@ -696,6 +697,14 @@ class Injector:
         cx, cy, cz, cux, cuy, cuz = (zero_n.clone() for _ in range(6))  # per-particle Kahan terms
 
         emission_end_s = float(emission_time_s.max() * 2)
+        # A macroparticle is pushed from the first step at or after its emission time, so a step that is coarse against
+        # the emission window quantises the emission (measured: the CLARA 100 pC emittance moves by 20 % between a
+        # 100 fs and a 25 fs step). Resolve the window with `emission_steps` steps; an in-flight beam has no window.
+        # A photocathode run keeps `dt_s`: there it is the resolution of the emission law the user chose.
+        dt_run = dt
+        emission_window_s = float(emission_time_s.max() - emission_time_s.min())
+        if sc.emission_steps and emission_window_s > 0.0 and self.photocathode is None:
+            dt = min(dt, emission_window_s / sc.emission_steps)
         if sc.every_step_until is None:
             sc.every_step_until = max(0, int(math.ceil((emission_end_s - t) / dt)))
         all_active = torch.ones(n, device=device, dtype=torch.bool)
@@ -774,6 +783,12 @@ class Injector:
             # Once every particle is emitted (~40 steps for CLARA), the active mask/where-merges become
             # identities -- skip them.
             emitted_all = t >= emission_end_s
+            if emitted_all and dt != dt_run and not (sc.dt_adaptive and sc.enabled):
+                # only the adaptive rule (which needs the space-charge solve) replaces the fine emission step otherwise
+                dt = dt_run
+                qmdt2 = self.qm_C_per_kg * (dt / 2.0)
+                dt_ten.fill_(dt)
+                qmdt2_ten.fill_(qmdt2)
             active = all_active if emitted_all else emission_time_s <= t
             if emitter is not None and emission_pending:
                 new_idx = (active & ~prev_active).nonzero().squeeze(1)
