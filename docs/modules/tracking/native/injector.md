@@ -382,7 +382,10 @@ is re-fit every recompute -- but the CELL SIZES are snapped to the `_snap_h3d`
 ladder, so the expensive Green's function is rebuilt only on a bucket change
 (amortised), not per recompute. The requested
 box retains the stateless path's full particle extent and 5%-of-span margin so
-caching does not also change the discretised physics. Eager before emission
+caching does not also change the discretised physics by default. Set
+`SpaceChargeSettings.box_padding_3d` to a finite nonnegative fraction to vary
+the margin separately from `n_xyz`; increasing it at fixed `n_xyz` also makes
+the cells larger. The cylindrical `box_margin` is a separate setting. Eager before emission
 (`sc3d_fn=None`): the active set's shape changes nearly every step there and
 would recompile constantly.
 
@@ -840,7 +843,8 @@ Handoff to a downstream s-based tracker (E3, BeamlineStudy.track_with_injector)
 ### `SpaceChargeSettings`
 
 "cylindrical" or "3d" (Cartesian open-boundary FFT, space_charge.SpaceCharge3D) -- see
-docs/tracking_native.md's "3D space charge". Mesh/box/smoothing knobs above are cylindrical-only.
+docs/tracking_native.md's "3D space charge". The cylindrical box and smoothing knobs do not set the Cartesian box;
+use `box_padding_3d` and `n_xyz` for the latter.
 
 ### `SpaceChargeSettings`
 

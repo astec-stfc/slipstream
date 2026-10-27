@@ -115,6 +115,11 @@ the live bunch size and quantizes it into stable grid buckets. Use
 `geometry="cylindrical"` is the default. `geometry="3d"` selects the
 Cartesian open-boundary FFT solver and uses `n_xyz`; cylindrical smoothing,
 cell targets, and cathode-image settings do not control that 3-D grid.
+The Cartesian box is fitted to the live particle extent with a fractional
+margin `box_padding_3d` (default 0.05 on each side). At fixed `n_xyz`, a larger
+margin also increases the cell sizes; a 1 nm absolute pad is added on each side.
+This setting is independent of the cylindrical
+`box_margin` setting.
 
 `smooth_r` and `smooth_z` add binomial smoothing to the deposited charge
 grid. Leave them at zero unless deposition noise is part of the problem being

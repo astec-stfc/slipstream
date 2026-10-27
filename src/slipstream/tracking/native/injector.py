@@ -146,6 +146,7 @@ class SpaceChargeSettings:
     dt_safety: float = 0.35e6
     dt_floor_s: float = 1.5e-14  # a machine with a bunch of tens of fs needs a smaller floor
     dt_ceiling_s: float = 2e-12
+    box_padding_3d: float = 0.05
 
 
 @dataclass
@@ -2180,6 +2181,8 @@ def _compute_space_charge_3d(x, y, z, q, ux, uy, uz, device, dtype, cache,
     nx, ny, nz_config = map(int, sc.n_xyz)
     if min(nx, ny, nz_config) < 3:
         raise ValueError("SpaceChargeSettings.n_xyz entries must each be at least 3")
+    if not math.isfinite(sc.box_padding_3d) or sc.box_padding_3d < 0:
+        raise ValueError("SpaceChargeSettings.box_padding_3d must be finite and nonnegative")
 
     gamma_t = torch.clamp(torch.sqrt(1.0 + (ux * ux + uy * uy + uz * uz) / C_LIGHT**2).mean(), min=1.0 + 1e-9)
     (x_lo_f, x_hi_f, y_lo_f, y_hi_f, z_lo_f, z_hi_f, z_mean, gamma) = torch.stack([
@@ -2188,8 +2191,7 @@ def _compute_space_charge_3d(x, y, z, q, ux, uy, uz, device, dtype, cache,
     ]).tolist()
 
     def axis_box(lo_f, hi_f):
-        # Preserve the stateless 3D solver's fitted box exactly.
-        pad = 0.05 * (hi_f - lo_f) + 1e-9
+        pad = sc.box_padding_3d * (hi_f - lo_f) + 1e-9
         return lo_f - pad, hi_f + pad
 
     h_prev = cache.get("h3d")
