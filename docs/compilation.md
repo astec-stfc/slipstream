@@ -39,6 +39,14 @@ equivalents in other shells are `set CXX=clang-cl` in `cmd.exe` and
 
 Compilation is opt-in for the ring and linac trackers:
 
+`RingMap` also supports regional compilation on CPU, including tensor-strength
+derivatives. For repeated fixed-shape maps, pass `device="cpu", compile=True`
+when constructing the map. Keep eager execution available for short runs and
+debugging. Measure the first evaluation separately from warm calls: the first
+backward pass can compile additional kernels, and persistent compiler caches
+can change startup cost between processes. Check the observables and derivatives
+at the selected dtype and integration settings before using a compiled preset.
+
 ```python
 from slipstream import LinacTracker, NativeTracker
 

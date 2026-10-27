@@ -48,12 +48,14 @@ class BeamlineStudy:
     @classmethod
     def from_lattice_file(
         cls, lte_path: str | Path, root_name: str, energy_eV: float,
-        mc2_eV: float = ELECTRON_MASS_EV, wake_base_dir: str | Path = ".", **kwargs,
+        mc2_eV: float = ELECTRON_MASS_EV, wake_base_dir: str | Path = ".", *,
+        strict_import: bool = False, import_audit: list[dict[str, object]] | None = None, **kwargs,
     ) -> "BeamlineStudy":
         """``parse_elegant_lattice`` + ``resolve_wakes`` (any ``WAKEFILE=``
         paths resolved relative to ``wake_base_dir``, default the current
         directory) -- a machine's own ``.lte`` straight into a study."""
-        specs = resolve_wakes(parse_elegant_lattice(lte_path, root_name), base_dir=wake_base_dir)
+        specs = resolve_wakes(parse_elegant_lattice(lte_path, root_name, strict=strict_import, audit=import_audit),
+                              base_dir=wake_base_dir)
         return cls(specs, energy_eV, mc2_eV=mc2_eV, **kwargs)
 
     @classmethod

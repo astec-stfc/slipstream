@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -26,6 +27,20 @@ _LINE_TYPES = {"LINE"}
 _RF_TYPES = {"RFCA", "RFCW"}
 _HKICK_TYPES = {"HKICK"}
 _VKICK_TYPES = {"VKICK"}
+_DRIFT_TYPES = {"DRIFT", "CSRDRIFT"}
+_NOOP_TYPES = {"MARK", "MARKER", "WATCH", "CHARGE", "CLEAN"}
+_IMPORTED_PARAMS = {
+    **dict.fromkeys(_DRIFT_TYPES | _NOOP_TYPES, {"L"}),
+    **dict.fromkeys(_QUAD_TYPES, {"L", "K1"}),
+    **dict.fromkeys(_SEXT_TYPES, {"L", "K2"}),
+    **dict.fromkeys(_BEND_TYPES, {"L", "ANGLE", "K1", "K2", "E1", "E2", "HGAP", "FINT", "EDGE_ORDER",
+                                "EDGE1_EFFECTS", "EDGE2_EFFECTS", "CSR", "BINS", "SG_HALFWIDTH", "N_SLICES"}),
+    **dict.fromkeys(_HKICK_TYPES | _VKICK_TYPES, {"L", "KICK"}),
+    **dict.fromkeys(_RF_TYPES, {"L", "VOLT", "PHASE", "FREQ", "CHANGE_P0", "WAKEFILE", "TCOLUMN", "WZCOLUMN",
+                              "WXCOLUMN", "WYCOLUMN", "N_KICKS", "END1_FOCUS", "END2_FOCUS", "BODY_FOCUS_MODEL"}),
+    "KOCT": {"L", "K3", "DX", "DY", "TILT"},
+    "MULT": {"L", "ORDER", "KNL", "FACTOR", "DX", "DY", "TILT", "BORE", "BTIPL", "DZ", "SYNCH_RAD"},
+}
 
 
 @dataclass(frozen=True)
@@ -132,11 +147,21 @@ def _str(params: dict[str, str], key: str) -> str | None:
     return raw.strip().strip('"')
 
 
-def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementSpec]:
-    """Real per-element ring list for ``NativeTracker``, in beamline order."""
+def parse_elegant_lattice(
+    lte_path: str | Path, root_name: str, *, strict: bool = False,
+    audit: list[dict[str, object]] | None = None,
+) -> list[ElementSpec]:
+    """Expand a local lattice; reject approximations with ``strict=True``.
+
+    The default preserves legacy maps, warning about approximations. ``audit``
+    collects JSON-compatible records for each affected beamline occurrence.
+    This checks the supported syntax subset, not full elegant model parity.
+    """
     text = Path(lte_path).read_text()
     elements: dict[str, ElementSpec] = {}
     lines: dict[str, list[str]] = {}
+    issues: dict[str, dict[str, object]] = {}
+    declared: set[str] = set()
 
     for name, rest in _split_statements(text):
         name = name.upper()
@@ -152,6 +177,20 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
         body = after_type.lstrip(",")
         params = _parse_params(body)
         length = _float(params, "L")
+        declared.add(name)
+        issues.pop(name, None)
+        ignored = {key: value for key, value in params.items() if key not in _IMPORTED_PARAMS.get(etype, {"L"})}
+        reasons = []
+        if etype not in _IMPORTED_PARAMS:
+            reasons.append("unsupported element replaced by drift" if length else "unsupported zero-length element dropped")
+        if ignored:
+            reasons.append("ignored attributes: " + ", ".join(sorted(ignored)))
+        if etype in _RF_TYPES and (_str(params, "BODY_FOCUS_MODEL") or "none").lower() not in ("none", "tw1", "srs"):
+            ignored["BODY_FOCUS_MODEL"] = params["BODY_FOCUS_MODEL"]
+            reasons.append("unsupported BODY_FOCUS_MODEL replaced by none")
+        if reasons:
+            issues[name] = dict(element=name, original_type=etype, length_m=length,
+                                ignored_attributes=ignored, reason="; ".join(reasons))
         if etype in _BEND_TYPES:
             elements[name] = ElementSpec(
                 name, "bend", length, angle=_float(params, "ANGLE"), k1=_float(params, "K1"),
@@ -217,6 +256,7 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
         # else: zero-length no-op (MARK/WATCH/CHARGE/CLEAN/RF-with-no-L/etc) -- dropped.
 
     occurrence_counts: dict[str, int] = {}
+    warned: set[str] = set()
 
     def expand(name: str, _seen: frozenset[str] = frozenset()) -> list[ElementSpec]:
         if name in _seen:
@@ -227,9 +267,22 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
                 out.extend(expand(token, _seen | {name}))
             return out
         spec = elements.get(name)
+        occurrence_counts[name] = occurrence_counts.get(name, 0) + 1
+        issue = issues.get(name)
+        if name not in declared:
+            issue = dict(element=name, original_type=None, length_m=None, ignored_attributes={}, reason="unresolved line token")
+        if issue is not None:
+            record = dict(issue, occurrence=occurrence_counts[name], replacement=spec.kind if spec else "dropped")
+            if audit is not None:
+                audit.append(record)
+            message = f"{name} ({issue['original_type'] or 'undefined'}): {issue['reason']}"
+            if strict:
+                raise ValueError(message)
+            if name not in warned:
+                warnings.warn(message, UserWarning, stacklevel=2)
+                warned.add(name)
         if spec is None:
             return []
-        occurrence_counts[name] = occurrence_counts.get(name, 0) + 1
         return [replace(spec, occurrence=occurrence_counts[name])]
 
     return _apply_csrdrift_carry(expand(root_name.upper()))

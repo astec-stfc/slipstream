@@ -4,7 +4,7 @@
 
 ## Physics
 
-Converts supported elegant lattice declarations into native `ElementSpec` physics, including magnetic elements, RFCA/RFCW, H/V correctors and CSR-related settings. Unknown elements with nonzero length become drifts.
+Converts supported elegant lattice declarations into native `ElementSpec` physics, including magnetic elements, RFCA/RFCW, H/V correctors and CSR-related settings. The default preserves legacy replacements and warns; `strict=True` rejects unsupported declarations, ignored attributes and unresolved line tokens in the expanded beamline.
 
 ### Limits and conventions
 
@@ -17,10 +17,7 @@ Converts supported elegant lattice declarations into native `ElementSpec` physic
 
 Minimal, covering exactly the element/line syntax real CLARA/Diamond-II
 lattices use: `NAME: TYPE, PARAM=VAL,...;` element definitions
-(`DRIFT`, `KQUAD`/`QUAD`/`QUADRUPOLE`, `CSBEND`/`CSBEN`/`SBEND`, `KSEXT`/`SEXT`/`SEXTUPOLE`; anything else with
-a nonzero `L=` becomes a plain drift of that length -- RF/charge/watch/
-clean elements carry no transverse/longitudinal transport physics of their
-own), `NAME: LINE=(...)` with recursive line-name expansion,
+(`DRIFT`, `KQUAD`/`QUAD`/`QUADRUPOLE`, `CSBEND`/`CSBEN`/`SBEND`, `KSEXT`/`SEXT`/`SEXTUPOLE`, `KOCT`, `MULT`, RFCA/RFCW and H/V correctors). Unknown finite-length types become drifts only in permissive mode; unknown zero-length types and unresolved tokens are dropped. These are explicit approximations, not evidence that the original element has no physics. `NAME: LINE=(...)` supports recursive line-name expansion,
 `&`-continuation, `!`-comments, case-insensitivity.
 
 ### `_apply_csrdrift_carry`
@@ -41,12 +38,29 @@ ends the carry -- matches how a real `.lte` only ever places
 
 Call `parse_elegant_lattice(lte_path, root_name)` to expand recursive LINE declarations and obtain beamline-order specs with occurrence indices. Parsing is local, case-insensitive and supports comments/continuations.
 
+For a benchmark or a new machine import, use `strict=True`. To retain legacy replacements while saving an audit:
+
+```python
+import json
+from pathlib import Path
+from slipstream import parse_elegant_lattice
+
+audit = []
+specs = parse_elegant_lattice("machine.lte", "RING", audit=audit)
+Path("import_audit.json").write_text(json.dumps(audit, indent=2))
+```
+
+Each affected occurrence records the element, original type, length, ignored attribute strings, replacement and reason. Warnings are emitted once per affected declaration. Unused library definitions do not reject a strict import. `BeamlineStudy.from_lattice_file` forwards `strict_import=True` and `import_audit=audit`.
+
+Strict mode checks the implemented syntax and parameter subset. It does not certify equivalence to elegant's element models, collective settings, numerical integrator, apertures or diagnostic definitions. In particular, QUAD still uses the native kick model, and CSRDRIFT retains the documented steady-state approximation. Native integration settings are chosen by the tracker rather than imported from ignored elegant attributes.
+
 ### API reference
 
 ```python
 class ElementSpec:
     ...
-def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementSpec]: ...
+def parse_elegant_lattice(lte_path: str | Path, root_name: str, *,
+                         strict: bool = False, audit: list[dict[str, object]] | None = None) -> list[ElementSpec]: ...
 ```
 
 ### `ElementSpec`
