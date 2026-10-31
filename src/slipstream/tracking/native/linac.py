@@ -16,6 +16,8 @@ from ...wakefields.transverse import TransverseWake
 from .collective import (
     _lsc_csr_delta_kicks,
     csr_steady_state_delta_kick,
+    csr_drift_delta_kick_fast,
+    csr_drift_delta_kick_retarded,
     csr_steady_state_delta_kick_fast,
     lsc_delta_kick,
     lsc_delta_kick_fast,
@@ -51,6 +53,7 @@ def _apply_collective_kick(
     pipe_radius_b_m: float | None, lsc_radius_factor: float,
     csr_softening_m: float | None, compile_collective_chunks: bool = False,
     fast_collective_effects: bool = False, csr_bins: int = 256, csr_sg_halfwidth: int = 1,
+    csr_slippage_m: float | None = None,
 ) -> torch.Tensor:
     """Compute apply collective kick; see the module documentation for details."""
     delta = particles6[..., 5]
@@ -86,7 +89,7 @@ def _apply_collective_kick(
         if fast_collective_effects:
             csr_kick = csr_steady_state_delta_kick_fast(
                 particles6[..., 4], charge_per_particle_C, csr_rho_m, energy_eV, eff_length_m, softening_m=csr_softening_m,
-                n_bins=csr_bins, sg_halfwidth=csr_sg_halfwidth,
+                n_bins=csr_bins, sg_halfwidth=csr_sg_halfwidth, slippage_m=csr_slippage_m,
             )
         else:
             csr_kick = csr_steady_state_delta_kick(
@@ -108,8 +111,11 @@ def _maybe_collective_kick(
     if not lsc and not csr_active:
         return particles6
     csr_drift_start_m = None
+    csr_slippage_m = None
     if p.csr:
         csr_rho_m, csr_length_m = (p.length / p.angle if p.angle != 0.0 else 0.0), p.length
+        if p.csr_transient and fast_collective_effects and p.angle != 0.0:
+            csr_slippage_m = abs(csr_rho_m) * p.csr_phi_end ** 3 / 24.0  # Saldin et al.: rho phi^3 / 24
     elif p.csr_drift_rho_m is not None:
         csr_rho_m, csr_length_m, csr_drift_start_m = p.csr_drift_rho_m, p.length, p.csr_drift_start_m
     else:
@@ -118,8 +124,56 @@ def _maybe_collective_kick(
         particles6, energy_eV, mc2_eV, charge_per_particle_C, p.length,
         lsc, csr_active, csr_rho_m, csr_length_m, csr_drift_start_m,
         pipe_radius_b_m, lsc_radius_factor, csr_softening_m,
-        compile_collective_chunks, fast_collective_effects, p.csr_bins, p.csr_sg_halfwidth,
+        compile_collective_chunks, fast_collective_effects, p.csr_bins, p.csr_sg_halfwidth, csr_slippage_m,
     )
+
+
+def _track_csr_drift_stupakov(
+    particles6: torch.Tensor, p: _ElementParams, energy_eV: torch.Tensor, mc2_eV: torch.Tensor,
+    charge_per_particle_C: torch.Tensor | float, lsc: bool,
+    pipe_radius_b_m: float | None, lsc_radius_factor: float, csr_softening_m: float | None,
+    compile_collective_chunks: bool, fast_collective_effects: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """A CSR drift in kicks of ``csr_drift_dz``: half a step of drift, then a Stupakov-model kick at the centre of every step
+    (the wake is evaluated for the distribution as it stands there), whole steps in between, half a step at the end."""
+    if p.csr_stupakov == "retarded":
+        # the retarded kernel is smooth in the distance behind the bend, so the steps grow with it: short close to the exit, where the
+        # wake changes fastest, and up to ten times ``csr_drift_dz`` far from it
+        steps, z = [], p.csr_drift_start_m
+        end = p.csr_drift_start_m + p.length
+        while end - z > 1e-12:
+            h = min(max(0.2 * (z + p.csr_drift_dz), 0.5 * p.csr_drift_dz), 10.0 * p.csr_drift_dz, end - z)
+            if end - (z + h) < 0.5 * h:
+                h = end - z
+            steps.append(h)
+            z += h
+    else:
+        n = max(1, int(p.length / p.csr_drift_dz + 0.5))
+        steps = [p.length / n] * n
+    z_travel = p.csr_drift_start_m
+    particles6, energy_eV = _apply_one_element(particles6, p._replace(length=0.5 * steps[0]), energy_eV, mc2_eV, charge_per_particle_C)
+    for k, step in enumerate(steps):
+        center = z_travel + 0.5 * step
+        if p.csr_stupakov == "retarded":
+            kick = csr_drift_delta_kick_retarded(
+                particles6[..., 4], charge_per_particle_C, p.csr_drift_rho_m, p.csr_drift_phi_m, center, step, energy_eV,
+                mc2_eV=float(mc2_eV), n_bins=p.csr_bins, sg_halfwidth=p.csr_sg_halfwidth,
+            )
+        else:
+            kick = csr_drift_delta_kick_fast(
+                particles6[..., 4], charge_per_particle_C, p.csr_drift_rho_m, p.csr_drift_phi_m, center, step, energy_eV,
+                n_bins=p.csr_bins, sg_halfwidth=p.csr_sg_halfwidth,
+            )
+        particles6 = torch.cat([particles6[..., :5], (particles6[..., 5] + kick).unsqueeze(-1)], dim=-1)
+        z_travel += step
+        run = 0.5 * step + (0.5 * steps[k + 1] if k + 1 < len(steps) else 0.0)
+        particles6, energy_eV = _apply_one_element(particles6, p._replace(length=run), energy_eV, mc2_eV, charge_per_particle_C)
+    if lsc:
+        particles6 = _maybe_collective_kick(
+            particles6, p, energy_eV, mc2_eV, charge_per_particle_C, lsc, False,
+            pipe_radius_b_m, lsc_radius_factor, csr_softening_m, compile_collective_chunks, fast_collective_effects,
+        )
+    return particles6, energy_eV
 
 
 def _track_dipole_subcycled(
@@ -183,6 +237,11 @@ def _track_one_element(
             particles6, p, energy_eV, mc2_eV, charge_per_particle_C, lsc, csr,
             pipe_radius_b_m, lsc_radius_factor, csr_softening_m,
             compile_collective_chunks, fast_collective_effects,
+        )
+    elif p.csr_stupakov and csr and p.csr_drift_rho_m is not None and fast_collective_effects:
+        particles6, energy_eV = _track_csr_drift_stupakov(
+            particles6, p, energy_eV, mc2_eV, charge_per_particle_C, lsc, pipe_radius_b_m, lsc_radius_factor,
+            csr_softening_m, compile_collective_chunks, fast_collective_effects,
         )
     elif p.csr_substeps and csr:
         # Keep the reference momentum fixed inside a magnet. Apply physical edge maps only at the two external faces.
@@ -254,6 +313,8 @@ class LinacTracker:
         compile_collective_chunks: bool | None = None,
         fast_collective_effects: bool = False,
         dipole_collective_subcycle: bool = False,
+        csr_transient: bool = False,
+        csr_drift_model: str = "overtaking",
         generator: torch.Generator | None = None,
     ):
         radiating = any(s.synch_rad or s.isr for s in specs)
@@ -334,7 +395,26 @@ class LinacTracker:
                     slices, n_kicks, max(1, math.ceil(n_kicks_bend / count)), energy_eV, mc2_eV, self.device, dtype,
                     integration_order=integration_order,
                 )
+                if csr_transient:  # the slippage length of each slice follows from the angle accumulated up to its end
+                    substeps = [sp._replace(csr_transient=True, csr_phi_end=abs(spec.angle) * (j + 1) / count)
+                                for j, sp in enumerate(substeps)]
                 self._element_params[i] = self._element_params[i]._replace(csr_substeps=tuple(substeps))
+        if csr_drift_model not in ("overtaking", "stupakov", "retarded"):
+            raise ValueError("csr_drift_model must be 'overtaking' (steady state cut at the overtaking length), 'stupakov' (the "
+                             "closed-form model of elegant's CSRDRIFT) or 'retarded' (the 1D retarded field, no kernel approximation)")
+        if csr_drift_model != "overtaking":
+            if not (csr and fast_collective_effects):
+                raise ValueError("csr_drift_model other than 'overtaking' needs csr=True and fast_collective_effects=True")
+            for i in range(len(self._element_params)):
+                q = self._element_params[i]
+                if q.csr_drift_rho_m is not None and q.csr_drift_phi_m > 0 and q.length > 0:
+                    self._element_params[i] = q._replace(csr_stupakov=csr_drift_model)
+        if csr_transient:
+            if not (csr and fast_collective_effects):
+                raise ValueError("csr_transient needs csr=True and fast_collective_effects=True (the pairwise kernel is steady-state)")
+            for i, spec in enumerate(effective_specs):
+                if spec.csr and spec.angle != 0 and not self._element_params[i].csr_substeps:
+                    self._element_params[i] = self._element_params[i]._replace(csr_transient=True, csr_phi_end=abs(spec.angle))
         for p in self._element_params:
             if p.wake is not None:
                 p.wake.prepare(dtype, self.device)

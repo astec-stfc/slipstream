@@ -45,6 +45,10 @@ Projected and dispersion-regressed emittances need not have equal growth.
 
 ## Usage
 
+`bend_radiation_rates(energy_eV, curvature_m_inv)` supplies the on-momentum
+mean relative loss and quantum variance per metre, shared with
+[differentiable linear covariance transport](../../analysis/beamline_radiation.md).
+
 ```python
 tracker = LinacTracker(
     specs, energy_eV=500e9, device="cpu", dtype=torch.float64,

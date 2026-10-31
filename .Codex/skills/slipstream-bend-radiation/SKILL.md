@@ -11,3 +11,8 @@ Preserve flag-off behavior and canonical momentum conventions. Radiation
 lengths must be positive, independent of magnetic Yoshida weights. Never
 silently ignore enabled flags or double count ring-average radiation.
 Report measured evidence and the actual device/dtype/reference contract.
+
+For smooth AD optimisation of expected beam moments, use the separate
+`analysis.beamline_radiation.linear_radiation_transport` model described
+in [the model](references/model.md). Its gradients are not stochastic
+particle-tracker parameter gradients.

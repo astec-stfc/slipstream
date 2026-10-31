@@ -22,3 +22,16 @@ Zero bunch charge does not disable radiation. Changing references,
 combined-function and misaligned bends, compilation and other masses are
 unsupported. Photon tails/opening angles, quadrupole radiation, CUDA,
 float32, gradients and collective combinations have no validated claim.
+
+The separate `analysis.beamline_radiation` API implements CPU float64
+expected linear covariance with differentiable magnet lengths, curvature,
+strengths, faces and input covariance. It reuses the on-momentum rates,
+integrates quantum diffusion by Van Loan's block exponential, and composes
+maps/noise by a batched associative prefix scan. See
+`docs/modules/analysis/beamline_radiation.md`. It fixes reference energy
+and omits classical damping and nonlinear/chromatic transport. Its AD
+gradient is an expected-moment gradient, not a sampled particle gradient.
+Periodic-cell entrance optics may be differentiated through the cell map;
+only stable solutions are physical. Validate resulting designs with native
+particles including mean loss. [Van Loan (1978)](https://doi.org/10.1109/TAC.1978.1101743)
+is the independent covariance-integral reference.

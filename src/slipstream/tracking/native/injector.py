@@ -245,11 +245,12 @@ class Injector:
         dip = nml.get("dipole", {})
         if newrun.get("qbunch"):
             ignored.append("Qbunch rescaling (charge taken from the distribution file)")
-        # Solenoid/quadrupole x-plane offsets and rotations are placements (magnets.placement); everything
-        # else -- vertical offsets/tilts, and any cavity misalignment -- is not modelled.
+        # Solenoid x and y offsets and rotations and quadrupole x-plane offsets and rotations are placements
+        # (magnets.placement); everything else -- vertical quadrupole offsets/tilts, and any cavity misalignment --
+        # is not modelled.
         for grp, prefix, placeable in ((cav, "c_", False), (sol, "s_", True), (quad, "q_", True)):
             for suffix in ("xoff", "yoff", "xrot", "yrot", "zrot"):
-                if placeable and suffix in ("xoff", "xrot"):
+                if placeable and (suffix in ("xoff", "xrot") or (prefix == "s_" and suffix in ("yoff", "yrot"))):
                     continue
                 if any(grp.get(prefix + suffix, {}).values()):
                     ignored.append(f"{prefix.upper()}{suffix} (element misalignment)")
@@ -365,6 +366,8 @@ class Injector:
                 b_max_T=float(sol["maxb"][i]),
                 x_m=float(sol.get("s_xoff", {}).get(i, 0.0)),
                 xrot_rad=float(sol.get("s_xrot", {}).get(i, 0.0)),
+                y_m=float(sol.get("s_yoff", {}).get(i, 0.0)),
+                yrot_rad=float(sol.get("s_yrot", {}).get(i, 0.0)),
             )
             for i in sorted(sol.get("file_bfield", {}))
         ] if sol.get("lbfield", True) else []

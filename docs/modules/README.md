@@ -17,6 +17,7 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 
 ## analysis
 
+- [beamline_radiation](analysis/beamline_radiation.md): Differentiates linear expected ISR covariance through magnet strengths, lengths, faces and bend angles.
 - [emittance](analysis/emittance.md): RMS helpers combine unbiased position/momentum variances with the mean cross product.
 - [loco](analysis/loco.md): Differentiates closed-orbit BPM readings with respect to corrector kick angles.
 - [nonlinear](analysis/nonlinear.md): Computes fixed-energy ring closed orbits, Jacobian optics, chromaticity, NAFF frequencies, amplitude detuning, dynamic aperture and frequency-map diffusion.

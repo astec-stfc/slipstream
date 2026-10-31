@@ -88,6 +88,10 @@ class ElementSpec:
     csr_bins: int = 256
     csr_sg_halfwidth: int = 1
     csr_n_slices: int = 1
+    csr_drift_phi_m: float = 0.0
+    """``CSRDRIFT`` carry: absolute bend angle (rad) of the last CSR dipole, for the Stupakov drift model."""
+    csr_drift_dz: float = 0.01
+    """``CSRDRIFT`` carry: length (m) of one CSR kick in the Stupakov drift model (elegant's ``DZ``)."""
     k3: float = 0.0
     multipoles: tuple[tuple[int, float], ...] = ()
     skew_multipoles: tuple[tuple[int, float], ...] = ()
@@ -296,19 +300,21 @@ def _apply_csrdrift_carry(elements: list[ElementSpec]) -> list[ElementSpec]:
     """Real elegant's ``CSRDRIFT`` -- see ``ElementSpec``'s own docstring for the model."""
     out = []
     pending_rho_m = 0.0
+    pending_phi_m = 0.0
     distance_m = 0.0
     carrying = False
     csr_bins, csr_sg_halfwidth = 256, 1
     for spec in elements:
         if spec.kind == "bend" and spec.csr and spec.angle != 0.0:
             pending_rho_m = spec.length / spec.angle
+            pending_phi_m = abs(spec.angle)
             csr_bins, csr_sg_halfwidth = spec.csr_bins, spec.csr_sg_halfwidth
             distance_m = 0.0
             carrying = True
             out.append(spec)
         elif spec.kind == "drift" and carrying:
             out.append(replace(spec, csr_drift_rho_m=pending_rho_m, csr_drift_start_m=distance_m,
-                               csr_bins=csr_bins, csr_sg_halfwidth=csr_sg_halfwidth))
+                               csr_drift_phi_m=pending_phi_m, csr_bins=csr_bins, csr_sg_halfwidth=csr_sg_halfwidth))
             distance_m += spec.length
         else:
             carrying = False

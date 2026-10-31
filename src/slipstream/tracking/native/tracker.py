@@ -86,6 +86,14 @@ class _ElementParams(NamedTuple):
     csr_bins: int = 256
     csr_sg_halfwidth: int = 1
     csr_substeps: tuple = ()
+    csr_drift_phi_m: float = 0.0
+    csr_drift_dz: float = 0.01
+    csr_stupakov: str = ""
+    """``LinacTracker(csr_drift_model=...)`` when ``"stupakov"`` or ``"retarded"``: this CSR drift is tracked in ``csr_drift_dz`` kicks with that kernel."""
+    csr_transient: bool = False
+    """``LinacTracker(csr_transient=True)``: this element's CSR kick uses the entrance-transient model (fast kernel only)."""
+    csr_phi_end: float = 0.0
+    """Bend angle accumulated from the entrance of the dipole to the end of this slice (rad), for the slippage length."""
     exact_dipole: bool = False
     k3: float = 0.0
     multipoles: tuple = ()
@@ -154,6 +162,7 @@ def _build_params(
             edge1_effects=s.edge1_effects, edge2_effects=s.edge2_effects,
             csr_bins=s.csr_bins, csr_sg_halfwidth=s.csr_sg_halfwidth,
             csr_drift_rho_m=s.csr_drift_rho_m, csr_drift_start_m=s.csr_drift_start_m,
+            csr_drift_phi_m=s.csr_drift_phi_m, csr_drift_dz=s.csr_drift_dz,
             exact_dipole=exact_dipole,
             k3=s.k3, multipoles=s.multipoles, skew_multipoles=s.skew_multipoles,
             integrated_multipoles=s.integrated_multipoles,

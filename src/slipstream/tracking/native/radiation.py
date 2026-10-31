@@ -11,6 +11,14 @@ from ...constants import ELECTRON_MASS_EV, R_E_M
 _LAMBDA_BAR_M = 3.8615926796e-13
 
 
+def bend_radiation_rates(energy_eV, curvature_m_inv):
+    """On-momentum mean relative loss and quantum variance per metre."""
+    gamma = energy_eV / ELECTRON_MASS_EV
+    loss = (2 / 3) * R_E_M * gamma**3 * curvature_m_inv**2
+    variance = (55 / (24 * math.sqrt(3))) * R_E_M * _LAMBDA_BAR_M * gamma**5 * abs(curvature_m_inv)**3
+    return loss, variance
+
+
 def bend_radiation_kick(
     state: torch.Tensor, energy_eV: torch.Tensor, curvature_m_inv: float,
     length_m: float, *, synch_rad: bool, isr: bool,
@@ -25,15 +33,15 @@ def bend_radiation_kick(
         raise ValueError("Radiation length must be nonnegative")
     if length_m == 0 or curvature_m_inv == 0 or not (synch_rad or isr):
         return state
-    gamma = energy_eV / ELECTRON_MASS_EV
+    loss_rate, variance_rate = bend_radiation_rates(energy_eV, curvature_m_inv)
     opd = 1 + state[..., 5]
     pz = torch.sqrt(opd**2 - state[..., 1]**2 - state[..., 3]**2)
     ds = length_m * (1 + curvature_m_inv * state[..., 0]) * opd / pz
     kick = torch.zeros_like(opd)
     if synch_rad:
-        kick = kick - (2 / 3) * R_E_M * gamma**3 * curvature_m_inv**2 * opd**2 * ds
+        kick = kick - loss_rate * opd**2 * ds
     if isr:
-        variance = (55 / (24 * math.sqrt(3))) * R_E_M * _LAMBDA_BAR_M * gamma**5 * abs(curvature_m_inv)**3 * ds
+        variance = variance_rate * ds
         kick = kick + opd**2 * torch.sqrt(variance) * torch.randn(
             opd.shape, dtype=state.dtype, device=state.device, generator=generator,
         )
