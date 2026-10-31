@@ -105,17 +105,22 @@ class _ElementParams(NamedTuple):
     """The corrector's own strength (``ElementSpec.kick_x``/``kick_y``,
     whichever ``kick_plane`` selects) -- ``RingMap.with_strengths``'s
     occurrence-safe override target."""
+    synch_rad: bool = False
+    isr: bool = False
+    radiation_substeps: tuple = ()
 
 
 def _build_params(
     specs: list[ElementSpec], n_kicks: int, n_kicks_bend: int,
     energy_eV: float, mc2_eV: float, device: torch.device, dtype: torch.dtype,
     integration_order: int = 4, rf_mode: str = "lumped", change_p0_override: bool | None = None,
-    exact_dipole: bool = False,
+    exact_dipole: bool = False, allow_local_radiation: bool = False,
 ) -> list[_ElementParams]:
     """Compute build params; see the module documentation for details."""
     out = []
     for s in specs:
+        if (s.synch_rad or s.isr) and not allow_local_radiation:
+            raise NotImplementedError("Local bend radiation requires LinacTracker; ring radiation accounting is separate")
         if s.kind == "rf" and rf_mode == "per_element":
             change_p0 = s.change_p0 if change_p0_override is None else change_p0_override
             out.append(_ElementParams(
@@ -152,6 +157,7 @@ def _build_params(
             exact_dipole=exact_dipole,
             k3=s.k3, multipoles=s.multipoles, skew_multipoles=s.skew_multipoles,
             integrated_multipoles=s.integrated_multipoles,
+            synch_rad=s.synch_rad, isr=s.isr,
         ))
     return out
 

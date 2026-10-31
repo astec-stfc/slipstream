@@ -23,6 +23,7 @@ from .collective import (
 from .elements import _match_energy_to_centroid, _rebase_reference, reference_offset, track_element
 from .errors import FiducialReference, SampledError, apply_errors
 from .lattice_import import ElementSpec
+from .radiation import bend_radiation_kick
 from .tracker import _ElementParams, _apply_one_element, _build_params
 
 
@@ -159,10 +160,24 @@ def _track_one_element(
     csr_softening_m: float | None, compile_rf_sub_kicks: bool = False,
     compile_collective_chunks: bool = False, fast_collective_effects: bool = False,
     dipole_collective_subcycle: bool = False,
+    radiation_generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """One element's worth of work -- transport, then (if active) the collective kick, then (if
     ``always_change_p0``) recentering."""
-    if (dipole_collective_subcycle and p.angle != 0 and p.n_kicks > 1
+    if p.radiation_substeps:
+        for before, after in p.radiation_substeps:
+            particles6, energy_eV = _apply_one_element(particles6, before, energy_eV, mc2_eV)
+            particles6 = bend_radiation_kick(
+                particles6, energy_eV, p.angle / p.length, 2 * before.length,
+                synch_rad=p.synch_rad, isr=p.isr, generator=radiation_generator,
+            )
+            particles6, energy_eV = _apply_one_element(particles6, after, energy_eV, mc2_eV)
+        particles6 = _maybe_collective_kick(
+            particles6, p, energy_eV, mc2_eV, charge_per_particle_C, lsc, csr,
+            pipe_radius_b_m, lsc_radius_factor, csr_softening_m, compile_collective_chunks,
+            fast_collective_effects,
+        )
+    elif (dipole_collective_subcycle and p.angle != 0 and p.n_kicks > 1
             and (lsc or (csr and p.csr)) and p.dx == p.dy == p.tilt == 0):
         particles6 = _track_dipole_subcycled(
             particles6, p, energy_eV, mc2_eV, charge_per_particle_C, lsc, csr,
@@ -239,7 +254,15 @@ class LinacTracker:
         compile_collective_chunks: bool | None = None,
         fast_collective_effects: bool = False,
         dipole_collective_subcycle: bool = False,
+        generator: torch.Generator | None = None,
     ):
+        radiating = any(s.synch_rad or s.isr for s in specs)
+        if radiating:
+            if (compile or always_change_p0 or mc2_eV != ELECTRON_MASS_EV
+                    or any(s.kind == "rf" and s.change_p0 for s in specs)):
+                raise NotImplementedError("Local radiation requires eager LinacTracker, electron mass and always_change_p0=False")
+            if energy_eV / mc2_eV < 1000 or n_kicks_bend < 1:
+                raise ValueError("Local radiation requires gamma >= 1000 and positive n_kicks_bend")
         self.specs = specs  # the original, unperturbed list -- see fiducialize()
         self.mc2_eV = mc2_eV
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -272,7 +295,28 @@ class LinacTracker:
             effective_specs, n_kicks, n_kicks_bend, energy_eV, mc2_eV, self.device, dtype,
             integration_order=integration_order, rf_mode="per_element",
             change_p0_override=False if always_change_p0 else None,
+            allow_local_radiation=True,
         )
+        for i, spec in enumerate(effective_specs):
+            if not (spec.synch_rad or spec.isr):
+                continue
+            if (spec.kind != "bend" or spec.length <= 0 or spec.k1 or spec.k2 or spec.k3
+                    or spec.multipoles or spec.skew_multipoles or spec.integrated_multipoles
+                    or spec.dx or spec.dy or spec.tilt):
+                raise NotImplementedError("Local radiation currently supports aligned, positive-length pure dipoles")
+            if spec.angle == 0:
+                continue
+            halves = [replace(
+                spec, length=spec.length / (2 * n_kicks_bend), angle=spec.angle / (2 * n_kicks_bend),
+                edge1_effects=spec.edge1_effects if j == 0 else 0,
+                edge2_effects=spec.edge2_effects if j == 2 * n_kicks_bend - 1 else 0,
+                synch_rad=False, isr=False,
+            ) for j in range(2 * n_kicks_bend)]
+            maps = _build_params(halves, 1, 1, energy_eV, mc2_eV, self.device, dtype,
+                                 integration_order=integration_order)
+            self._element_params[i] = self._element_params[i]._replace(
+                radiation_substeps=tuple(zip(maps[::2], maps[1::2])),
+            )
         # Keep the substep shape stable when an injector/source supplies
         # charge after construction. Zero charge gives zero collective kick.
         if csr and fast_collective_effects:
@@ -306,12 +350,14 @@ class LinacTracker:
             _track_one_element, compile_collective_chunks=collective_chunks,
             fast_collective_effects=fast_collective_effects,
             dipole_collective_subcycle=dipole_collective_subcycle,
+            radiation_generator=generator,
         )
         self._step_fn = torch.compile(_step_base, mode=compile_mode) if compile else _step_base
         self._rf_step_fn = functools.partial(
             _track_one_element, compile_rf_sub_kicks=compile, compile_collective_chunks=collective_chunks,
             fast_collective_effects=fast_collective_effects,
             dipole_collective_subcycle=dipole_collective_subcycle,
+            radiation_generator=generator,
         )
         self._track_single_pass = functools.partial(
             _track_single_pass, step_fn=self._step_fn, rf_step_fn=self._rf_step_fn,
@@ -333,7 +379,10 @@ class LinacTracker:
                     p.n_kicks, p.integration_order, p.hgap, p.fint, p.edge_order,
                     p.edge1_effects, p.edge2_effects, p.exact_dipole,
                 ).to(device=self.device, dtype=self.dtype).clone()
-                return p._replace(offset=offset, csr_substeps=tuple(refresh(sub) for sub in p.csr_substeps))
+                return p._replace(
+                    offset=offset, csr_substeps=tuple(refresh(sub) for sub in p.csr_substeps),
+                    radiation_substeps=tuple((refresh(a), refresh(b)) for a, b in p.radiation_substeps),
+                )
 
             self._element_params = [refresh(p) for p in self._element_params]
             self._reference_energy_eV = energy_eV
@@ -347,6 +396,8 @@ class LinacTracker:
         self._charge_per_particle_C.fill_(self.bunch_charge_C / particles6.shape[0])
         csr_active = self.csr and self.bunch_charge_C != 0.0
         if reference_energy_eV is not None:
+            if any(p.synch_rad or p.isr for p in self._element_params):
+                raise NotImplementedError("Local radiation currently requires a fixed reference energy")
             return self._track_design_reference(particles6, reference_energy_eV)
         if not return_trajectory:
             return self._track_single_pass(

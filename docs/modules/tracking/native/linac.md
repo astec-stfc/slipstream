@@ -6,6 +6,9 @@
 
 Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, local LSC and CSR. By default the reference momentum follows the bunch centroid after elements. Ring equilibrium damping, excitation and IBS are not applied.
 
+Opt-in [local dipole radiation](radiation.md) adds classical loss and Gaussian
+ISR for aligned pure dipoles with a fixed reference (`always_change_p0=False`).
+
 ### Limits and conventions
 
 - CSR requires CSR-enabled specs; `lsc=True` acts in finite-length elements.
@@ -33,9 +36,8 @@ genuinely different physics regime, not a special case of a ring with
   pass, and forcing a ring-only `Lattice` onto a linac section is a real
   correctness hazard (`Vrf_V=0` makes `Lattice.phi_s` raise
   `ZeroDivisionError`). `LinacTracker` needs no `Lattice` at all.
-- Deferred, documented gaps (real CLARA `.lte`/`.ele` survey): CSR (see
-  ````), incoherent SR, RF-focusing, transverse
-  deflecting cavities.
+- Local dipole ISR is available within the limits in [radiation](radiation.md).
+  Transverse deflecting cavities remain unsupported.
 
 Section "joining" (CLARA's own multi-`.lte`, bunch-dump-chained
 convention) needs no new mechanism: track through one section's `specs`,
@@ -240,7 +242,7 @@ RF phase reference this tracker measures against, generalized from
 own `phase_rad` gets an additional `-omega_rf*t_ref_s` term (that
 element's own `omega_rf`) before `_build_params` sees it.
 
-Per-bend incoherent radiation is not modeled. CSR and the supported RF
+Per-bend incoherent radiation is opt-in for the [bounded pure-dipole model](radiation.md). CSR and the supported RF
 focusing branches are optional local element effects.
 
 `bunch_charge_C` (default `0.0`) is this pass's single-bunch

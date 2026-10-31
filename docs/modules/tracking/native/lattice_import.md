@@ -4,6 +4,10 @@
 
 ## Physics
 
+`SYNCH_RAD` and `ISR` bend flags are imported for fixed-reference
+`LinacTracker` use; see [local radiation](radiation.md). Ring trackers reject
+these flags until local versus ring-average radiation is explicitly resolved.
+
 Converts supported elegant lattice declarations into native `ElementSpec` physics, including magnetic elements, RFCA/RFCW, H/V correctors and CSR-related settings. The default preserves legacy replacements and warns; `strict=True` rejects unsupported declarations, ignored attributes and unresolved line tokens in the expanded beamline.
 
 ### Limits and conventions

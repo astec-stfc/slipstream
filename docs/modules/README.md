@@ -74,6 +74,7 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 - [laura_import](tracking/native/laura_import.md): Maps LAURA section records into the native element specification used for linac transport.
 - [laura_injector](tracking/native/laura_injector.md): Constructs field-map injector elements from chained LAURA sections.
 - [linac](tracking/native/linac.md): Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, local LSC and CSR.
+- [radiation](tracking/native/radiation.md): Opt-in classical dipole loss and Gaussian ISR in fixed-reference single-pass electron tracking.
 - [linac_setup](tracking/native/linac_setup.md): Crest calibration maximizes reference-particle energy gain through the upstream line and selected cavity using a phase scan and parabolic refinement.
 - [linac_twiss](tracking/native/linac_twiss.md): Propagates nonperiodic linear Twiss/dispersion or extracts ensemble statistics from tracked trajectories.
 - [magnets](tracking/native/magnets.md): Evaluates lab-frame static dipole, solenoid and quadrupole fields, including element offsets/rotations.

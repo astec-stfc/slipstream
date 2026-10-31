@@ -58,7 +58,7 @@ and excludes it from the remaining kicks.
 
 Magnetic time of flight uses the live relativistic particle velocity:
 `tau += arc_length/beta - ds/beta0`. Magnetic transport alone has no
-per-bend radiation loss or excitation. RF and collective effects update
+per-bend radiation loss or excitation. Opt-in [local dipole radiation](modules/tracking/native/radiation.md), RF and collective effects update
 momentum through their separate element/tracker paths.
 
 Entrance/exit edges support enabled/disabled faces and first-order or Brown

@@ -34,7 +34,8 @@ _IMPORTED_PARAMS = {
     **dict.fromkeys(_QUAD_TYPES, {"L", "K1"}),
     **dict.fromkeys(_SEXT_TYPES, {"L", "K2"}),
     **dict.fromkeys(_BEND_TYPES, {"L", "ANGLE", "K1", "K2", "E1", "E2", "HGAP", "FINT", "EDGE_ORDER",
-                                "EDGE1_EFFECTS", "EDGE2_EFFECTS", "CSR", "BINS", "SG_HALFWIDTH", "N_SLICES"}),
+                                "EDGE1_EFFECTS", "EDGE2_EFFECTS", "CSR", "BINS", "SG_HALFWIDTH", "N_SLICES",
+                                "SYNCH_RAD", "ISR"}),
     **dict.fromkeys(_HKICK_TYPES | _VKICK_TYPES, {"L", "KICK"}),
     **dict.fromkeys(_RF_TYPES, {"L", "VOLT", "PHASE", "FREQ", "CHANGE_P0", "WAKEFILE", "TCOLUMN", "WZCOLUMN",
                               "WXCOLUMN", "WYCOLUMN", "N_KICKS", "END1_FOCUS", "END2_FOCUS", "BODY_FOCUS_MODEL"}),
@@ -100,6 +101,8 @@ class ElementSpec:
     differentiable exactly at its nominal zero-kick operating point)."""
     kick_y: float = 0.0
     """``kind="vkick"`` only, elegant's ``VKICK``'s own ``KICK=``."""
+    synch_rad: bool = False
+    isr: bool = False
 
 
 def _split_statements(text: str) -> list[tuple[str, str]]:
@@ -203,6 +206,7 @@ def parse_elegant_lattice(
                 csr_bins=max(3, int(_float(params, "BINS", 256))),
                 csr_sg_halfwidth=int(_float(params, "SG_HALFWIDTH", 0)),
                 csr_n_slices=max(1, int(_float(params, "N_SLICES", 4))),
+                synch_rad=bool(_float(params, "SYNCH_RAD")), isr=bool(_float(params, "ISR")),
             )
         elif etype in _QUAD_TYPES:
             elements[name] = ElementSpec(name, "quad", length, k1=_float(params, "K1"))

@@ -75,6 +75,11 @@ Set `return_trajectory=True` to also receive the state and reference-energy
 profiles at every element boundary. LSC and CSR are opt-in through the
 tracker constructor.
 
+Aligned pure-dipole synchrotron loss and ISR are opt-in through bend spec
+flags (including imported `SYNCH_RAD`/`ISR`). This bounded model requires
+eager electron tracking with `always_change_p0=False`; see the
+[local radiation reference](modules/tracking/native/radiation.md).
+
 ## Injector usage
 
 Build an injector from an ASTRA deck, then track its distribution:
