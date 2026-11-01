@@ -17,14 +17,20 @@ Build `BeamlineStudy(specs, energy_eV, ...)` or use `from_lattice_file`/`from_ya
 
 `from_lattice_file(..., strict_import=True)` rejects unsupported import approximations. In permissive mode, pass `import_audit=[]` to collect JSON-compatible occurrence records; warnings identify affected declarations. See [the importer](tracking/native/lattice_import.md) for the supported subset and remaining model differences. This policy is independent of YAML schema validation.
 
+Wake paths default to the lattice directory in both file constructors.
+Pass `wake_base_dir="."` to `from_lattice_file` for working-directory paths.
+`from_yaml(path, overrides={"tracker.csr_transient": True, ...})` applies
+validated dotted-key settings before building a new tracker. See
+[model settings](../model_settings.md) for compatible choices.
+
 ### API reference
 
 ```python
 class BeamlineStudy:
     ...
     def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, *, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, bunch_charge_C: float=0.0, compile: bool=False, compile_mode: str | None=None, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, fast_collective_effects: bool=False, n_slices: int=50, **tracker_kwargs): ...
-    def from_lattice_file(cls, lte_path: str | Path, root_name: str, energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, wake_base_dir: str | Path='.', *, strict_import: bool=False, import_audit: list[dict[str, object]] | None=None, **kwargs) -> 'BeamlineStudy': ...
-    def from_yaml(cls, path: str | Path) -> 'BeamlineStudy': ...
+    def from_lattice_file(cls, lte_path: str | Path, root_name: str, energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, wake_base_dir: str | Path | None=None, *, strict_import: bool=False, import_audit: list[dict[str, object]] | None=None, **kwargs) -> 'BeamlineStudy': ...
+    def from_yaml(cls, path: str | Path, *, overrides: dict[str, object] | None=None) -> 'BeamlineStudy': ...
     def run(self, output_path: str | Path | None=None) -> BeamlineResult: ...
     def generate_bunch(self, n: int, beta_x0: float, alpha_x0: float, epsx_m: float, beta_y0: float, alpha_y0: float, epsy_m: float, sigma_tau_m: float, sigma_delta: float, Dx0: float=0.0, Dpx0: float=0.0, Dy0: float=0.0, Dpy0: float=0.0, chirp_per_m: float=0.0, seed: int | None=None) -> torch.Tensor: ...
     def track(self, particles6: torch.Tensor, return_trajectory: bool=False, reference: dict[str, float] | None=None, metadata: dict | None=None) -> BeamlineResult: ...
@@ -52,6 +58,8 @@ Build one reusable tracker from a strict YAML run configuration.
 Paths are relative to the YAML file; lattice wake paths default to
 the lattice directory. See `docs/beamline_studies.md` for the schema.
 Particle sources are loaded when `run` is called.
+Overrides use dotted keys and Python values, such as
+`{"tracker.device": "cpu", "bunch.n": 128}`. They do not edit the YAML.
 
 ### `BeamlineStudy.run`
 

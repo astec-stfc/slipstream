@@ -185,7 +185,7 @@ Construct `LinacTracker(specs, energy_eV, ..., bunch_charge_C=...)` and call `tr
 def resolve_wakes(specs: list[ElementSpec], base_dir: str | Path='.') -> list[ElementSpec]: ...
 class LinacTracker:
     ...
-    def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, n_kicks: int=1, n_kicks_bend: int=4, integration_order: int=4, compile: bool=False, compile_mode: str | None=None, always_change_p0: bool=True, errors: list[SampledError] | None=None, fiducial: FiducialReference | None=None, bunch_charge_C: float=0.0, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, lsc_radius_factor: float=1.7, csr_softening_m: float | None=None, compile_collective_chunks: bool | None=None, fast_collective_effects: bool=False, dipole_collective_subcycle: bool=False): ...
+    def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, n_kicks: int=1, n_kicks_bend: int=4, integration_order: int=4, compile: bool=False, compile_mode: str | None=None, always_change_p0: bool=True, errors: list[SampledError] | None=None, fiducial: FiducialReference | None=None, bunch_charge_C: float=0.0, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, lsc_radius_factor: float=1.7, csr_softening_m: float | None=None, compile_collective_chunks: bool | None=None, fast_collective_effects: bool=False, dipole_collective_subcycle: bool=False, csr_transient: bool=False, csr_drift_model: str='overtaking', generator: torch.Generator | None=None): ...
     def track(self, particles6: torch.Tensor, return_trajectory: bool=False, reference_energy_eV: torch.Tensor | None=None) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def fiducialize(self, particles0: torch.Tensor) -> FiducialReference: ...
 ```
@@ -270,6 +270,13 @@ specializations.
 
 `fast_collective_effects` (default `False`) swaps `lsc`/`csr`
 to the fixed-bin-grid approximations
+
+`csr_transient=True` selects the binned entrance-transient bend model;
+`csr_drift_model="overtaking" | "stupakov" | "retarded"` selects downstream
+drift treatment. Transients and non-default drift models require `csr=True`
+and `fast_collective_effects=True`. See [model settings](../../../model_settings.md)
+for a selection table and runnable comparisons. Construct a new tracker to
+change these choices; element parameters retain their construction-time settings.
 
 `dipole_collective_subcycle` (default `False`) applies the LSC/CSR
 kick `n_kicks_bend` times per real dipole (at `length/n_kicks_bend`

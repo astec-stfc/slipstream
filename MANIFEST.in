@@ -1,0 +1,14 @@
+recursive-include docs *.md *.py *.yaml *.lte
+include examples/beamline/line.lte examples/beamline/study.yaml
+include examples/photocathode/*.py
+include examples/photocathode/generator.in examples/photocathode/104459_Schottky_approx_crestingData.h5
+prune .Codex
+prune .codex
+prune .claude
+prune .agents
+prune .remember
+prune .vscode
+prune .skills
+prune skills
+exclude AGENTS.md CLAUDE.md GEMINI.md
+exclude examples/diamond/nonlinear_optimisation.json

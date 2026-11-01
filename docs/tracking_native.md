@@ -17,6 +17,9 @@ See the [native physics reference](native_reference.md) for normalization,
 transport and RF conventions, and the [module reference](modules/README.md)
 for individual model limits and API contracts.
 
+For a file-free CPU introduction, start with [getting started](getting_started.md).
+For CSR choices, dependencies and changing settings, see [model settings](model_settings.md).
+
 ## Choosing a backend
 
 The default install contains the PyTorch implementation and runs on CPU or

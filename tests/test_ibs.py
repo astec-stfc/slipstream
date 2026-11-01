@@ -259,18 +259,14 @@ def test_element_averaged_rejects_unknown_model():
 _ELENA_TWISS_CSV = Path(__file__).resolve().parent.parent / "examples" / "elena" / "elena_twiss.csv"
 
 
-@pytest.mark.skipif(not _ELENA_TWISS_CSV.exists(), reason="elena_twiss.csv not built -- see build_elena_twiss.py")
+@pytest.mark.skipif(not _ELENA_TWISS_CSV.exists(), reason="optional ELENA reference table is not present")
 def test_element_averaged_matches_xsuite_on_real_elena_lattice():
-    """Cross-check against an independent, external implementation on the
-    exact same real (MAD-X-derived) ELENA optics: CERN's xsuite/xfields
-    ``BjorkenMtingwaIBS``, run live against the real ELENA lattice
-    (``xtrack``'s own ``test_data/elena``, a sibling repo checkout)
-    matched to WEPAB215's Q1=2.454/Q2=1.416 working point and P0=13.7
-    MeV/c antiproton reference momentum (see
-    examples/elena/build_elena_twiss.py's own recipe -- this whole
-    example suite, xsuite included, runs in WSL only, see CLAUDE.md; this
-    was run once there and the resulting numbers pinned here, rerunning
-    it isn't part of this test).
+    """Compare with pinned Xsuite/xfields ``BjorkenMtingwaIBS`` rates on ELENA optics.
+
+    The independent calculation used MAD-X-derived ELENA optics matched to
+    WEPAB215's Q1=2.454/Q2=1.416 working point and P0=13.7 MeV/c antiproton
+    reference momentum. The rates below are pinned; this test does not rerun
+    Xsuite and requires the optional ELENA reference table.
 
     This is the check that caught a real bug: D_x_m/Dp_x/D_y_m/Dp_y must
     be scaled by beta_rel before use in bjorken_mtingwa_growth_rates (see

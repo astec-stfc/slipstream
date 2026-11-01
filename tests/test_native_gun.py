@@ -1,10 +1,7 @@
-"""Tests for ``tracking.native.gun`` -- the relativistic Boris pusher and
-the space-charge relativistic-boost coupling. See
-``plans/NATIVE_GUN_SPACE_CHARGE_PLAN.md`` for the architecture. Closed-form
-checks throughout (``CLAUDE.md``'s documented preference for a
-quantitative comparison over a directional one), derived directly in this
-file's docstrings/comments rather than assumed -- not just asserting
-"looks reasonable"."""
+"""Quantitative regressions for relativistic Boris pushing and space-charge boost coupling.
+
+Expected values come from the closed-form calculations documented in these tests.
+"""
 from __future__ import annotations
 
 import math
@@ -245,7 +242,7 @@ def _ensure_clang_cl_inductor_env():
     compiled CUDA paths and must not silently fall back to ``cl``.
     """
     if shutil.which("clang-cl") is None:
-        pytest.skip("CPU torch.compile needs clang-cl (see CLAUDE.md); not found")
+        pytest.skip("CPU torch.compile needs clang-cl (see docs/compilation.md); not found")
     include = os.environ.get("INCLUDE", "")
     if any(os.path.isfile(os.path.join(d, "omp.h")) for d in include.split(";") if d):
         os.environ["CXX"] = "clang-cl"
@@ -261,7 +258,7 @@ def _ensure_clang_cl_inductor_env():
         cand = os.path.join(inst, "VC", "Tools", "MSVC")
         msvc_root = cand if inst and os.path.isdir(cand) else None
     if msvc_root is None or not os.path.isdir(os.path.join(kits, "Include")):
-        pytest.skip("CPU torch.compile needs clang-cl + Windows SDK (see CLAUDE.md); not found")
+        pytest.skip("CPU torch.compile needs clang-cl + Windows SDK (see docs/compilation.md); not found")
     ver = max(os.listdir(msvc_root))
     sdk = max(os.listdir(os.path.join(kits, "Include")))
     incs = [os.path.join(msvc_root, ver, "include")] + [

@@ -13,6 +13,8 @@ import torch
 import yaml
 
 from slipstream import BeamlineResult, BeamlineStudy
+from slipstream.beamline_cli import main
+from slipstream.beamline_config import read_config
 from slipstream.constants import C_LIGHT, ELECTRON_MASS_EV
 from slipstream.data.particles import save_particles_h5
 from slipstream.tracking.distributions import gaussian_matched_6d
@@ -227,6 +229,132 @@ def test_wake_paths_default_to_lattice_directory_and_can_be_disabled(tmp_path, m
     path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     BeamlineStudy.from_yaml(path)
     assert len(calls) == 2
+
+
+def test_python_lattice_wakes_default_to_lattice_directory(tmp_path, monkeypatch):
+    import slipstream.beamline as beamline
+
+    config(tmp_path)
+    calls = []
+    monkeypatch.setattr(beamline, "resolve_wakes", lambda specs, base_dir: calls.append(base_dir) or specs)
+    lattice = tmp_path / "machine/line.lte"
+    monkeypatch.chdir(tmp_path.parent)
+    BeamlineStudy.from_lattice_file(lattice, "LINE", 30e6, device="cpu")
+    BeamlineStudy.from_lattice_file(lattice, "LINE", 30e6, device="cpu", wake_base_dir=".")
+    assert calls == [lattice.parent, "."]
+
+
+def test_overrides_are_validated_recorded_and_do_not_edit_yaml(tmp_path, monkeypatch):
+    path, _ = config(tmp_path)
+    original = path.read_bytes()
+    monkeypatch.chdir(tmp_path.parent)
+    study = BeamlineStudy.from_yaml(path, overrides={
+        "bunch.n": 16, "tracker.dtype": "float32", "run.output": "overridden.h5",
+        "run.return_trajectory": False,
+    })
+    result = study.run()
+    assert result.particles_out.shape == (16, 6)
+    assert result.particles_out.dtype == np.float32
+    assert result.trajectory is None
+    restored = BeamlineResult.load(tmp_path / "overridden.h5")
+    effective = yaml.safe_load(restored.metadata["config_yaml"])
+    assert effective["bunch"]["n"] == 16
+    assert effective["tracker"]["dtype"] == "float32"
+    assert path.read_bytes() == original
+    assert read_config(path)["bunch"]["n"] == 64
+
+
+@pytest.mark.parametrize("overrides,match", [
+    ([], "overrides must be a mapping"),
+    ({None: True}, "nonempty dotted paths"),
+    ({"tracker.typo": True}, "Unknown tracker"),
+    ({"bunch.n": 1}, "bunch.n"),
+    ({"tracker.csr": "true"}, "tracker.csr must be a boolean"),
+    ({"bunch.n.extra": 1}, "not a mapping"),
+    ({"tracker..csr": True}, "nonempty dotted paths"),
+    ({"": 1}, "nonempty dotted paths"),
+    ({"tracker.csr_transient": True}, "require tracker.csr=true"),
+    ({"tracker.csr_drift_model": "retarded"}, "require tracker.csr=true"),
+    ({"tracker.csr_drift_model": "typo"}, "overtaking, stupakov or retarded"),
+    ({"lattice.strict_import": "true"}, "lattice.strict_import must be a boolean"),
+])
+def test_invalid_overrides_fail_before_tracking(tmp_path, overrides, match):
+    path, _ = config(tmp_path)
+    with pytest.raises(ValueError, match=match):
+        BeamlineStudy.from_yaml(path, overrides=overrides)
+
+
+def test_nested_overrides_create_optional_mapping(tmp_path):
+    path, _ = config(tmp_path, bunch={"source": "astra", "path": "deck.in"})
+    cfg = read_config(path, overrides={"bunch.injector.use_compile": False})
+    assert cfg["bunch"]["injector"]["use_compile"] is False
+
+
+def test_yaml_strict_import_rejects_unsupported_elements(tmp_path):
+    path, _ = config(tmp_path)
+    (tmp_path / "machine/line.lte").write_text("S: SOLENOID, L=0.3, KS=2\nLINE: LINE=(S)\n")
+    with pytest.raises(ValueError, match="SOLENOID"):
+        BeamlineStudy.from_yaml(path, overrides={"lattice.strict_import": True})
+
+
+def test_cuda_config_error_is_actionable_without_hardware(tmp_path, monkeypatch):
+    path, _ = config(tmp_path)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(ValueError, match="use tracker.device=cpu"):
+        BeamlineStudy.from_yaml(path, overrides={"tracker.device": "cuda"})
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    with pytest.raises(ValueError, match="found 1 CUDA device"):
+        read_config(path, overrides={"tracker.device": "cuda:1"})
+
+
+def test_cli_check_does_not_load_source_track_or_write(tmp_path, monkeypatch, capsys):
+    path, _ = config(tmp_path, bunch={"source": "hdf5", "path": "not-present.h5"},
+                     run={"output": "not-written.h5"})
+    monkeypatch.setattr(BeamlineStudy, "run", lambda *a, **k: pytest.fail("--check must not run"))
+    assert main([str(path), "--check", "--set", "tracker.device=cpu"]) == 0
+    assert "particles were not loaded or tracked" in capsys.readouterr().out
+    assert not (tmp_path / "not-written.h5").exists()
+
+
+def test_cli_overrides_last_value_wins_and_preserve_json(tmp_path, capsys, monkeypatch):
+    path, _ = config(tmp_path)
+    output = tmp_path / "cli-overrides.h5"
+    run = BeamlineStudy.run
+
+    def noisy_run(self, **kwargs):
+        print("Backend initialization diagnostic")
+        return run(self, **kwargs)
+
+    monkeypatch.setattr(BeamlineStudy, "run", noisy_run)
+    assert main([str(path), "--set", "bunch.n=8", "--set", "bunch.n=16",
+                 "--set", "run.return_trajectory=false", "-o", str(output)]) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert "Backend initialization diagnostic" in captured.err
+    result = BeamlineResult.load(output)
+    assert result.particles_out.shape == (16, 6)
+    assert result.trajectory is None
+    assert summary["energy_eV"] == result.energy_eV_out
+
+
+@pytest.mark.parametrize("assignment,match", [
+    ("tracker.csr", "expected KEY=VALUE"),
+    ("=true", "expected KEY=VALUE"),
+    ("tracker.csr=", "expected KEY=VALUE"),
+    ("bunch.n=[", "Invalid YAML"),
+    ("bunch.n=!!python/object/apply:os.system ['echo should-not-run']", "Invalid YAML"),
+    ("tracker.typo=true", "Unknown tracker"),
+    ("tracker.csr_transient=true", "require tracker.csr=true"),
+])
+def test_cli_invalid_overrides_exit_cleanly(tmp_path, capsys, assignment, match):
+    path, _ = config(tmp_path)
+    with pytest.raises(SystemExit) as error:
+        main([str(path), "--set", assignment])
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert match in stderr
+    assert "Traceback" not in stderr
 
 
 @pytest.mark.parametrize("particles", [torch.zeros(0, 6), torch.zeros(2, 5),

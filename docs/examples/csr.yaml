@@ -1,0 +1,27 @@
+# Change the CSR models with --set; see docs/model_settings.md.
+lattice:
+  path: csr.lte
+  root: CSRDEMO
+  strict_import: true
+energy_eV: 190000000
+tracker:
+  device: cpu
+  dtype: float64
+  compile: false
+  bunch_charge_C: 1.0e-10
+  csr: true
+  fast_collective_effects: true
+  csr_transient: false
+  csr_drift_model: overtaking
+bunch:
+  source: generated
+  n: 512
+  beta_x0: 2.0
+  alpha_x0: 0.0
+  epsx_m: 1.0e-8
+  beta_y0: 2.0
+  alpha_y0: 0.0
+  epsy_m: 1.0e-8
+  sigma_tau_m: 2.0e-5
+  sigma_delta: 1.0e-4
+  seed: 42
