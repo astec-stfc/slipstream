@@ -115,7 +115,7 @@ def _maybe_collective_kick(
     if p.csr:
         csr_rho_m, csr_length_m = (p.length / p.angle if p.angle != 0.0 else 0.0), p.length
         if p.csr_transient and fast_collective_effects and p.angle != 0.0:
-            csr_slippage_m = abs(csr_rho_m) * p.csr_phi_end ** 3 / 24.0  # Saldin et al.: rho phi^3 / 24
+            csr_slippage_m = abs(csr_rho_m) * p.csr_phi_eval ** 3 / 24.0  # Saldin et al.: rho phi^3 / 24
     elif p.csr_drift_rho_m is not None:
         csr_rho_m, csr_length_m, csr_drift_start_m = p.csr_drift_rho_m, p.length, p.csr_drift_start_m
     else:
@@ -395,8 +395,8 @@ class LinacTracker:
                     slices, n_kicks, max(1, math.ceil(n_kicks_bend / count)), energy_eV, mc2_eV, self.device, dtype,
                     integration_order=integration_order,
                 )
-                if csr_transient:  # the slippage length of each slice follows from the angle accumulated up to its end
-                    substeps = [sp._replace(csr_transient=True, csr_phi_end=abs(spec.angle) * (j + 1) / count)
+                if csr_transient:  # the wake of each slice is evaluated at the angle accumulated up to its centre (midpoint rule)
+                    substeps = [sp._replace(csr_transient=True, csr_phi_eval=abs(spec.angle) * (j + 0.5) / count)
                                 for j, sp in enumerate(substeps)]
                 self._element_params[i] = self._element_params[i]._replace(csr_substeps=tuple(substeps))
         if csr_drift_model not in ("overtaking", "stupakov", "retarded"):
@@ -414,7 +414,7 @@ class LinacTracker:
                 raise ValueError("csr_transient needs csr=True and fast_collective_effects=True (the pairwise kernel is steady-state)")
             for i, spec in enumerate(effective_specs):
                 if spec.csr and spec.angle != 0 and not self._element_params[i].csr_substeps:
-                    self._element_params[i] = self._element_params[i]._replace(csr_transient=True, csr_phi_end=abs(spec.angle))
+                    self._element_params[i] = self._element_params[i]._replace(csr_transient=True, csr_phi_eval=0.5 * abs(spec.angle))
         for p in self._element_params:
             if p.wake is not None:
                 p.wake.prepare(dtype, self.device)

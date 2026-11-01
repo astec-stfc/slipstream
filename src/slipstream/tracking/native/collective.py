@@ -89,6 +89,12 @@ def _get_compiled_csr_chunk_step():
     return _compiled_csr_chunk_step
 
 
+def _warp_f64_wake_ready(zeta: torch.Tensor) -> bool:
+    """Whether the float64 Warp wake kernels (retarded wake, Stupakov root) can run on this tensor: CPU or CUDA, forward only."""
+    return (warp_kernels._HAVE_WARP and not torch._dynamo.is_compiling() and zeta.device.type in ("cpu", "cuda")
+            and zeta.dtype in (torch.float32, torch.float64) and not zeta.requires_grad)
+
+
 def _warp_collective_ready(primary: torch.Tensor, *others: torch.Tensor) -> bool:
     """Return whether a forward-only optional Warp collective is safe here."""
     if torch._dynamo.is_compiling() or not primary.is_cuda:
@@ -882,6 +888,7 @@ def csr_drift_delta_kick_fast(
     energy_eV: torch.Tensor,
     n_bins: int = 256,
     sg_halfwidth: int = 1,
+    _use_warp: bool = True,
 ) -> torch.Tensor:
     """CSR kick over ``length_m`` of drift ``z_travel_m`` after the exit of a dipole of radius ``rho_m`` and bend angle ``phi_m``,
     in the model of Stupakov (the wake of a rigid line charge in a drift behind a bend; the form used by elegant's CSRDRIFT
@@ -908,7 +915,10 @@ def csr_drift_delta_kick_fast(
     l_c = rho * phi ** 2 * (phi + 3.0 * x) / 6.0
     l_m = rho * phi ** 3 * (phi + 4.0 * x) / (24.0 * (phi + x))
     m = torch.arange(nb, dtype=tau_m.dtype, device=tau_m.device)
-    psi = _solve_stupakov_phi(x, m * dtau / rho, phi_m)
+    if _use_warp and _warp_f64_wake_ready(tau_m):
+        psi = warp_kernels.stupakov_phi((m * dtau / rho).to(torch.float64).contiguous(), z_travel_m / rho, phi_m).to(tau_m.dtype)
+    else:
+        psi = _solve_stupakov_phi(x, m * dtau / rho, phi_m)
     mmax = torch.floor(l_m / dtau)
     use = (m >= 1) & (m <= mmax) & (psi > 0)
     end = torch.where(((m == 1) | (m == mmax)) & (mmax >= 2), 0.5, 1.0)
@@ -981,13 +991,16 @@ def csr_drift_delta_kick_retarded(
     n_bins: int = 256,
     sg_halfwidth: int = 1,
     sub_points: int = 4,
+    _use_warp: bool = True,
 ) -> torch.Tensor:
     """CSR kick over ``length_m`` of drift ``z_travel_m`` after the exit of a dipole of radius ``rho_m`` and bend angle ``phi_m``, from the
     retarded field of a 1D line charge, with no small-angle or asymptotic approximation of the kernel.
 
     The wake kernel is the difference of the point-charge field behind the bend and that of the same charge on an infinite straight line
     (the 1D Coulomb term belongs to LSC), tabulated per bin by Gauss-Legendre cells and convolved with the line density; it is finite for
-    every ``zeta`` and zero until the retarded point reaches the bend. The result agrees with ``Stories/CLARA_CSRValidation/lw_reference``."""
+    every ``zeta`` and zero until the retarded point reaches the bend. The result agrees with ``Stories/CLARA_CSRValidation/lw_reference``.
+    On CUDA with Warp the kernel is evaluated by one fused launch in float64 (``warp_kernels.retarded_wake_difference``); otherwise by the
+    PyTorch bisection of ``_retarded_wake``."""
     n = tau_m.shape[-1]
     if n < 2 or length_m <= 0.0 or rho_m == 0.0 or phi_m <= 0.0:
         return torch.zeros_like(tau_m)
@@ -1010,6 +1023,9 @@ def csr_drift_delta_kick_retarded(
 
     def wake(zeta):
         # a difference of two Coulomb-dominated fields is only meaningful once the retarded point has reached the arc
+        if _use_warp and _warp_f64_wake_ready(zeta):
+            diff = warp_kernels.retarded_wake_difference(zeta.to(torch.float64).contiguous(), s_obs, rho, phi_m, beta, 1.001 * zeta_thr)
+            return (diff / (4.0 * math.pi * EPS0_F_PER_M)).to(zeta.dtype)
         diff = _retarded_wake(zeta, s_obs, rho, phi_m, "bend", gamma) - _retarded_wake(zeta, s_obs, rho, phi_m, "line", gamma)
         return torch.where(zeta > 1.001 * zeta_thr, diff, torch.zeros_like(diff))
 

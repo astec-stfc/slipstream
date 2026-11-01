@@ -97,3 +97,24 @@ def test_tracker_options_are_validated():
         LinacTracker(specs, energy_eV=ENERGY_EV, csr=True, csr_drift_model="stupakov")
     with pytest.raises(ValueError):
         LinacTracker(specs, energy_eV=ENERGY_EV, csr=True, fast_collective_effects=True, csr_drift_model="nonsense")
+
+
+def _dipole_loss_eV(n_slices, transient=True, n=2 ** 17):
+    """Bunch-mean energy loss of a monoenergetic Gaussian bunch through one VBC-like dipole (0.2 m, 0.1325 rad) cut into ``n_slices`` CSR kicks."""
+    arc = RHO * PHI
+    spec = ElementSpec("B", "bend", arc, angle=PHI, csr=True, csr_n_slices=n_slices, csr_bins=400)
+    tracker = LinacTracker([spec], energy_eV=ENERGY_EV, device="cpu", dtype=torch.float64, bunch_charge_C=CHARGE, csr=True,
+                           fast_collective_effects=True, csr_transient=transient)
+    beam = torch.zeros(n, 6, dtype=torch.float64)
+    beam[:, 4] = _bunch(n)
+    out, energy = tracker.track(beam)
+    return ENERGY_EV - float(energy) * (1.0 + float(out[:, 5].mean()))
+
+
+def test_transient_loss_is_evaluated_at_the_slice_centre_and_converges_with_the_number_of_slices():
+    # With the wake taken at the end of each slice an 8-slice dipole over-counts the rising transient by ~8%; at the centre the
+    # loss is already converged at 8 slices and lies far below the steady-state loss of the same arc.
+    coarse, fine = _dipole_loss_eV(8), _dipole_loss_eV(32)
+    assert coarse == pytest.approx(fine, rel=0.02)
+    steady = _dipole_loss_eV(8, transient=False)
+    assert 0.6 < coarse / steady < 0.8                     # retarded-field ideal: 61.5 / 88.4 keV = 0.70 on this geometry

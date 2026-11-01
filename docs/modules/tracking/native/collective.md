@@ -217,14 +217,19 @@ otherwise sg_halfwidth applies. No adaptive host-side tier selection.
 LinacTracker supplies the source dipole's BINS/SG_HALFWIDTH, including
 for its approximate drift tail. Without `slippage_m` this is the steady-state wake.
 
-With `slippage_m = rho * phi**3 / 24` (the bend angle `phi` accumulated at the end of the slice) it is the entrance transient of
+With `slippage_m = rho * phi**3 / 24` (`phi` the bend angle accumulated at the *centre* of the slice) it is the entrance transient of
 Saldin, Schneidmiller and Yurkov as in elegant's CSRCSBEND without STEADY_STATE: the derivative sum runs over sources within the slippage
 length and the density term `(lambda(s + L_s) - lambda(s + 4 L_s)) / L_s^(1/3)` is subtracted. It is checked against the retarded-field
 reference of `Stories/CLARA_CSRValidation/lw_reference` (5.6% waveform error at the full 0.1325 rad of a VBC dipole, bunch-mean loss
 within 1%; the steady kernel alone is 18% off at half that angle). Below about two histogram bins of slippage the transient is unresolved.
-`LinacTracker(csr_transient=True)` sets it for every slice of every CSR dipole (fast kernels only).
+`LinacTracker(csr_transient=True)` sets it for every slice of every CSR dipole (fast kernels only), at the slice centre angle: the wake rises
+steeply over the first slippage length, and evaluating it at the end of each slice overestimates the loss of an 8-slice VBC dipole by 8%
+(0.991 of the retarded-field ideal with the centre rule against 1.077 with the end rule; elegant's own slicing is 1.087 at 8 slices and 1.010 at 64).
 
 ### `csr_drift_delta_kick_fast`, `csr_drift_delta_kick_retarded`
+
+Both drift kernels evaluate their per-step wake (the retarded field, or the root of Stupakov's equation) in one fused Warp launch when Warp is installed (CUDA or CPU, float64);
+the PyTorch bisections remain the fallback and the reference (`_use_warp=False`).
 
 CSR in the drift behind a dipole of radius `rho` and angle `phi`, at distance `z` from its exit, for one kick of length `length_m`.
 `csr_drift_delta_kick_fast` is the closed-form model of Stupakov used by elegant's CSRDRIFT (USE_STUPAKOV): it is 3-6% above the retarded

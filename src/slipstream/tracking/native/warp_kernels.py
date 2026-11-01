@@ -34,6 +34,13 @@ def _launch_stream(tensor: torch.Tensor):
     return _stream_cache[key]
 
 
+def _launch_target(tensor: torch.Tensor) -> dict:
+    """``wp.launch`` keywords for a CUDA tensor (PyTorch's active stream) or a CPU tensor (Warp's CPU backend)."""
+    if tensor.device.type == "cuda":
+        return dict(stream=_launch_stream(tensor))
+    return dict(device="cpu")
+
+
 def _wp_arg(tensor: torch.Tensor):
     """Low-overhead, forward-only zero-copy kernel argument."""
     return wp.from_torch(tensor, requires_grad=False, return_ctype=True)
@@ -759,6 +766,145 @@ def wake_histogram(safe_idx: torch.Tensor, n_bins: int, dtype: torch.dtype) -> t
         stream=_launch_stream(safe_idx),
     )
     return histogram
+
+
+if _HAVE_WARP:
+
+    @wp.func
+    def _lw_state(s: wp.float64, rho: wp.float64, phi: wp.float64, line: int):
+        """Position, unit tangent, unit centripetal vector and arc flag at path coordinate ``s`` of a lead-in straight section, an arc of
+        radius ``rho`` and angle ``phi`` and an exit straight section (``line == 0``), or of an infinite straight line."""
+        zero = wp.float64(0.0)
+        one = wp.float64(1.0)
+        if line == 1:
+            return s, zero, one, zero, zero, one, zero
+        length = rho * phi
+        th = wp.clamp(s, zero, length) / rho
+        before = wp.min(s, zero)
+        after = wp.max(s - length, zero)
+        x = rho * wp.sin(th) + before + after * wp.cos(phi)
+        y = rho * (one - wp.cos(th)) + after * wp.sin(phi)
+        on_arc = zero
+        if s >= zero and s <= length:
+            on_arc = one
+        return x, y, wp.cos(th), wp.sin(th), -wp.sin(th), wp.cos(th), on_arc
+
+    @wp.func
+    def _lw_field(zeta: wp.float64, s_obs: wp.float64, rho: wp.float64, phi: wp.float64, beta: wp.float64, line: int):
+        """Longitudinal retarded Lienard-Wiechert field [V/m per C, without 1/(4 pi eps0)] on the observer from a point charge trailing it by
+        ``zeta``: bisection for the retarded path length ``u - beta |r_o - r(s_o - u)| = zeta``, then the velocity and acceleration terms."""
+        zero = wp.float64(0.0)
+        one = wp.float64(1.0)
+        c = wp.float64(299792458.0)
+        ox, oy, otx, oty, ocx, ocy, oa = _lw_state(s_obs, rho, phi, line)
+        lo = zero
+        hi = wp.min(zeta / (one - beta) * wp.float64(1.001) + wp.float64(1.0e-9), wp.float64(5.0e3))
+        for _k in range(100):
+            mid = wp.float64(0.5) * (lo + hi)
+            mx, my, mtx, mty, mcx, mcy, ma = _lw_state(s_obs - mid, rho, phi, line)
+            dist = wp.sqrt((ox - mx) * (ox - mx) + (oy - my) * (oy - my))
+            if mid - beta * dist - zeta < zero:
+                lo = mid
+            else:
+                hi = mid
+        u = wp.float64(0.5) * (lo + hi)
+        px, py, ptx, pty, pcx, pcy, pa = _lw_state(s_obs - u, rho, phi, line)
+        dx = ox - px
+        dy = oy - py
+        big_r = wp.sqrt(dx * dx + dy * dy)
+        nx = dx / big_r
+        ny = dy / big_r
+        bx = beta * ptx
+        by = beta * pty
+        nbx = nx - bx
+        nby = ny - by
+        k = one - (nx * bx + ny * by)
+        k = k * k * k
+        bd = beta * beta * c / rho * pa
+        bdx = bd * pcx
+        bdy = bd * pcy
+        n_bdot = nx * bdx + ny * bdy
+        n_nb = nx * nbx + ny * nby
+        e_vel = (one - beta * beta) / (k * big_r * big_r)
+        e_rad = one / (c * k * big_r)
+        ex = nbx * e_vel + (nbx * n_bdot - bdx * n_nb) * e_rad
+        ey = nby * e_vel + (nby * n_bdot - bdy * n_nb) * e_rad
+        return ex * otx + ey * oty
+
+    @wp.kernel
+    def _retarded_wake_kernel(
+        zeta: wp.array(dtype=wp.float64), s_obs: wp.float64, rho: wp.float64, phi: wp.float64, beta: wp.float64,
+        zeta_min: wp.float64, wake: wp.array(dtype=wp.float64),
+    ):
+        """Wake kernel behind a bend, one thread per ``zeta``: the field of the bend minus that of an infinite straight line, zero below ``zeta_min``."""
+        i = wp.tid()
+        z = zeta[i]
+        if z > zeta_min:
+            wake[i] = _lw_field(z, s_obs, rho, phi, beta, 0) - _lw_field(z, s_obs, rho, phi, beta, 1)
+        else:
+            wake[i] = wp.float64(0.0)
+
+
+if _HAVE_WARP:
+
+    @wp.kernel
+    def _stupakov_phi_kernel(
+        l_over_rho: wp.array(dtype=wp.float64), x: wp.float64, phi_m: wp.float64, iterations: int, phi: wp.array(dtype=wp.float64),
+    ):
+        """Root of ``phi^3 (phi + 4 x) / (phi + x) = 24 l / rho`` in ``[0, phi_m]`` by bisection, ``-1`` where ``l`` is beyond the value at ``phi_m``."""
+        i = wp.tid()
+        zero = wp.float64(0.0)
+        target = wp.float64(24.0) * l_over_rho[i]
+        lo = zero
+        hi = phi_m
+        for _k in range(iterations):
+            mid = wp.float64(0.5) * (lo + hi)
+            if mid * mid * mid * (mid + wp.float64(4.0) * x) / (mid + x) < target:
+                lo = mid
+            else:
+                hi = mid
+        top = phi_m * phi_m * phi_m * (phi_m + wp.float64(4.0) * x) / (phi_m + x)
+        if target <= top:
+            phi[i] = wp.float64(0.5) * (lo + hi)
+        else:
+            phi[i] = wp.float64(-1.0)
+
+
+def stupakov_phi(l_over_rho: torch.Tensor, x: float, phi_m: float, iterations: int = 60) -> torch.Tensor:
+    """Fused solve of Stupakov's ``phi^3 (phi + 4 x) / (phi + x) = 24 l / rho`` for each ``l / rho``; the Warp counterpart of the PyTorch
+    bisection in ``collective._solve_stupakov_phi``."""
+    if not _HAVE_WARP:
+        raise RuntimeError("Warp is not installed")
+    if l_over_rho.device.type not in ("cuda", "cpu") or l_over_rho.dtype != torch.float64 or l_over_rho.ndim != 1 or not l_over_rho.is_contiguous():
+        raise ValueError("Stupakov solve needs a contiguous one-dimensional float64 CPU or CUDA tensor")
+    _ensure_init()
+    out = torch.empty_like(l_over_rho)
+    wp.launch(
+        _stupakov_phi_kernel, dim=l_over_rho.shape[0],
+        inputs=[_wp_arg(l_over_rho), wp.float64(x), wp.float64(phi_m), int(iterations), _wp_arg(out)],
+        **_launch_target(l_over_rho),
+    )
+    return out
+
+
+def retarded_wake_difference(
+    zeta: torch.Tensor, s_obs: float, rho: float, phi: float, beta: float, zeta_min: float,
+) -> torch.Tensor:
+    """Retarded field of a trailing point charge on a bend of radius ``rho`` and angle ``phi`` minus that on a straight line, for each
+    ``zeta`` [m] above ``zeta_min`` (zero elsewhere), in V/m per C divided by ``1/(4 pi eps0)``. One launch replaces the
+    hundreds of small PyTorch operations of the bisection."""
+    if not _HAVE_WARP:
+        raise RuntimeError("Warp is not installed")
+    if zeta.device.type not in ("cuda", "cpu") or zeta.dtype != torch.float64 or zeta.ndim != 1 or not zeta.is_contiguous():
+        raise ValueError("retarded wake needs a contiguous one-dimensional float64 CPU or CUDA tensor")
+    _ensure_init()
+    out = torch.empty_like(zeta)
+    wp.launch(
+        _retarded_wake_kernel, dim=zeta.shape[0],
+        inputs=[_wp_arg(zeta), wp.float64(s_obs), wp.float64(rho), wp.float64(phi), wp.float64(beta), wp.float64(zeta_min), _wp_arg(out)],
+        **_launch_target(zeta),
+    )
+    return out
 
 
 def push(x, y, z, ux, uy, uz, cx, cy, cz, cux, cuy, cuz,

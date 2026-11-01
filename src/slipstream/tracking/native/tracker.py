@@ -92,8 +92,8 @@ class _ElementParams(NamedTuple):
     """``LinacTracker(csr_drift_model=...)`` when ``"stupakov"`` or ``"retarded"``: this CSR drift is tracked in ``csr_drift_dz`` kicks with that kernel."""
     csr_transient: bool = False
     """``LinacTracker(csr_transient=True)``: this element's CSR kick uses the entrance-transient model (fast kernel only)."""
-    csr_phi_end: float = 0.0
-    """Bend angle accumulated from the entrance of the dipole to the end of this slice (rad), for the slippage length."""
+    csr_phi_eval: float = 0.0
+    """Bend angle accumulated from the entrance of the dipole to the centre of this slice (rad): the angle at which its entrance-transient wake (slippage length) is evaluated."""
     exact_dipole: bool = False
     k3: float = 0.0
     multipoles: tuple = ()
