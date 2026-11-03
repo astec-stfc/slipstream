@@ -32,6 +32,7 @@ from .generator import generate, read_generator_input
 from .fields import RFCavityField, SolenoidField, TravelingWaveField, read_astra_field_file
 from .gun import kahan_add, relativistic_space_charge_field
 from .injector_ibs import BinaryCollisionIBS, InjectorIBSSettings
+from .injector_wake import InjectorWake, apply_wake, read_wake_table
 from .magnets import (
     Dipole, beam_angle, corrector_element, dipole_element, hard_quad_element, lateral_ok, lerp_tables, magnet_fields, placement,
     place_as_tensors, placement3, profile_quad_element, rotate_to_beam, solenoid_element, to_local, to_local3,
@@ -212,6 +213,7 @@ class Injector:
     correctors: list[Corrector] = field(default_factory=list)  # steering magnets (lab-frame uniform fields)
     base_dir: Path = field(default=Path("."), repr=False, compare=False)
     ibs: InjectorIBSSettings = field(default_factory=InjectorIBSSettings)
+    wakes: list[InjectorWake] = field(default_factory=list)  # localized longitudinal wake kicks (``track`` only)
 
     @property
     def mass_kg(self) -> float:
@@ -240,8 +242,7 @@ class Injector:
         absolute_phases = not newrun.get("auto_phase", True)
 
         ignored = []
-        if nml.get("wake", {}).get("lwake") and nml["wake"].get("wk_type"):
-            ignored.append(f"{len(nml['wake']['wk_type'])} wakefield(s) (&WAKE)")
+        wakes = _wakes_from_namelist(nml.get("wake", {}), ignored)
         dip = nml.get("dipole", {})
         if newrun.get("qbunch"):
             ignored.append("Qbunch rescaling (charge taken from the distribution file)")
@@ -395,6 +396,7 @@ class Injector:
                 geometry="3d" if charge.get("lspch3d", False) else "cylindrical",
                 n_xyz=[int(charge.get(k, 32)) for k in ("nxf", "nyf", "nzf")],
             ),
+            wakes=wakes,
             source=path.name,
             base_dir=path.parent,
         )
@@ -429,6 +431,8 @@ class Injector:
         for elem in data["quadrupoles"]:
             if elem["profile"]:
                 elem["profile"] = rel(elem["profile"])
+        for elem in data["wakes"]:
+            elem["file"] = rel(elem["file"])
         path.write_text(yaml.safe_dump(data, sort_keys=False))
 
     @classmethod
@@ -441,6 +445,7 @@ class Injector:
         data["apertures"] = [Aperture(**a) for a in data.get("apertures", [])]
         data["dipoles"] = [Dipole(**d) for d in data.get("dipoles", [])]
         data["correctors"] = [Corrector(**c) for c in data.get("correctors", [])]
+        data["wakes"] = [InjectorWake(**w) for w in data.get("wakes", [])]
         data["space_charge"] = SpaceChargeSettings(**data.get("space_charge", {}))
         if data.get("photocathode"):
             data["photocathode"] = Photocathode(**data["photocathode"])
@@ -753,6 +758,9 @@ class Injector:
         else:
             using_warp = False
 
+        pending_wakes = sorted(((w, read_wake_table(self.resolve(w.file), w.method)) for w in self.wakes),
+                               key=lambda wt: wt[0].z_m)
+        wake_log: list[dict] = []
         t_run0 = time.time()
         step = 0
         centroid_z = 0.0
@@ -880,6 +888,14 @@ class Injector:
                 momentum = collisions.apply(torch.stack((x, y, z), -1), torch.stack((ux, uy, uz), -1),
                                              dt, active & alive)
                 ux, uy, uz = momentum.unbind(-1)
+            if pending_wakes and emitted_all and centroid_z + 12 * C_LIGHT * dt >= pending_wakes[0][0].z_m:
+                # the host-synced centroid is at most 10 steps old: look at the exact one only when a kick is near
+                z_now = float(z[alive].mean())
+                while pending_wakes and z_now >= pending_wakes[0][0].z_m:
+                    wk, table = pending_wakes.pop(0)
+                    uz, mean_dE_eV = apply_wake(wk, table, z, q, ux, uy, uz, self.q_C,
+                                                self.mass_kg, alive)
+                    wake_log.append({"z_m": wk.z_m, "applied_at_z_m": z_now, "mean_dE_eV": mean_dE_eV})
             if check_screen and screen_state is not None:
                 screen_state = screen_fn(
                     screen_state, screen_prev, (x, y, z, ux, uy, uz), active, alive_prev,
@@ -1012,6 +1028,8 @@ class Injector:
             )
         if collisions is not None:
             out["ibs"] = dict(settings=dataclasses.asdict(self.ibs), **collisions.diagnostics())
+        if self.wakes:
+            out["wakes"] = wake_log
         return out
 
     # -- differentiable tracking -------------------------------------------------------------
@@ -1060,6 +1078,8 @@ class Injector:
         _check_screen_plane(screen_z_m)
         if self.photocathode is not None:
             raise NotImplementedError("photocathode emission is only supported by track()")
+        if self.wakes:
+            raise NotImplementedError("wake kicks are only supported by track()")
         self._check_knobs(params or {})
         # 0-d float64 on the tracking device: an RF phase needs float64 (see _rf_cos_sin).
         params = {k: torch.as_tensor(v, dtype=torch.float64, device=device) for k, v in (params or {}).items()}
@@ -1225,6 +1245,32 @@ def _needed_checks(extent, travel, screen_z_m, slabs, z_wall, margin: float = 1e
     return (screen_z_m is not None and z_hi >= screen_z_m,
             slabs is None or any(z_hi >= a and z_lo <= b for a, b in slabs),
             z_lo < z_wall)
+
+
+_WAKE_METHODS = {"taylor_method_f": "taylor_f", "monopole_method_f": "monopole_f", "monopole_method_p": "monopole_p"}
+
+
+def _wakes_from_namelist(wk: dict, ignored: list) -> list[InjectorWake]:
+    """ASTRA ``&WAKE`` monopole kicks. Dipole tables and kick directions other than +z are not modelled; ``Wk_N_bin``
+    keeps ASTRA's default of 10 when the deck gives none (a coarse grid: set it in the deck)."""
+    if not (wk.get("lwake") and wk.get("wk_type")):
+        return []
+
+    def get(key, i, default):
+        v = wk.get(key, default)
+        return v.get(i, default) if isinstance(v, dict) else v
+
+    out = []
+    for i in sorted(wk["wk_type"]):
+        kind = str(wk["wk_type"][i]).lower()
+        if kind not in _WAKE_METHODS:
+            ignored.append(f"WAKE({i}): Wk_Type={wk['wk_type'][i]!r} (only monopole tables)")
+            continue
+        if (get("wk_ex", i, 0.0), get("wk_ey", i, 0.0), get("wk_ez", i, 1.0)) != (0.0, 0.0, 1.0):
+            ignored.append(f"WAKE({i}): kick direction other than +z")
+        out.append(InjectorWake(z_m=float(get("wk_z", i, 1.0)), file=str(wk["wk_filename"][i]), method=_WAKE_METHODS[kind],
+                                scaling=float(get("wk_scaling", i, 1.0)), n_bin=int(get("wk_n_bin", i, 10))))
+    return out
 
 
 def _std_mm(values: torch.Tensor) -> float:

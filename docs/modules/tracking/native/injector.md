@@ -11,6 +11,8 @@ Optional local binary Coulomb collisions are configured by
 for the model, physical cutoffs, float64 requirement and validation limits.
 IBS defaults off and is explicitly unsupported in `track_differentiable`.
 
+Localized longitudinal wake kicks (ASTRA `&WAKE`, monopole tables) are configured by `Injector.wakes`, read by `from_astra`; see [injector wake](injector_wake.md). They are unsupported in `track_differentiable`.
+
 ### Limits and conventions
 
 - YAML paths are relative to the machine file and physical fields/settings use SI.

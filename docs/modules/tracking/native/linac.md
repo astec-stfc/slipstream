@@ -190,6 +190,12 @@ class LinacTracker:
     def fiducialize(self, particles0: torch.Tensor) -> FiducialReference: ...
 ```
 
+### Wake conventions
+
+Wake tables are per cell: `ElementSpec.cell_length` (`CELL_LENGTH`) sets how much of the table each sub-kick applies
+(`length / cell_length / n_kicks`, see `elements.md`). `LinacTracker.track` gives any `TransverseWake` that has no fixed bin window one from the
+time span of the first bunch tracked (plus half that span each side); set `set_fixed_bin_window` yourself for a bunch that changes length a lot.
+
 ### `resolve_wakes`
 
 Returns a **new** `list[ElementSpec]` with every `kind="rf"`

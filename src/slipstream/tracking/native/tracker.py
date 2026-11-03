@@ -116,6 +116,8 @@ class _ElementParams(NamedTuple):
     synch_rad: bool = False
     isr: bool = False
     radiation_substeps: tuple = ()
+    wake_scale: float = 1.0
+    """RF-kind only: the fraction of the per-cell wake table applied at each sub-kick, ``length / cell_length / n_kicks`` (elegant's ``wake.factor``)."""
 
 
 def _build_params(
@@ -137,6 +139,7 @@ def _build_params(
                 is_rf=True, voltage_V=s.voltage_V, phase_rad=s.phase_rad,
                 omega_rf=2.0 * math.pi * s.frequency_Hz, change_p0=change_p0,
                 wake=s.wake, transverse_wake_x=s.transverse_wake_x, transverse_wake_y=s.transverse_wake_y,
+                wake_scale=s.length / (s.cell_length if s.cell_length > 0.0 else s.length) / s.n_kicks if s.length > 0.0 else 1.0,
                 beta_wave=s.beta_wave,
                 end1_focus=s.end1_focus, end2_focus=s.end2_focus, body_focus_model=s.body_focus_model,
             ))
@@ -184,7 +187,7 @@ def _apply_one_element(
         return _rf_cavity_kick(
             particles6, p.length, p.voltage_V, p.phase_rad, p.omega_rf, energy_eV, mc2_eV, change_p0=p.change_p0,
             wake=p.wake, transverse_wake_x=p.transverse_wake_x, transverse_wake_y=p.transverse_wake_y,
-            charge_per_particle_C=charge_per_particle_C, n_kicks=p.n_kicks, beta_wave=p.beta_wave,
+            charge_per_particle_C=charge_per_particle_C, n_kicks=p.n_kicks, beta_wave=p.beta_wave, wake_scale=p.wake_scale,
             end1_focus=p.end1_focus, end2_focus=p.end2_focus, body_focus_model=p.body_focus_model,
             compile_sub_kicks=compile_rf_sub_kicks,
         )

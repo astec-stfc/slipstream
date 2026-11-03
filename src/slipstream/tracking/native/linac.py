@@ -39,9 +39,9 @@ def resolve_wakes(specs: list[ElementSpec], base_dir: str | Path = ".") -> list[
             continue
         path = base_dir / s.wakefile
         t_column = s.wake_t_column or "t"
-        wake = ShortRangeWake.from_sdds_file(path, t_column=t_column, w_column=s.wake_wz_column) if s.wake_wz_column else None
-        wx = TransverseWake.from_sdds_file(path, t_column=t_column, w_column=s.wake_wx_column) if s.wake_wx_column else None
-        wy = TransverseWake.from_sdds_file(path, t_column=t_column, w_column=s.wake_wy_column) if s.wake_wy_column else None
+        wake = ShortRangeWake.from_sdds_file(path, t_column=t_column, w_column=s.wake_wz_column) if s.wake_wz_column and s.include_z_wake else None
+        wx = TransverseWake.from_sdds_file(path, t_column=t_column, w_column=s.wake_wx_column) if s.wake_wx_column and s.include_tr_wake else None
+        wy = TransverseWake.from_sdds_file(path, t_column=t_column, w_column=s.wake_wy_column) if s.wake_wy_column and s.include_tr_wake else None
         out.append(replace(s, wake=wake, transverse_wake_x=wx, transverse_wake_y=wy))
     return out
 
@@ -468,11 +468,26 @@ class LinacTracker:
             self._reference_energy_eV = energy_eV
         self._energy_eV_t.fill_(energy_eV)
 
+    def _ensure_transverse_wake_windows(self, particles6: torch.Tensor) -> None:
+        """A transverse wake convolves on a fixed bin window. Give any that has none the time span of the first bunch tracked, with half that
+        span as a margin on each side (elegant's ``N_BINS = 0`` sizes its bins from the bunch in a similar way)."""
+        todo = {id(w): w for p in self._element_params for w in (p.transverse_wake_x, p.transverse_wake_y) if w is not None and w._fixed_n_bins is None}
+        if not todo:
+            return
+        tau_s = particles6[..., 4] / C_LIGHT
+        lo, hi = float(tau_s.min()), float(tau_s.max())
+        pad = 0.5 * (hi - lo)
+        for w in todo.values():
+            w.set_fixed_bin_window(lo - pad, hi + pad)
+            w.prepare(self.dtype, self.device)
+
     def track(
         self, particles6: torch.Tensor, return_trajectory: bool = False, reference_energy_eV: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """One pass."""
         particles6 = particles6.to(device=self.device, dtype=self.dtype)
+        if self.bunch_charge_C != 0.0:
+            self._ensure_transverse_wake_windows(particles6)
         self._charge_per_particle_C.fill_(self.bunch_charge_C / particles6.shape[0])
         csr_active = self.csr and self.bunch_charge_C != 0.0
         if reference_energy_eV is not None:

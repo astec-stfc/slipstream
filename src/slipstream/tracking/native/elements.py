@@ -299,7 +299,7 @@ def _rf_one_sub_kick(
     voltage_k: float, phase_rad: float, omega_rf: float, phase_slip: float, change_p0: bool,
     wake: ShortRangeWake | None, transverse_wake_x: TransverseWake | None, transverse_wake_y: TransverseWake | None,
     charge_per_particle_C: torch.Tensor | float, is_first: bool, is_last: bool,
-    end1_focus: bool, end2_focus: bool, body_focus_model: str,
+    end1_focus: bool, end2_focus: bool, body_focus_model: str, wake_scale: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute rf one sub kick; see the module documentation for details."""
     def _drift_half(x, px, y, py, tau, delta, e_eV):
@@ -377,11 +377,11 @@ def _rf_one_sub_kick(
         tau = tau * (beta_exit / beta_entrance)
 
     if wake is not None:
-        delta = delta - wake.voltage_at(tau_s, charge_per_particle_C) / energy_eV
+        delta = delta - wake_scale * wake.voltage_at(tau_s, charge_per_particle_C) / energy_eV
     if transverse_wake_x is not None:
-        px = px + transverse_wake_x.kick_at(tau_s, x, charge_per_particle_C) / energy_eV
+        px = px + wake_scale * transverse_wake_x.kick_at(tau_s, x, charge_per_particle_C) / energy_eV
     if transverse_wake_y is not None:
-        py = py + transverse_wake_y.kick_at(tau_s, y, charge_per_particle_C) / energy_eV
+        py = py + wake_scale * transverse_wake_y.kick_at(tau_s, y, charge_per_particle_C) / energy_eV
 
     if change_p0 and is_last:
         state6, energy_eV = _match_energy_to_centroid(
@@ -421,9 +421,10 @@ def _rf_cavity_kick(
     transverse_wake_y: TransverseWake | None = None, charge_per_particle_C: torch.Tensor | float = 0.0,
     n_kicks: int = 1, beta_wave: float = 1.0,
     end1_focus: bool = False, end2_focus: bool = False, body_focus_model: str = "none",
-    compile_sub_kicks: bool = False,
+    compile_sub_kicks: bool = False, wake_scale: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply a local RF energy kick and optional reference-momentum change."""
+    """Apply a local RF energy kick and optional reference-momentum change. ``wake_scale`` multiplies the wake of each sub-kick
+    (``length / cell_length / n_kicks`` for a per-cell table)."""
     n_kicks = max(int(n_kicks), 1)
     length_k = length / n_kicks
     voltage_k = voltage_V / n_kicks
@@ -442,7 +443,7 @@ def _rf_cavity_kick(
         x, px, y, py, tau, delta, energy_eV = sub_kick(
             x, px, y, py, tau, delta, energy_eV, mc2_eV, P0, half, length_k, voltage_k, phase_rad, omega_rf,
             phase_slip, change_p0, wake, transverse_wake_x, transverse_wake_y, charge_per_particle_C,
-            ik == 0, ik == n_kicks - 1, end1_focus, end2_focus, body_focus_model,
+            ik == 0, ik == n_kicks - 1, end1_focus, end2_focus, body_focus_model, wake_scale,
         )
 
     return torch.stack([x, px, y, py, tau, delta], dim=-1), energy_eV

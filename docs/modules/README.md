@@ -60,6 +60,7 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 
 - [injector_ibs](tracking/native/injector_ibs.md): Local equal-weight binary Coulomb collisions for injector studies, with Takizuka–Abe/Nanbu angular laws and elastic pair kinematics.
 - [injector_ibs_warp](tracking/native/injector_ibs_warp.md): Optional float64 CUDA acceleration of disjoint collision pairs, sharing the PyTorch grouping and random draws.
+- [injector_wake](tracking/native/injector_wake.md): Localized monopole wake kicks for the injector (ASTRA `&WAKE`, per-cell tables), with their closed-form checks.
 
 - [astra_io](tracking/native/astra_io.md): Converts ASTRA distribution rows from their reference-relative z/pz/time convention to absolute particle values.
 - [collective](tracking/native/collective.md): Implements local long-wavelength 1D LSC and steady-state 1D CSR momentum kicks.

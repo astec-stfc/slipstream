@@ -86,7 +86,9 @@ mode an RF-kind element is still tracked as a plain drift.
 `wakefile`/`wake_t_column`/`wake_wz_column`/`wake_wx_column`/
 `wake_wy_column` (`kind="rf"`, elegant's `RFCW`): wake
 **metadata** only (plain strings from `WAKEFILE=`/`TCOLUMN=`/
-`WZCOLUMN=`/`WXCOLUMN=`/`WYCOLUMN=`) -- no file I/O here;
+`WZCOLUMN=`/`WXCOLUMN=`/`WYCOLUMN=`) -- no file I/O here; `cell_length` (`CELL_LENGTH=`, the wake tables are per cell:
+each sub-kick applies `length / cell_length / n_kicks` of them), `include_z_wake`/`include_tr_wake` (`ZWAKE=`/`TRWAKE=`, default on) are parsed too, and
+`WAKES_AT_END` raises `NotImplementedError` (wakes sit before the end drift of each sub-kick);
 `linac.resolve_wakes` turns this into real loaded wake objects
 (`wake`/`transverse_wake_x`/`transverse_wake_y` below,
 `None` until then).

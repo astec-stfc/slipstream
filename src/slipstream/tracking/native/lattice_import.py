@@ -38,7 +38,8 @@ _IMPORTED_PARAMS = {
                                 "SYNCH_RAD", "ISR"}),
     **dict.fromkeys(_HKICK_TYPES | _VKICK_TYPES, {"L", "KICK"}),
     **dict.fromkeys(_RF_TYPES, {"L", "VOLT", "PHASE", "FREQ", "CHANGE_P0", "WAKEFILE", "TCOLUMN", "WZCOLUMN",
-                              "WXCOLUMN", "WYCOLUMN", "N_KICKS", "END1_FOCUS", "END2_FOCUS", "BODY_FOCUS_MODEL"}),
+                              "WXCOLUMN", "WYCOLUMN", "N_KICKS", "END1_FOCUS", "END2_FOCUS", "BODY_FOCUS_MODEL", "CELL_LENGTH", "ZWAKE", "TRWAKE",
+                              "WAKES_AT_END"}),
     "KOCT": {"L", "K3", "DX", "DY", "TILT"},
     "MULT": {"L", "ORDER", "KNL", "FACTOR", "DX", "DY", "TILT", "BORE", "BTIPL", "DZ", "SYNCH_RAD"},
 }
@@ -72,6 +73,12 @@ class ElementSpec:
     wake: ShortRangeWake | None = None
     transverse_wake_x: TransverseWake | None = None
     transverse_wake_y: TransverseWake | None = None
+    cell_length: float = 0.0
+    """``RFCW`` ``CELL_LENGTH`` [m]. The wake tables are per cell, so each of the ``n_kicks`` sub-kicks applies ``length / cell_length / n_kicks`` of
+    the table (elegant's ``wake.factor``); 0 (unset) means the table is for the whole element."""
+    include_z_wake: bool = True
+    include_tr_wake: bool = True
+    """``RFCW`` ``ZWAKE`` / ``TRWAKE`` (both default on): ``False`` drops the longitudinal / transverse wake of this element."""
     n_kicks: int = 1
     beta_wave: float = 1.0
     end1_focus: bool = False
@@ -243,13 +250,16 @@ def parse_elegant_lattice(
             # unrecognized falls back to "none".
             body_focus_model_raw = (_str(params, "BODY_FOCUS_MODEL") or "none").lower()
             body_focus_model = body_focus_model_raw if body_focus_model_raw in ("none", "tw1", "srs") else "none"
+            if _float(params, "WAKES_AT_END") != 0.0 and _str(params, "WAKEFILE"):
+                raise NotImplementedError(f"{name}: RFCW WAKES_AT_END is unsupported (wakes are applied before the end drift of each sub-kick)")
             elements[name] = ElementSpec(
                 name, "rf", length, voltage_V=_float(params, "VOLT"),
                 phase_rad=_float(params, "PHASE") * math.pi / 180.0, frequency_Hz=_float(params, "FREQ"),
                 change_p0=_float(params, "CHANGE_P0") != 0.0,
                 wakefile=_str(params, "WAKEFILE"), wake_t_column=_str(params, "TCOLUMN"),
                 wake_wz_column=_str(params, "WZCOLUMN"), wake_wx_column=_str(params, "WXCOLUMN"),
-                wake_wy_column=_str(params, "WYCOLUMN"),
+                wake_wy_column=_str(params, "WYCOLUMN"), cell_length=_float(params, "CELL_LENGTH"),
+                include_z_wake=_float(params, "ZWAKE", 1.0) != 0.0, include_tr_wake=_float(params, "TRWAKE", 1.0) != 0.0,
                 n_kicks=n_kicks_raw if n_kicks_raw > 0 else 1,
                 end1_focus=_float(params, "END1_FOCUS") != 0.0,
                 end2_focus=_float(params, "END2_FOCUS") != 0.0,
