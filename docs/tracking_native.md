@@ -83,6 +83,45 @@ flags (including imported `SYNCH_RAD`/`ISR`). This bounded model requires
 eager electron tracking with `always_change_p0=False`; see the
 [local radiation reference](modules/tracking/native/radiation.md).
 
+### Gradients through a linac pass
+
+`LinacTracker.track` is differentiable with respect to the input particles,
+including through LSC and CSR with `fast_collective_effects=True`, on CPU and
+CUDA. The fast kernels skip their forward-only CUDA graphs whenever an input
+requires grad, so no flag is needed. Each call builds its own charge tensor, so
+several charged passes can be accumulated into one loss before a single
+`backward()`.
+
+```python
+tracker = LinacTracker(specs, 150e6, device="cuda", bunch_charge_C=100e-12,
+                       csr=True, lsc=True, pipe_radius_b_m=0.01, fast_collective_effects=True)
+# image_loss and beam_for stand for your own screen model and scan settings
+loss = sum(image_loss(tracker.track(beam_for(setting))[0]) for setting in settings)
+loss.backward()
+```
+
+Limits to know before relying on a gradient:
+
+- Wakes: the longitudinal `ShortRangeWake` rounds particles to integer bins and passes no
+  gradient to `tau`; the transverse wake passes gradient to the offsets only. RF phase,
+  voltage and magnet strengths are Python floats, so no gradient reaches them.
+- The grid origin and spacing of the binned kernels follow the live extremes of `tau`.
+- Float32 gradients of a binned density derivative are rough: in the test chicane
+  (16384 particles, 256 bins) they differ from float64 by 8-18 % in `x`, `tau` and `delta`,
+  against 1e-6 without CSR. Compare with float64 for the bin count, smoothing and particle
+  count in use; `torch.use_deterministic_algorithms(True)` removes the run-to-run noise of
+  float32 scatter but not that difference.
+
+The step is launch-bound, so a fixed-shape forward and backward can be captured in one CUDA
+graph (measured 5.7 to 15 times faster than eager on a 15-element chicane with CSR). Warm up
+first on a side stream, as the PyTorch CUDA-graph documentation describes, so that the dense
+smoothing operator and cuFFT plans exist before capture, then capture `track`, the loss and
+`backward()` together and replay it with new values copied into the static input. The step
+must contain no host synchronisation and no host-to-device scalar construction; the LSC and
+CSR fast kernels meet this, the dynamic-window longitudinal wake and the CSR drift models do
+not yet. `tests/test_collective_gradients.py` holds a working example. Under deterministic
+algorithms a CSR-only replay matched eager bit for bit in float32.
+
 ## Injector usage
 
 Build an injector from an ASTRA deck, then track its distribution:
