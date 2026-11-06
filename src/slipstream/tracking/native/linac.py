@@ -466,7 +466,7 @@ class LinacTracker:
 
             self._element_params = [refresh(p) for p in self._element_params]
             self._reference_energy_eV = energy_eV
-        self._energy_eV_t.fill_(energy_eV)
+        self._energy_eV_t = torch.full_like(self._energy_eV_t, energy_eV)  # not in place: an earlier pass may have saved it
 
     def _ensure_transverse_wake_windows(self, particles6: torch.Tensor) -> None:
         """A transverse wake convolves on a fixed bin window. Give any that has none the time span of the first bunch tracked, with half that
@@ -488,7 +488,10 @@ class LinacTracker:
         particles6 = particles6.to(device=self.device, dtype=self.dtype)
         if self.bunch_charge_C != 0.0:
             self._ensure_transverse_wake_windows(particles6)
-        self._charge_per_particle_C.fill_(self.bunch_charge_C / particles6.shape[0])
+        # A fresh tensor per call: autograd saves it, so an in-place refill would invalidate an earlier pass's backward.
+        self._charge_per_particle_C = torch.full(
+            (), self.bunch_charge_C / particles6.shape[0], dtype=self.dtype, device=self.device,
+        )
         csr_active = self.csr and self.bunch_charge_C != 0.0
         if reference_energy_eV is not None:
             if any(p.synch_rad or p.isr for p in self._element_params):

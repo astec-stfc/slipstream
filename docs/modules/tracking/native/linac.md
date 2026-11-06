@@ -255,8 +255,11 @@ focusing branches are optional local element effects.
 charge -- not `NativeTracker`'s own circulating `bunch_current_A`,
 since there's no "current" for one pass.
 `charge_per_particle_C = bunch_charge_C / n_particles` is computed
-lazily in `.track()`. Every wake-carrying element's wake object gets
-`.prepare(dtype, device)` called once here.
+lazily in `.track()`, as a new 0-d tensor on every call: autograd saves it,
+so refilling one shared tensor in place would invalidate the backward of an
+earlier pass (two charged passes summed into one loss). `_set_reference_energy`
+likewise replaces the stored reference-energy tensor. Every wake-carrying
+element's wake object gets `.prepare(dtype, device)` called once here.
 
 `lsc`/`csr` (both default `False`) turn on the two
 `collective.py` kernels. `csr=True` only affects elements with
