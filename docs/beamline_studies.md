@@ -13,13 +13,31 @@ slipstream-beamline examples/beamline/study.yaml -o result.h5
 The example is synthetic. It needs CPU PyTorch and the package's ordinary
 dependencies. Results contain native canonical particles, exit total energy,
 charge, slice diagnostics, optional element trajectories, and scalar reference
-differences. The CLI prints scalar diagnostics as JSON. `-o` is relative to the
+differences. The CLI prints scalar diagnostics as JSON on stdout and backend
+startup/progress messages on stderr, so stdout can be redirected to a JSON
+file. `-o` is relative to the
 current directory; every path inside YAML is relative to the YAML file.
+
+Preview a configuration or change settings without editing the file:
+
+```console
+python -m slipstream.beamline_cli examples/beamline/study.yaml --check
+python -m slipstream.beamline_cli examples/beamline/study.yaml --set bunch.n=128 --set tracker.device=cpu -o result.h5
+```
+
+`--check` validates the configuration and constructs the lattice/tracker;
+it does not load particle-source files, track particles or write output.
+`--set` accepts dotted keys and YAML values; repeat it for multiple choices.
+The last value for a repeated key wins, and normal schema validation applies.
+Paths supplied through `--set` remain relative to the YAML file; `-o` remains
+relative to the current directory. Output saving replaces an existing file.
 
 ```python
 from slipstream import BeamlineStudy
 
-study = BeamlineStudy.from_yaml("examples/beamline/study.yaml")
+study = BeamlineStudy.from_yaml(
+    "examples/beamline/study.yaml", overrides={"bunch.n": 128, "tracker.device": "cpu"},
+)
 result = study.run()
 result.save("result.h5")
 restored = study.load_result("result.h5")
@@ -35,7 +53,11 @@ Top-level keys are `lattice`, `energy_eV`, `mc2_eV`, `bunch`, `tracker`, `run`,
 and `reference`. The first, second, and fourth are required. Energy is total
 energy, including rest energy; it must exceed `mc2_eV` (electron rest energy by
 default). Use SI units throughout. Construct a new study to change the lattice
-or physics switches; repeated runs reuse the same tracker.
+or physics switches; repeated runs reuse the same tracker. Use `overrides`
+with dotted keys to apply changes before construction. Do not mutate tracker
+flags after construction: element parameters and compiled functions can retain
+the previous choice. See [model settings](model_settings.md) for CSR, LSC,
+ring RF/IBS and injector switches.
 
 `lattice` requires `path` (an elegant `.lte` file) and `root` (beamline name).
 The native parser's documented subset applies. `wakes` defaults to `true`;
@@ -44,12 +66,20 @@ the lattice directory. An optional `wake_base_dir` overrides that base and is
 itself relative to the YAML file. Wake-table readers need the optional `[sdds]`
 extra. There is no independent YAML wake model.
 
+`lattice.strict_import` defaults to `false`, preserving warning-based import
+of unsupported declarations. Set it to `true` to reject unsupported lattice
+elements, ignored attributes and unresolved tokens. Strict YAML validation
+always applies independently of this import policy. The Python
+`from_lattice_file()` helper also defaults wake paths to the lattice's own
+directory; pass `wake_base_dir="."` to use the caller's working directory.
+
 `tracker` accepts these existing constructor options:
 
 | Options | Supported values |
 | --- | --- |
 | `device`, `dtype` | `cpu` (default), `cuda`, `cuda:N`; `float64` (default), `float32` |
-| `compile`, `lsc`, `csr`, `fast_collective_effects`, `always_change_p0`, `dipole_collective_subcycle` | booleans, with native tracker defaults |
+| `compile`, `lsc`, `csr`, `fast_collective_effects`, `always_change_p0`, `dipole_collective_subcycle`, `csr_transient` | booleans, with native tracker defaults |
+| `csr_drift_model` | `overtaking` (default), `stupakov`, `retarded` |
 | `compile_mode` | null, `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs` |
 | `compile_collective_chunks` | boolean or null (native default) |
 | `bunch_charge_C` | signed total bunch charge; default 0 |
@@ -61,6 +91,10 @@ extra. There is no independent YAML wake model.
 CUDA and compilation require the corresponding hardware/toolchain described
 in [compilation.md](compilation.md). YAML does not accept Python objects such
 as sampled errors or fiducial references; supply those through the Python API.
+`csr_transient: true` or a non-default `csr_drift_model` requires `csr: true`
+and `fast_collective_effects: true`. The [CSR example](examples/csr.yaml)
+and [selection tables](model_settings.md#csr-bend-and-drift-models) show valid
+combinations. CUDA requests fail with a CPU-setting hint when unavailable.
 
 `run` accepts `return_trajectory` (boolean, default false) and `output` (HDF5
 path, optional). `run()` saves when `output` is configured; the CLI's `-o` or
@@ -122,3 +156,9 @@ values, absolute difference for zero. Differences are saved in
 `metadata["reference_diff"]` and survive an HDF5 roundtrip. References are
 diagnostics, not pass/fail tolerances. `.twi`, `.sig`, and ASTRA emit-table
 reference files require explicit preprocessing into these scalar quantities.
+
+Configured runs also save `metadata["config_yaml"]`: the input configuration
+with explicit overrides applied, before path/dtype normalization. Paths in
+that snapshot use `metadata["config_path"]` as their base. Omitted settings
+continue to use the package defaults; the snapshot does not embed particle,
+lattice or wake files. The original YAML is never edited by overrides.

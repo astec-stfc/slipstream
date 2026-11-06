@@ -4,6 +4,10 @@ Start with a tracker matching the physical problem. `NativeTracker` follows
 ring turns, `LinacTracker` follows one beamline pass, and `Injector` follows
 Cartesian particles through injector fields and space charge.
 
+New users: [getting started](getting_started.md) walks from installation to
+a saved result. The [examples index](examples/README.md) lists runnable
+entry points; [model settings](model_settings.md) explains switches and CSR choices.
+
 ## Physics
 
 - [Native physics reference](native_reference.md): coordinates, transport,

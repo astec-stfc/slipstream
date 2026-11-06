@@ -21,6 +21,13 @@ class LinearOptics(NamedTuple):
     alpha_y: torch.Tensor
 
 
+def _residual_turn(ring: RingMap, co: torch.Tensor, create_graph: bool) -> torch.Tensor:
+    """One-particle turn for Newton residuals. A packed Warp turn takes ~0.4 ms where the
+    launch-bound eager PyTorch turn takes ~0.6 s on CUDA; otherwise eager, so compiled maps
+    never retrace for shape ``(6,)``."""
+    return ring.turn(co, eager=create_graph or ring._warp_params is None)
+
+
 def _jacobian(ring: RingMap, x0: torch.Tensor, create_graph: bool) -> torch.Tensor:
     return torch.autograd.functional.jacobian(
         lambda u: ring.turn(u, eager=True), x0, create_graph=create_graph, vectorize=create_graph,
@@ -38,7 +45,7 @@ def _closed_orbit_and_matrix(
     eye = torch.eye(4, dtype=ring.dtype, device=ring.device)
     for _ in range(iters):
         J = _jacobian(ring, co, create_graph)
-        resid = ring.turn(co, eager=True)[:4] - co[:4]
+        resid = _residual_turn(ring, co, create_graph)[:4] - co[:4]
         converged = resid.abs().max().item() < tol
         co = torch.cat([co[:4] - torch.linalg.solve(J[:4, :4] - eye, resid), co[4:]])
         if converged:
@@ -58,7 +65,7 @@ def closed_orbit(ring: RingMap, delta: float = 0.0, iters: int = 8, create_graph
         co[5] = delta
         eye = torch.eye(4, dtype=ring.dtype, device=ring.device)
         for _ in range(iters):
-            resid = ring.turn(co, eager=True)[:4] - co[:4]
+            resid = _residual_turn(ring, co, False)[:4] - co[:4]
             if resid.abs().max().item() < tol:
                 return co
             J = _jacobian(ring, co, create_graph=False)
@@ -259,7 +266,8 @@ def dynamic_aperture(
     opt: LinearOptics | None = None,
 ) -> DynamicAperture:
     """Compute dynamic aperture; see the module documentation for details."""
-    opt = opt or linear_optics(ring, delta)
+    # Launches need only the closed orbit; full optics costs a Jacobian per Newton step.
+    co = opt.closed_orbit if opt is not None else closed_orbit(ring, delta)
     dev, dt = ring.device, ring.dtype
     theta = torch.linspace(0, math.pi, n_angles, dtype=dt, device=dev)
     lo = torch.zeros(*batch_shape, n_angles, dtype=dt, device=dev)
@@ -267,7 +275,9 @@ def dynamic_aperture(
     frac = torch.arange(1, n_r + 1, dtype=dt, device=dev) / n_r
     for _ in range(refine + 1):
         r = lo.unsqueeze(-1) + width.unsqueeze(-1) * frac  # (..., n_angles, n_r)
-        state = launch(opt, r * torch.cos(theta).unsqueeze(-1), r * torch.sin(theta).unsqueeze(-1))
+        state = co.expand(*r.shape, 6).clone()
+        state[..., 0] += r * torch.cos(theta).unsqueeze(-1)
+        state[..., 2] += r * torch.sin(theta).unsqueeze(-1)
         with torch.no_grad():
             alive = ring.track(state, n_turns, aperture=aperture).loss_turn < 0
         # number of leading survivors along each ray = index of first loss

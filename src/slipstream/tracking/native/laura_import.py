@@ -70,7 +70,7 @@ def _to_element_spec(r, load_wakes: bool) -> ElementSpec | None:
             n_kicks=r.n_kicks if r.n_kicks > 0 else 1,
             end1_focus=r.end1_focus, end2_focus=r.end2_focus,
             body_focus_model=body_focus_model,
-            wake=wake, transverse_wake_x=wake_x, transverse_wake_y=wake_y,
+            wake=wake, transverse_wake_x=wake_x, transverse_wake_y=wake_y, cell_length=float(getattr(r, "cell_length", 0.0) or 0.0),
         )
     if r.length != 0.0:
         return ElementSpec(name, "drift", r.length)

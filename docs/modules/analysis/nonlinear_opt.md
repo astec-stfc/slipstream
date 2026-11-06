@@ -103,7 +103,11 @@ Bounded Powell, Nelder-Mead or differential-evolution baseline.
 
 Objective accepts a tensor with theta's dtype/device. Each evaluation is
 detached; hardware synchronization here is intentional optimiser control.
-SciPy is a core package dependency. Budgets count objective calls.
+SciPy is a core package dependency. Budgets count objective calls; a
+repeated point returns its cached value without spending budget. Powell and
+Nelder-Mead search the unit box spanned by `bounds` (Powell `xtol=1e-3`,
+Nelder-Mead initial simplex steps of a quarter of each bound width), so
+knobs with very different scales move proportionately.
 
 ### `multi_fidelity`
 

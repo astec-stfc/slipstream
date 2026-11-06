@@ -12,7 +12,7 @@ Constructs field-map injector elements from chained LAURA sections. Cavities, so
 
 ### `Model and numerical conventions`
 
-**Validated against a real machine**: CLARA's real ASTRA injector deck
+**Compared with a machine-specific ASTRA deck**: CLARA's real ASTRA injector deck
 (`examples/clara_linac/ASTRA/5pC/injector400.in`) covers exactly the
 LAURA sections `HRG1`, `S01`, `L01` (confirmed directly -- every real
 `C_pos`/`S_pos`/`Ap_Z1`/`Ap_R` value in that deck matches this
@@ -31,7 +31,7 @@ actually positive.
 
 ## Usage
 
-Call `from_laura` with the machine/section chain and the supported source/settings arguments; this requires optional LAURA packages.
+Call `from_laura` with a machine module or a prebuilt `LAURA` instance and the section chain and the supported source/settings arguments; this requires optional LAURA packages.
 
 ### API reference
 
@@ -43,7 +43,27 @@ def from_laura(machine_module, section_names: tuple[str, ...], z_stop_m: float, 
 
 Build an `Injector` from `section_names` (in beamline order,
 e.g. `("HRG1", "S01", "L01")` for CLARA), stopping tracking at
-`z_stop_m`.
+`z_stop_m`. A module is opened with a scoped layout containing only this section
+chain, so unrelated full-machine layout validation cannot block an injector import.
+A prebuilt `LAURA` instance retains caller-applied control/readback updates.
+
+The importer uses LAURA's supported typed `translate_elements` API. It does not require
+`SectionLatticeTranslator.to_slipstream` (absent in some installed LAURA versions), parse
+raw machine YAML again, or write temporary ASTRA field maps. Original resolved HDF5
+map filenames remain attached to the injector. Importing does not mutate the caller's
+LAURA elements. Physical positions use LAURA's field reference plus `dz`; solenoid
+x/y offsets and two tilts use the same values/signs as LAURA's ASTRA translator, in
+metres/radians. Aperture x placement and quad x tilt are retained. LAURA off-crest RF
+phase maps to negative ASTRA `Phi`; with `absolute_phases=True`, `phase_deg` is the
+absolute ASTRA phase (stored LAURA crest minus off-crest phase). Native `crest_deg=-90`
+converts ASTRA sine to the native cosine convention without recalculating the crest.
+
+Unsupported placed RF cavities, out-of-plane aperture/quad placement, quadrupole
+field profiles and relative aperture extents raise rather than being approximated
+silently. Powered correctors warn and are omitted; off-mode studies must use the
+appropriate readbacks. Screen planes are retained as `Injector.screens`; screen names,
+camera calibration and element identities remain available in the caller's LAURA model.
+Use that model for diagnostic provenance, rather than inventing names from the numeric list.
 
 `distribution`/`generator` (the latter via `injector_kwargs`):
 LAURA has no single-file equivalent of an ASTRA deck's own

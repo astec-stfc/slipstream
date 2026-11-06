@@ -72,13 +72,25 @@ This is an envelope match: the inferred magnet positions do not reproduce
 the reference's peak locations or pointwise Twiss curves. Straights are
 dispersive; the earlier achromatic constraint has been removed.
 
-The optimisation varies the central Q1 quadrupole family and all three
-sextupole families; the other quadrupoles remain fixed. JSON output identifies
-the approximation, nominal optics, SI strengths and objective units (negative
-upper-half-plane DA polygon area in mm²). Default grids/budgets are deliberately
+The optimisation varies the central Q1 quadrupole family and the S3
+sextupole family; the other quadrupoles remain fixed. S1 and S2 hold the
+linear chromaticity at `--xi` (default `1 1`) through a float64 response
+matrix computed once at the lattice-file strengths. Chromaticity is affine in
+K2, and Q1's ±0.005 m⁻² range is treated linearly (checked to within 0.03 of
+the target at the Q1 bound). S3's bounds keep the derived S1/S2 within
+±150 m⁻³ at nominal Q1. Without this constraint,
+DA area alone rewards switching the sextupoles off. JSON output identifies
+the approximation, nominal optics, the lattice-file and target chromaticities,
+SI strengths (Q1, S1, S2, S3) and objective units (negative
+upper-half-plane DA polygon area in mm²). Per-evaluation progress goes to
+stderr, so stdout remains JSON. Default grids/budgets are deliberately
 small. Surrogate launches use 50/100 µm horizontal and 30/50 µm vertical
 offsets to stay within this approximation's stable region. The default DA
-scan extends to 2 mm (`--r-max` in metres), with one refinement pass.
+scan extends to 20 mm (`--r-max` in metres), with one refinement pass.
+The DA area is a staircase in the knobs (resolution
+`r_max / radii**(refine+1)` per ray), so tiny optimiser steps see no change.
+Differential evolution's initial population (5 × knobs) consumes most of a
+25-evaluation budget.
 For a finer study, increase `--turns`, `--budget`, `--angles`, `--radii`
 and `--refine`; vary `--r-max` to establish that the boundary is bracketed,
 and check convergence before interpreting acceptance. The bent ring is
@@ -90,7 +102,37 @@ Install CMA-ES with `pip install 'slipstream-accel[optimise]'` and add
 CPU regression tests pass, including seeded CMA-ES quadratic convergence with anisotropic knob bounds.
 
 The example now writes reference optics, lattice and derived-parameter tables,
-plus Twiss/layout and nominal DA plots. See [ring reference outputs](ring_outputs.md)
+plus Twiss/layout and nominal DA plots. After optimisation it rescans the
+best candidate across all methods, writes `optimised_dynamic_aperture.csv`
+and overlays it on the nominal boundary in `dynamic_aperture_comparison.png`. See [ring reference outputs](ring_outputs.md)
 for the reusable package APIs. Run `python examples/nonlinear_optimisation.py
 --reference-only` for the lattice/parameter outputs without optimisation;
 `--no-plots` needs no Matplotlib, and `--output-dir` chooses the destination.
+
+## Diamond superperiod example
+
+`python examples/diamond/nonlinear_optimisation.py [--cma]` tracks the
+`SPERIOD` line of `examples/diamond/diamond.lte` at 3 GeV. This is one of
+six identical superperiods, so six period passes make one ring turn and
+`--turns` counts ring turns. `ring_parameters(..., periods=6)` reports
+whole-ring circumference, tunes and chromaticity, while the optics, lattice
+and Twiss/layout outputs show one superperiod. Outputs default to
+`examples/diamond`. The table and plot set matches the MLS example, plus
+`chromaticity_response.csv` with each family's K2 and ring
+d(xi_x, xi_y)/dK2 from float64 autograd.
+
+HALFS1A and S2A, the dispersive families with the largest and
+well-conditioned chromatic response, hold ring chromaticity at `--xi`
+(default `0 0`). Chromaticity is affine in K2 with fixed quadrupoles, so the
+solve is exact to float64 linear optics. The other six families are the DA
+knobs, bounded to |K2| <= 60 m⁻³. A candidate whose derived corrector
+exceeds that limit skips the scan and scores a positive penalty. The
+default DA uses 25 rays × 16 radii in one pass to 30 mm, over 512 turns.
+The MLS example's gradient-screening stage is omitted. With fixed linear
+optics, its tune/beta constraint has no sextupole gradient, and sub-mm
+action growth barely responds to sextupoles.
+
+The `.lte` file uses MAD-style `QUADRUPOLE`/`SEXTUPOLE` names, which the
+native parser accepts. Its `KICKER` and `MONIT` elements have zero kicks or
+length and become drifts or are dropped. Edge angles use the chromatic
+edge map in both PyTorch and Warp transport.

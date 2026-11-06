@@ -10,8 +10,6 @@ import torch
 from . import warp_kernels as wk
 from .elements import _DRIFT_FRAC4, _DRIFT_FRAC6, _DRIFT_FRAC8, _KICK_FRAC4, _KICK_FRAC6, _KICK_FRAC8
 
-_MAX_STAGES = 22  # order-8 Yoshida: 3*8-2 after the order-6 triple jump
-
 
 class PackedRing(NamedTuple):
     length: torch.Tensor
@@ -76,19 +74,25 @@ def pack(params, device: torch.device, dtype: torch.dtype) -> PackedRing | None:
         6: (_DRIFT_FRAC6, _KICK_FRAC6),
         8: (_DRIFT_FRAC8, _KICK_FRAC8),
     }
+    # Stage tables padded only to this lattice's longest integrator: compact rows, fewer cache lines.
+    width = max(len(order_tables[p.integration_order][0]) for p in params)
     rows = []
     for p in params:
         drift_frac, kick_frac = order_tables[p.integration_order]
         length = _plain(p.length)
         angle = _plain(p.angle)
         h = angle / length if angle != 0.0 else 0.0
-        ds0 = length / p.n_kicks
-        drift = [0.0] * _MAX_STAGES
-        kick = [0.0] * _MAX_STAGES
-        c = [1.0] * _MAX_STAGES
-        s = [0.0] * _MAX_STAGES
-        c2 = [1.0] * _MAX_STAGES
-        s2 = [0.0] * _MAX_STAGES
+        n_kicks = p.n_kicks
+        if _plain(p.k1) == 0.0 and _plain(p.k2) == 0.0 and (h == 0.0 or p.exact_dipole):
+            # Field-free drift or exact sector bend: one exact step, as elements.track_element takes.
+            n_kicks, drift_frac, kick_frac = 1, (1.0,), (0.0,)
+        ds0 = length / n_kicks
+        drift = [0.0] * width
+        kick = [0.0] * width
+        c = [1.0] * width
+        s = [0.0] * width
+        c2 = [1.0] * width
+        s2 = [0.0] * width
         for i, (df, kf) in enumerate(zip(drift_frac, kick_frac)):
             drift[i] = ds0 * df
             kick[i] = ds0 * kf
@@ -97,7 +101,7 @@ def pack(params, device: torch.device, dtype: torch.dtype) -> PackedRing | None:
         rows.append((
             length, angle, _plain(p.k1), _plain(p.k2), _plain(p.e1), _plain(p.e2),
             _plain(p.dx), _plain(p.dy), _plain(p.tilt), _plain(p.hgap), _plain(p.fint),
-            p.n_kicks, len(drift_frac), p.edge_order, p.edge1_effects, p.edge2_effects,
+            n_kicks, len(drift_frac), p.edge_order, p.edge1_effects, p.edge2_effects,
             drift, kick, h, 1.0 / h if h else 0.0, c, s, c2, s2,
             p.offset.detach().to(device=device, dtype=dtype), int(bool(p.exact_dipole)),
         ))
@@ -153,12 +157,13 @@ if wk._HAVE_WARP:
         delta = state[six * i + 5] + zero
         gamma0 = energy / mc2
         p0 = wk.wp.sqrt(gamma0 * gamma0 - one)
-        beta0 = p0 / gamma0
+        # Reciprocals keep IEEE divisions (long-latency subroutines) out of the per-stage chain.
+        inv_beta0 = gamma0 / p0
 
         for e in range(length.shape[0]):
             he = h[e]
             bend = he != zero
-            beta = p0 * (one + delta) / wk.wp.sqrt(p0 * p0 * (one + delta) * (one + delta) + one)
+            inv_beta = wk.wp.sqrt(p0 * p0 * (one + delta) * (one + delta) + one) / (p0 * (one + delta))
 
             if dx[e] != zero or dy[e] != zero or tilt[e] != zero:
                 x = x - dx[e]
@@ -172,6 +177,7 @@ if wk._HAVE_WARP:
                 x, y, px, py = xr, yr, pxr, pyr
 
             if bend and edge1_effects[e] != 0:
+                hd = he / (one + delta)  # elegant edge curvature scales as h/(1+delta)
                 pz = wk.wp.sqrt((one + delta) * (one + delta) - px * px - py * py)
                 xp = px / pz
                 yp = py / pz
@@ -187,28 +193,26 @@ if wk._HAVE_WARP:
                 xp0 = xp
                 yp0 = yp
                 t = wk.wp.tan(e1[e])
-                xp = xp + he * t * x0
-                yp = yp - he * wk.wp.tan(e1[e] - psi) * y0
+                xp = xp + hd * t * x0
+                yp = yp - hd * wk.wp.tan(e1[e] - psi) * y0
                 if edge_order[e] >= 2:
                     sec2 = one / (ce * ce)
                     t2 = t * t
-                    h2 = he * he
+                    h2 = hd * hd
                     n = -k1[e] / (h[e] * h[e])
                     t211 = -n * h2 * t
                     t233 = h2 * (n + one / two + t2) * t
-                    xp = xp + t211 * x0 * x0 + he * t2 * x0 * xp0 + t233 * y0 * y0 - he * t2 * y0 * yp0
-                    yp = yp - he * t2 * yp0 * x0 + h2 * (two * n) * t * x0 * y0 - he * sec2 * xp0 * y0
-                    x = x0 - he / two * (t2 * x0 * x0 - sec2 * y0 * y0)
-                    y = y0 + he * t2 * x0 * y0
+                    xp = xp + t211 * x0 * x0 + hd * t2 * x0 * xp0 + t233 * y0 * y0 - hd * t2 * y0 * yp0
+                    yp = yp - hd * t2 * yp0 * x0 + h2 * (two * n) * t * x0 * y0 - hd * sec2 * xp0 * y0
+                    x = x0 - hd / two * (t2 * x0 * x0 - sec2 * y0 * y0)
+                    y = y0 + hd * t2 * x0 * y0
                 pz_new = (one + delta) / wk.wp.sqrt(one + xp * xp + yp * yp)
                 px = xp * pz_new
                 py = yp * pz_new
 
             nk = n_kicks[e]
             for kick_index in range(nk):
-                for stage in range(_MAX_STAGES):
-                    if stage >= n_stages[e]:
-                        continue
+                for stage in range(n_stages[e]):
                     ds = drift_ds[e, stage]
                     kd = kick_ds[e, stage]
                     if bend and exact_dipole[e] != 0:
@@ -224,7 +228,7 @@ if wk._HAVE_WARP:
                         w_new = (dd - px_new * px_new - py * py) / (pz_new + one)
                         alpha = ds * he + wk.wp.asin((px * pz_new - px_new * pz) / ((one + delta) * (one + delta) - py * py))
                         x = x + x * cm1 + rho[e] * (w_new - w * c + px * ss)
-                        y = y + py / he * alpha
+                        y = y + py * rho[e] * alpha
                         px = px_new
                         arc = (one + delta) * rho[e] * alpha
                     elif bend:
@@ -233,19 +237,19 @@ if wk._HAVE_WARP:
                         c2 = cos_half[e, stage]
                         s2 = sin_half[e, stage]
                         pz = wk.wp.sqrt((one + delta) * (one + delta) - px * px - py * py)
-                        pz_theta = pz * c - px * ss
-                        factor = (rho[e] + x) * ss / pz_theta
-                        g_minus_1 = two * s2 * (px * c2 + pz * s2) / pz_theta
+                        inv_pz_theta = one / (pz * c - px * ss)
+                        factor = (rho[e] + x) * ss * inv_pz_theta
+                        g_minus_1 = two * s2 * (px * c2 + pz * s2) * inv_pz_theta
                         x = x + (rho[e] + x) * g_minus_1
                         px = px * c + pz * ss
                         y = y + py * factor
                         arc = factor * (one + delta)
                     else:
-                        pz = wk.wp.sqrt((one + delta) * (one + delta) - px * px - py * py)
-                        x = x + ds * px / pz
-                        y = y + ds * py / pz
-                        arc = ds * (one + delta) / pz
-                    tau = tau + (arc / beta - ds / beta0)
+                        inv_pz = one / wk.wp.sqrt((one + delta) * (one + delta) - px * px - py * py)
+                        x = x + ds * px * inv_pz
+                        y = y + ds * py * inv_pz
+                        arc = ds * (one + delta) * inv_pz
+                    tau = tau + (arc * inv_beta - ds * inv_beta0)
 
                     if kd != zero:
                         fy = k1[e] * x + (one / two) * k2[e] * (x * x - y * y)
@@ -257,6 +261,7 @@ if wk._HAVE_WARP:
                         py = py + weight * fx
 
             if bend and edge2_effects[e] != 0:
+                hd = he / (one + delta)  # elegant edge curvature scales as h/(1+delta)
                 pz = wk.wp.sqrt((one + delta) * (one + delta) - px * px - py * py)
                 xp = px / pz
                 yp = py / pz
@@ -272,19 +277,19 @@ if wk._HAVE_WARP:
                 xp0 = xp
                 yp0 = yp
                 t = wk.wp.tan(e2[e])
-                xp = xp + he * t * x0
-                yp = yp - he * wk.wp.tan(e2[e] - psi) * y0
+                xp = xp + hd * t * x0
+                yp = yp - hd * wk.wp.tan(e2[e] - psi) * y0
                 if edge_order[e] >= 2:
                     sec2 = one / (ce * ce)
                     t2 = t * t
-                    h2 = he * he
+                    h2 = hd * hd
                     n = -k1[e] / (h[e] * h[e])
                     t211 = -h2 * (n + t2 / two) * t
                     t233 = h2 * (n - t2 / two) * t
-                    xp = xp + t211 * x0 * x0 - he * t2 * x0 * xp0 + t233 * y0 * y0 + he * t2 * y0 * yp0
-                    yp = yp + he * t2 * yp0 * x0 + h2 * (two * n + sec2) * t * x0 * y0 + he * sec2 * xp0 * y0
-                    x = x0 + he / two * (t2 * x0 * x0 - sec2 * y0 * y0)
-                    y = y0 - he * t2 * x0 * y0
+                    xp = xp + t211 * x0 * x0 - hd * t2 * x0 * xp0 + t233 * y0 * y0 + hd * t2 * y0 * yp0
+                    yp = yp + hd * t2 * yp0 * x0 + h2 * (two * n + sec2) * t * x0 * y0 + hd * sec2 * xp0 * y0
+                    x = x0 + hd / two * (t2 * x0 * x0 - sec2 * y0 * y0)
+                    y = y0 - hd * t2 * x0 * y0
                 pz_new = (one + delta) / wk.wp.sqrt(one + xp * xp + yp * yp)
                 px = xp * pz_new
                 py = yp * pz_new

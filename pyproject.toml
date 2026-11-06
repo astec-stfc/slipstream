@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slipstream-accel"
-version = "0.1.0"
+version = "1.0.0"
 description = "Native accelerator beam-dynamics and tracking tools"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,10 @@ dependencies = [
     "scipy>=1.10",
     "torch>=2.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/astec-stfc/slipstream"
+Documentation = "https://github.com/astec-stfc/slipstream/blob/main/docs/README.md"
 
 [project.optional-dependencies]
 sdds = ["soliday.sdds"]
@@ -36,6 +40,6 @@ testpaths = ["tests"]
 line-length = 120
 
 [tool.ruff.lint]
-# ponytail: explicit rules so new ruff releases do not change what CI enforces
+# Explicit rules keep new Ruff releases from changing what CI enforces.
 select = ["E4", "E7", "E9", "F"]
 ignore = ["E731"]

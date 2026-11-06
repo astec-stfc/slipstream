@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -17,14 +18,31 @@ _STMT_START_RE = re.compile(r"(?m)^[ \t]*([A-Za-z_][\w.-]*)[ \t]*:")
 _TYPE_RE = re.compile(r"\s*([A-Za-z_]\w*)\s*(.*)", re.DOTALL)
 _PARAM_RE = re.compile(r'([A-Za-z_]\w*)\s*=\s*("[^"]*"|[^,]+)')
 
-_QUAD_TYPES = {"KQUAD", "QUAD"}
-_SEXT_TYPES = {"KSEXT"}
+# MAD-style QUADRUPOLE/SEXTUPOLE names (e.g. MADInput conversions) share K1/K2 field names.
+_QUAD_TYPES = {"KQUAD", "QUAD", "QUADRUPOLE"}
+_SEXT_TYPES = {"KSEXT", "SEXT", "SEXTUPOLE"}
 _BEND_TYPES = {"CSBEND", "CSBEN", "CSRCSBEND", "CSRCSBEN", "SBEND", "SBEN"}
 _CSR_BEND_TYPES = {"CSRCSBEND", "CSRCSBEN"}  # the subset that gets a CSR kick, see ElementSpec.csr
 _LINE_TYPES = {"LINE"}
 _RF_TYPES = {"RFCA", "RFCW"}
 _HKICK_TYPES = {"HKICK"}
 _VKICK_TYPES = {"VKICK"}
+_DRIFT_TYPES = {"DRIFT", "CSRDRIFT"}
+_NOOP_TYPES = {"MARK", "MARKER", "WATCH", "CHARGE", "CLEAN"}
+_IMPORTED_PARAMS = {
+    **dict.fromkeys(_DRIFT_TYPES | _NOOP_TYPES, {"L"}),
+    **dict.fromkeys(_QUAD_TYPES, {"L", "K1"}),
+    **dict.fromkeys(_SEXT_TYPES, {"L", "K2"}),
+    **dict.fromkeys(_BEND_TYPES, {"L", "ANGLE", "K1", "K2", "E1", "E2", "HGAP", "FINT", "EDGE_ORDER",
+                                "EDGE1_EFFECTS", "EDGE2_EFFECTS", "CSR", "BINS", "SG_HALFWIDTH", "N_SLICES",
+                                "SYNCH_RAD", "ISR"}),
+    **dict.fromkeys(_HKICK_TYPES | _VKICK_TYPES, {"L", "KICK"}),
+    **dict.fromkeys(_RF_TYPES, {"L", "VOLT", "PHASE", "FREQ", "CHANGE_P0", "WAKEFILE", "TCOLUMN", "WZCOLUMN",
+                              "WXCOLUMN", "WYCOLUMN", "N_KICKS", "END1_FOCUS", "END2_FOCUS", "BODY_FOCUS_MODEL", "CELL_LENGTH", "ZWAKE", "TRWAKE",
+                              "WAKES_AT_END"}),
+    "KOCT": {"L", "K3", "DX", "DY", "TILT"},
+    "MULT": {"L", "ORDER", "KNL", "FACTOR", "DX", "DY", "TILT", "BORE", "BTIPL", "DZ", "SYNCH_RAD"},
+}
 
 
 @dataclass(frozen=True)
@@ -55,6 +73,12 @@ class ElementSpec:
     wake: ShortRangeWake | None = None
     transverse_wake_x: TransverseWake | None = None
     transverse_wake_y: TransverseWake | None = None
+    cell_length: float = 0.0
+    """``RFCW`` ``CELL_LENGTH`` [m]. The wake tables are per cell, so each of the ``n_kicks`` sub-kicks applies ``length / cell_length / n_kicks`` of
+    the table (elegant's ``wake.factor``); 0 (unset) means the table is for the whole element."""
+    include_z_wake: bool = True
+    include_tr_wake: bool = True
+    """``RFCW`` ``ZWAKE`` / ``TRWAKE`` (both default on): ``False`` drops the longitudinal / transverse wake of this element."""
     n_kicks: int = 1
     beta_wave: float = 1.0
     end1_focus: bool = False
@@ -71,6 +95,10 @@ class ElementSpec:
     csr_bins: int = 256
     csr_sg_halfwidth: int = 1
     csr_n_slices: int = 1
+    csr_drift_phi_m: float = 0.0
+    """``CSRDRIFT`` carry: absolute bend angle (rad) of the last CSR dipole, for the Stupakov drift model."""
+    csr_drift_dz: float = 0.01
+    """``CSRDRIFT`` carry: length (m) of one CSR kick in the Stupakov drift model (elegant's ``DZ``)."""
     k3: float = 0.0
     multipoles: tuple[tuple[int, float], ...] = ()
     skew_multipoles: tuple[tuple[int, float], ...] = ()
@@ -84,6 +112,8 @@ class ElementSpec:
     differentiable exactly at its nominal zero-kick operating point)."""
     kick_y: float = 0.0
     """``kind="vkick"`` only, elegant's ``VKICK``'s own ``KICK=``."""
+    synch_rad: bool = False
+    isr: bool = False
 
 
 def _split_statements(text: str) -> list[tuple[str, str]]:
@@ -131,11 +161,21 @@ def _str(params: dict[str, str], key: str) -> str | None:
     return raw.strip().strip('"')
 
 
-def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementSpec]:
-    """Real per-element ring list for ``NativeTracker``, in beamline order."""
+def parse_elegant_lattice(
+    lte_path: str | Path, root_name: str, *, strict: bool = False,
+    audit: list[dict[str, object]] | None = None,
+) -> list[ElementSpec]:
+    """Expand a local lattice; reject approximations with ``strict=True``.
+
+    The default preserves legacy maps, warning about approximations. ``audit``
+    collects JSON-compatible records for each affected beamline occurrence.
+    This checks the supported syntax subset, not full elegant model parity.
+    """
     text = Path(lte_path).read_text()
     elements: dict[str, ElementSpec] = {}
     lines: dict[str, list[str]] = {}
+    issues: dict[str, dict[str, object]] = {}
+    declared: set[str] = set()
 
     for name, rest in _split_statements(text):
         name = name.upper()
@@ -151,6 +191,20 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
         body = after_type.lstrip(",")
         params = _parse_params(body)
         length = _float(params, "L")
+        declared.add(name)
+        issues.pop(name, None)
+        ignored = {key: value for key, value in params.items() if key not in _IMPORTED_PARAMS.get(etype, {"L"})}
+        reasons = []
+        if etype not in _IMPORTED_PARAMS:
+            reasons.append("unsupported element replaced by drift" if length else "unsupported zero-length element dropped")
+        if ignored:
+            reasons.append("ignored attributes: " + ", ".join(sorted(ignored)))
+        if etype in _RF_TYPES and (_str(params, "BODY_FOCUS_MODEL") or "none").lower() not in ("none", "tw1", "srs"):
+            ignored["BODY_FOCUS_MODEL"] = params["BODY_FOCUS_MODEL"]
+            reasons.append("unsupported BODY_FOCUS_MODEL replaced by none")
+        if reasons:
+            issues[name] = dict(element=name, original_type=etype, length_m=length,
+                                ignored_attributes=ignored, reason="; ".join(reasons))
         if etype in _BEND_TYPES:
             elements[name] = ElementSpec(
                 name, "bend", length, angle=_float(params, "ANGLE"), k1=_float(params, "K1"),
@@ -163,6 +217,7 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
                 csr_bins=max(3, int(_float(params, "BINS", 256))),
                 csr_sg_halfwidth=int(_float(params, "SG_HALFWIDTH", 0)),
                 csr_n_slices=max(1, int(_float(params, "N_SLICES", 4))),
+                synch_rad=bool(_float(params, "SYNCH_RAD")), isr=bool(_float(params, "ISR")),
             )
         elif etype in _QUAD_TYPES:
             elements[name] = ElementSpec(name, "quad", length, k1=_float(params, "K1"))
@@ -195,13 +250,16 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
             # unrecognized falls back to "none".
             body_focus_model_raw = (_str(params, "BODY_FOCUS_MODEL") or "none").lower()
             body_focus_model = body_focus_model_raw if body_focus_model_raw in ("none", "tw1", "srs") else "none"
+            if _float(params, "WAKES_AT_END") != 0.0 and _str(params, "WAKEFILE"):
+                raise NotImplementedError(f"{name}: RFCW WAKES_AT_END is unsupported (wakes are applied before the end drift of each sub-kick)")
             elements[name] = ElementSpec(
                 name, "rf", length, voltage_V=_float(params, "VOLT"),
                 phase_rad=_float(params, "PHASE") * math.pi / 180.0, frequency_Hz=_float(params, "FREQ"),
                 change_p0=_float(params, "CHANGE_P0") != 0.0,
                 wakefile=_str(params, "WAKEFILE"), wake_t_column=_str(params, "TCOLUMN"),
                 wake_wz_column=_str(params, "WZCOLUMN"), wake_wx_column=_str(params, "WXCOLUMN"),
-                wake_wy_column=_str(params, "WYCOLUMN"),
+                wake_wy_column=_str(params, "WYCOLUMN"), cell_length=_float(params, "CELL_LENGTH"),
+                include_z_wake=_float(params, "ZWAKE", 1.0) != 0.0, include_tr_wake=_float(params, "TRWAKE", 1.0) != 0.0,
                 n_kicks=n_kicks_raw if n_kicks_raw > 0 else 1,
                 end1_focus=_float(params, "END1_FOCUS") != 0.0,
                 end2_focus=_float(params, "END2_FOCUS") != 0.0,
@@ -216,6 +274,7 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
         # else: zero-length no-op (MARK/WATCH/CHARGE/CLEAN/RF-with-no-L/etc) -- dropped.
 
     occurrence_counts: dict[str, int] = {}
+    warned: set[str] = set()
 
     def expand(name: str, _seen: frozenset[str] = frozenset()) -> list[ElementSpec]:
         if name in _seen:
@@ -226,9 +285,22 @@ def parse_elegant_lattice(lte_path: str | Path, root_name: str) -> list[ElementS
                 out.extend(expand(token, _seen | {name}))
             return out
         spec = elements.get(name)
+        occurrence_counts[name] = occurrence_counts.get(name, 0) + 1
+        issue = issues.get(name)
+        if name not in declared:
+            issue = dict(element=name, original_type=None, length_m=None, ignored_attributes={}, reason="unresolved line token")
+        if issue is not None:
+            record = dict(issue, occurrence=occurrence_counts[name], replacement=spec.kind if spec else "dropped")
+            if audit is not None:
+                audit.append(record)
+            message = f"{name} ({issue['original_type'] or 'undefined'}): {issue['reason']}"
+            if strict:
+                raise ValueError(message)
+            if name not in warned:
+                warnings.warn(message, UserWarning, stacklevel=2)
+                warned.add(name)
         if spec is None:
             return []
-        occurrence_counts[name] = occurrence_counts.get(name, 0) + 1
         return [replace(spec, occurrence=occurrence_counts[name])]
 
     return _apply_csrdrift_carry(expand(root_name.upper()))
@@ -238,19 +310,21 @@ def _apply_csrdrift_carry(elements: list[ElementSpec]) -> list[ElementSpec]:
     """Real elegant's ``CSRDRIFT`` -- see ``ElementSpec``'s own docstring for the model."""
     out = []
     pending_rho_m = 0.0
+    pending_phi_m = 0.0
     distance_m = 0.0
     carrying = False
     csr_bins, csr_sg_halfwidth = 256, 1
     for spec in elements:
         if spec.kind == "bend" and spec.csr and spec.angle != 0.0:
             pending_rho_m = spec.length / spec.angle
+            pending_phi_m = abs(spec.angle)
             csr_bins, csr_sg_halfwidth = spec.csr_bins, spec.csr_sg_halfwidth
             distance_m = 0.0
             carrying = True
             out.append(spec)
         elif spec.kind == "drift" and carrying:
             out.append(replace(spec, csr_drift_rho_m=pending_rho_m, csr_drift_start_m=distance_m,
-                               csr_bins=csr_bins, csr_sg_halfwidth=csr_sg_halfwidth))
+                               csr_drift_phi_m=pending_phi_m, csr_bins=csr_bins, csr_sg_halfwidth=csr_sg_halfwidth))
             distance_m += spec.length
         else:
             carrying = False

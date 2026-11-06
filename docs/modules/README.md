@@ -17,6 +17,7 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 
 ## analysis
 
+- [beamline_radiation](analysis/beamline_radiation.md): Differentiates linear expected ISR covariance through magnet strengths, lengths, faces and bend angles.
 - [emittance](analysis/emittance.md): RMS helpers combine unbiased position/momentum variances with the mean cross product.
 - [loco](analysis/loco.md): Differentiates closed-orbit BPM readings with respect to corrector kick angles.
 - [nonlinear](analysis/nonlinear.md): Computes fixed-energy ring closed orbits, Jacobian optics, chromaticity, NAFF frequencies, amplitude detuning, dynamic aperture and frequency-map diffusion.
@@ -57,6 +58,10 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 
 ## tracking/native
 
+- [injector_ibs](tracking/native/injector_ibs.md): Local equal-weight binary Coulomb collisions for injector studies, with Takizuka–Abe/Nanbu angular laws and elastic pair kinematics.
+- [injector_ibs_warp](tracking/native/injector_ibs_warp.md): Optional float64 CUDA acceleration of disjoint collision pairs, sharing the PyTorch grouping and random draws.
+- [injector_wake](tracking/native/injector_wake.md): Localized monopole wake kicks for the injector (ASTRA `&WAKE`, per-cell tables), with their closed-form checks.
+
 - [astra_io](tracking/native/astra_io.md): Converts ASTRA distribution rows from their reference-relative z/pz/time convention to absolute particle values.
 - [collective](tracking/native/collective.md): Implements local long-wavelength 1D LSC and steady-state 1D CSR momentum kicks.
 - [double_single](tracking/native/double_single.md): Represents selected frozen-energy ring coordinates as float32 high/low pairs for increased precision.
@@ -71,10 +76,12 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 - [laura_import](tracking/native/laura_import.md): Maps LAURA section records into the native element specification used for linac transport.
 - [laura_injector](tracking/native/laura_injector.md): Constructs field-map injector elements from chained LAURA sections.
 - [linac](tracking/native/linac.md): Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, local LSC and CSR.
+- [radiation](tracking/native/radiation.md): Opt-in classical dipole loss and Gaussian ISR in fixed-reference single-pass electron tracking.
 - [linac_setup](tracking/native/linac_setup.md): Crest calibration maximizes reference-particle energy gain through the upstream line and selected cavity using a phase scan and parabolic refinement.
 - [linac_twiss](tracking/native/linac_twiss.md): Propagates nonperiodic linear Twiss/dispersion or extracts ensemble statistics from tracked trajectories.
 - [magnets](tracking/native/magnets.md): Evaluates lab-frame static dipole, solenoid and quadrupole fields, including element offsets/rotations.
 - [optics](tracking/native/optics.md): Linearizes actual native per-element transport using autograd, solves periodic per-plane Twiss and dispersion and propagates element-local values.
+- [photocathode](tracking/native/photocathode.md): Opt-in laser-driven emission with Schottky-dependent quantum efficiency, limited by the net cathode surface field and by fall-back onto the cathode.
 - [ring](tracking/native/ring.md): Provides frozen-energy one-turn nonlinear transport with fixed delta and no RF, radiation damping/excitation or wakes.
 - [ring_physics](tracking/native/ring_physics.md): Native ring kicks apply sinusoidal RF, radiation damping/excitation and effective IBS damping times.
 - [ring_warp](tracking/native/ring_warp.md): Implements selected fixed-lattice one-turn ring transport using a packed Warp kernel.

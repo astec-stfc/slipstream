@@ -9,7 +9,10 @@ Implements local long-wavelength 1D LSC and steady-state 1D CSR momentum kicks. 
 ### Limits and conventions
 
 - LSC is a local model rather than elegant's full nonlocal LSCDRIFT implementation.
-- Pairwise CSR contains no entrance transient, shielding or drift propagation.
+- Pairwise CSR contains no entrance transient, shielding or drift propagation. The fixed-grid path adds an entrance transient
+  (`slippage_m`), a closed-form drift model (`csr_drift_delta_kick_fast`) and a retarded-field drift kernel
+  (`csr_drift_delta_kick_retarded`); shielding by a conducting pipe is not modelled (the shielding parameter
+  `sigma_z sqrt(rho) / h^(3/2)` of the CLARA chicane is below 0.1 at full compression, an estimate to verify).
 - Sharp profiles require convergence checks on bandwidth, softening and bin/smoothing parameters.
 - Preserve the directional sign: reversing sign and source direction can conceal pointwise error in symmetric mean-loss checks.
 
@@ -212,8 +215,30 @@ regularization. Explicit smooth_passes selects binomial smoothing;
 otherwise sg_halfwidth applies. No adaptive host-side tier selection.
 
 LinacTracker supplies the source dipole's BINS/SG_HALFWIDTH, including
-for its approximate drift tail. This implements the steady-state wake,
-not transient or Stupakov the csrdrift model.
+for its approximate drift tail. Without `slippage_m` this is the steady-state wake.
+
+With `slippage_m = rho * phi**3 / 24` (`phi` the bend angle accumulated at the *centre* of the slice) it is the entrance transient of
+Saldin, Schneidmiller and Yurkov as in elegant's CSRCSBEND without STEADY_STATE: the derivative sum runs over sources within the slippage
+length and the density term `(lambda(s + L_s) - lambda(s + 4 L_s)) / L_s^(1/3)` is subtracted. It is checked against the retarded-field
+reference of `Stories/CLARA_CSRValidation/lw_reference` (5.6% waveform error at the full 0.1325 rad of a VBC dipole, bunch-mean loss
+within 1%; the steady kernel alone is 18% off at half that angle). Below about two histogram bins of slippage the transient is unresolved.
+`LinacTracker(csr_transient=True)` sets it for every slice of every CSR dipole (fast kernels only), at the slice centre angle: the wake rises
+steeply over the first slippage length, and evaluating it at the end of each slice overestimates the loss of an 8-slice VBC dipole by 8%
+(0.991 of the retarded-field ideal with the centre rule against 1.077 with the end rule; elegant's own slicing is 1.087 at 8 slices and 1.010 at 64).
+
+### `csr_drift_delta_kick_fast`, `csr_drift_delta_kick_retarded`
+
+Both drift kernels evaluate their per-step wake (the retarded field, or the root of Stupakov's equation) in one fused Warp launch when Warp is installed (CUDA or CPU, float64);
+the PyTorch bisections remain the fallback and the reference (`_use_warp=False`).
+
+CSR in the drift behind a dipole of radius `rho` and angle `phi`, at distance `z` from its exit, for one kick of length `length_m`.
+`csr_drift_delta_kick_fast` is the closed-form model of Stupakov used by elegant's CSRDRIFT (USE_STUPAKOV): it is 3-6% above the retarded
+field of a Gaussian bunch near the exit and 17-22% above it at 0.5-1 m. `csr_drift_delta_kick_retarded` tabulates the point-charge kernel
+from the retarded Lienard-Wiechert field (velocity and acceleration terms, bend minus infinite straight line), bin by bin, and convolves it with
+the line density; it reproduces the independent reference to 0.2% in mean loss rate from 2 mm to 1 m. It costs about ten times more per kick.
+`LinacTracker(csr_drift_model="stupakov" | "retarded")` tracks every CSR drift in kicks, one wake evaluation per kick at the centre of the step: uniform
+`csr_drift_dz` (0.01 m, elegant's `DZ`) for `"stupakov"`, and for `"retarded"` graded steps from 0.005 m close to the exit up to 0.1 m, because that
+kernel is smooth in the distance; `"overtaking"`, the default, keeps the earlier lumped steady-state kick cut at the overtaking length.
 
 ## Numerical and implementation notes
 

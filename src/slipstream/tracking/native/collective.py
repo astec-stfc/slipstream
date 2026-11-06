@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 import torch._dynamo
 
-from ...constants import C_LIGHT, EPS0_F_PER_M
+from ...constants import C_LIGHT, ELECTRON_MASS_EV, EPS0_F_PER_M
 from . import warp_kernels
 
 _Z0_OHM = 1.0 / (EPS0_F_PER_M * C_LIGHT)  # vacuum impedance
@@ -86,6 +87,12 @@ def _get_compiled_csr_chunk_step():
     if _compiled_csr_chunk_step is None:
         _compiled_csr_chunk_step = torch.compile(_csr_chunk_step)
     return _compiled_csr_chunk_step
+
+
+def _warp_f64_wake_ready(zeta: torch.Tensor) -> bool:
+    """Whether the float64 Warp wake kernels (retarded wake, Stupakov root) can run on this tensor: CPU or CUDA, forward only."""
+    return (warp_kernels._HAVE_WARP and not torch._dynamo.is_compiling() and zeta.device.type in ("cpu", "cuda")
+            and zeta.dtype in (torch.float32, torch.float64) and not zeta.requires_grad)
 
 
 def _warp_collective_ready(primary: torch.Tensor, *others: torch.Tensor) -> bool:
@@ -779,8 +786,15 @@ def _csr_fast_field(
     tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float,
     n_bins: int, smooth_passes: int | None, sg_halfwidth: int,
     softening_m: float | torch.Tensor | None,
+    slippage_m: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Histogram -> smoothed derivative -> zero-padded forward CSR convolution."""
+    """Histogram -> smoothed derivative -> zero-padded forward CSR convolution.
+
+    ``slippage_m`` (a 0-d tensor, ``rho * phi**3 / 24`` for the bend angle ``phi`` accumulated up to the end of this slice)
+    selects the entrance-transient model of Saldin et al., as in elegant's CSRCSBEND without ``STEADY_STATE``: the derivative
+    sum runs over sources within the slippage length only, and the density term
+    ``(lambda(s + L_s) - lambda(s + 4 L_s)) / L_s**(1/3)`` is subtracted. For ``L_s`` much longer than the bunch it reduces to the
+    steady-state result."""
     idx, w, valid, _, dtau, nb = _fixed_grid(tau_m, n_bins, margin=0.1)
     lam = _bin_line_density(charge_per_particle_C, idx, w, valid, nb, dtau)
     if smooth_passes is not None:
@@ -799,22 +813,33 @@ def _csr_fast_field(
         softened = ((j * dtau).square() + eps.square()).clamp(min=torch.finfo(tau_m.dtype).tiny).pow(-1 / 6)
         softened = softened * dtau * torch.where(j == 0, 0.5, 1.0)
         kernel = torch.where(eps > 0, softened, kernel)
+    if slippage_m is not None:
+        ds = torch.floor(slippage_m / dtau)                      # slippage length in bins (elegant truncates the same way)
+        ds4 = torch.floor(4.0 * slippage_m / dtau)
+        # derivative sum over 1 <= j <= ds with the trapezoid end at j = ds; the analytic first interval only if ds > 0
+        end = torch.where((j == ds) & (ds >= 2), 0.5, 1.0)
+        kernel = torch.where((j <= ds) & (ds >= 1), kernel * end, torch.zeros_like(kernel))
     fft_size = 1 << (2 * nb - 1).bit_length()
     # Reverse before/after convolution: sources have tau_source>tau_observer.
     spectrum = torch.fft.rfft(derivative.flip(0), n=fft_size) * torch.fft.rfft(kernel, n=fft_size)
     field_grid = torch.fft.irfft(spectrum, n=fft_size)[:nb].flip(0)
+    if slippage_m is not None:
+        i = torch.arange(nb, device=lam.device)
+        ahead = lambda k: torch.where(i + k.long() < nb, lam[(i + k.long()).clamp(max=nb - 1)], torch.zeros_like(lam))  # noqa: E731
+        field_grid = field_grid - (ahead(ds) - ahead(ds4)) / slippage_m.clamp(min=torch.finfo(lam.dtype).tiny).pow(1.0 / 3.0)
     return _gather_linear(field_grid, idx, w, valid)
 
 
 class _CSRFastGraph:
     """Capture the same FFT field calculation used on CPU; reuse for all bends."""
 
-    def __init__(self, n, n_bins, smooth_passes, dtype, device, softening_m, sg_halfwidth):
+    def __init__(self, n, n_bins, smooth_passes, dtype, device, softening_m, sg_halfwidth, transient=False):
         self._tau = torch.linspace(-1, 1, n, dtype=dtype, device=device)
         self._charge = torch.zeros((), dtype=dtype, device=device)
+        self._slip = torch.ones((), dtype=dtype, device=device) if transient else None
 
         def body():
-            return _csr_fast_field(self._tau, self._charge, n_bins, smooth_passes, sg_halfwidth, softening_m)
+            return _csr_fast_field(self._tau, self._charge, n_bins, smooth_passes, sg_halfwidth, softening_m, self._slip)
 
         stream = torch.cuda.Stream(device=device)
         stream.wait_stream(torch.cuda.current_stream(device))
@@ -827,11 +852,200 @@ class _CSRFastGraph:
         with torch.cuda.graph(self._graph):
             self._field = body()
 
-    def run(self, tau_m, charge_per_particle_C):
+    def run(self, tau_m, charge_per_particle_C, slippage_m=None):
         self._tau.copy_(tau_m)
         self._charge.copy_(torch.as_tensor(charge_per_particle_C, dtype=self._tau.dtype, device=self._tau.device))
+        if self._slip is not None:
+            self._slip.copy_(torch.as_tensor(slippage_m, dtype=self._tau.dtype, device=self._tau.device))
         self._graph.replay()
         return self._field.clone()
+
+
+def _solve_stupakov_phi(x: torch.Tensor, ds_over_rho: torch.Tensor, phi_m: float, iterations: int = 60) -> torch.Tensor:
+    """Solve ``phi**3 (phi + 4 x) / (phi + x) = 24 ds / rho`` for ``phi`` in ``[0, phi_m]`` (bisection; the left side increases
+    monotonically). Entries whose ``ds`` exceeds the value at ``phi_m`` return ``-1``."""
+    lo = torch.zeros_like(ds_over_rho)
+    hi = torch.full_like(ds_over_rho, phi_m)
+    target = 24.0 * ds_over_rho
+    for _ in range(iterations):
+        mid = 0.5 * (lo + hi)
+        f = mid ** 3 * (mid + 4.0 * x) / (mid + x) - target
+        lo = torch.where(f < 0, mid, lo)
+        hi = torch.where(f < 0, hi, mid)
+    phi = 0.5 * (lo + hi)
+    top = phi_m ** 3 * (phi_m + 4.0 * x) / (phi_m + x)
+    return torch.where(target <= top, phi, torch.full_like(phi, -1.0))
+
+
+@torch._dynamo.disable()
+def csr_drift_delta_kick_fast(
+    tau_m: torch.Tensor,
+    charge_per_particle_C: torch.Tensor | float,
+    rho_m: float,
+    phi_m: float,
+    z_travel_m: float,
+    length_m: float,
+    energy_eV: torch.Tensor,
+    n_bins: int = 256,
+    sg_halfwidth: int = 1,
+    _use_warp: bool = True,
+) -> torch.Tensor:
+    """CSR kick over ``length_m`` of drift ``z_travel_m`` after the exit of a dipole of radius ``rho_m`` and bend angle ``phi_m``,
+    in the model of Stupakov (the wake of a rigid line charge in a drift behind a bend; the form used by elegant's CSRDRIFT
+    with USE_STUPAKOV).
+
+    With ``x = z / rho`` and ``l_C = rho phi^2 (phi + 3 x) / 6``, ``l_M = rho phi^3 (phi + 4 x) / (24 (phi + x))`` the field on a
+    particle is ``(4 / (4 pi eps0 rho)) * [ (lambda(s + l_C) - lambda(s + l_M)) / (phi + 2 x)
+    + int_0^{l_M} lambda'(s + l) / (psi(l) + 2 x) dl ]`` with ``psi`` the root of ``psi^3 (psi + 4 x) / (psi + x) = 24 l / rho``;
+    sources trail the observer (larger ``tau``). The ``l = 0`` end of the integral is left out, as there; the trapezoid rule
+    halves both end terms."""
+    n = tau_m.shape[-1]
+    if n < 2 or length_m <= 0.0 or rho_m == 0.0 or phi_m <= 0.0:
+        return torch.zeros_like(tau_m)
+    rho = abs(rho_m)
+    idx, w, valid, _, dtau, nb = _fixed_grid(tau_m, n_bins, margin=0.1)
+    lam = _bin_line_density(charge_per_particle_C, idx, w, valid, nb, dtau)
+    if sg_halfwidth:
+        width = 2 * sg_halfwidth + 1
+        weights = torch.ones((1, 1, width), dtype=lam.dtype, device=lam.device) / width
+        lam = torch.nn.functional.conv1d(lam[None, None], weights, padding=sg_halfwidth)[0, 0]
+    derivative = _grid_deriv(lam, dtau)
+    x = torch.as_tensor(z_travel_m / rho, dtype=tau_m.dtype, device=tau_m.device)
+    phi = torch.as_tensor(phi_m, dtype=tau_m.dtype, device=tau_m.device)
+    l_c = rho * phi ** 2 * (phi + 3.0 * x) / 6.0
+    l_m = rho * phi ** 3 * (phi + 4.0 * x) / (24.0 * (phi + x))
+    m = torch.arange(nb, dtype=tau_m.dtype, device=tau_m.device)
+    if _use_warp and _warp_f64_wake_ready(tau_m):
+        psi = warp_kernels.stupakov_phi((m * dtau / rho).to(torch.float64).contiguous(), z_travel_m / rho, phi_m).to(tau_m.dtype)
+    else:
+        psi = _solve_stupakov_phi(x, m * dtau / rho, phi_m)
+    mmax = torch.floor(l_m / dtau)
+    use = (m >= 1) & (m <= mmax) & (psi > 0)
+    end = torch.where(((m == 1) | (m == mmax)) & (mmax >= 2), 0.5, 1.0)
+    kernel = torch.where(use, end / (psi.clamp(min=0) + 2.0 * x), torch.zeros_like(m)) * dtau
+    fft_size = 1 << (2 * nb - 1).bit_length()
+    spectrum = torch.fft.rfft(derivative.flip(0), n=fft_size) * torch.fft.rfft(kernel, n=fft_size)
+    field_grid = torch.fft.irfft(spectrum, n=fft_size)[:nb].flip(0)
+    i = torch.arange(nb, device=lam.device)
+    ahead = lambda k: torch.where(i + k.long() < nb, lam[(i + k.long()).clamp(max=nb - 1)], torch.zeros_like(lam))  # noqa: E731
+    field_grid = field_grid + (ahead(torch.floor(l_c / dtau)) - ahead(mmax)) / (phi + 2.0 * x)
+    field = _gather_linear(field_grid, idx, w, valid)
+    return 4.0 / (4.0 * math.pi * EPS0_F_PER_M * rho) * length_m * field / energy_eV
+
+
+def _path_state(s: torch.Tensor, rho: float, phi: float, kind: str):
+    """Position, unit tangent and unit centripetal vector at path coordinate ``s`` of a lead-in straight section (``s < 0``), an arc of
+    radius ``rho`` and angle ``phi`` and an exit straight section (``kind == "bend"``), or of an infinite straight line (``"line"``)."""
+    if kind == "line":
+        zero = torch.zeros_like(s)
+        return torch.stack([s, zero], -1), torch.stack([torch.ones_like(s), zero], -1), torch.stack([zero, torch.ones_like(s)], -1), torch.zeros_like(s, dtype=torch.bool)
+    length = rho * phi
+    th = s.clamp(min=0.0, max=length) / rho
+    x = rho * torch.sin(th) + s.clamp(max=0.0) + (s - length).clamp(min=0.0) * math.cos(phi)
+    y = rho * (1.0 - torch.cos(th)) + (s - length).clamp(min=0.0) * math.sin(phi)
+    return (torch.stack([x, y], -1), torch.stack([torch.cos(th), torch.sin(th)], -1), torch.stack([-torch.sin(th), torch.cos(th)], -1),
+            (s >= 0.0) & (s <= length))
+
+
+def _retarded_wake(zeta: torch.Tensor, s_obs: float, rho: float, phi: float, kind: str, gamma: float) -> torch.Tensor:
+    """Longitudinal field [V/m per C, positive = gain] on an observer at path coordinate ``s_obs`` from a point charge trailing by ``zeta``
+    on the same path: the retarded Lienard-Wiechert velocity and acceleration terms, with the retarded path length ``u`` found from
+    ``u - beta |r(s_obs) - r(s_obs - u)| = zeta`` by bisection."""
+    beta = math.sqrt(1.0 - 1.0 / gamma ** 2)
+    c = 299_792_458.0
+    obs = torch.full_like(zeta, s_obs)
+    r_o, t_o, _, _ = _path_state(obs[:1], rho, phi, kind)
+    r_o, t_o = r_o[0], t_o[0]
+    lo = torch.zeros_like(zeta)
+    hi = torch.clamp(zeta / (1.0 - beta) * 1.001 + 1e-9, max=5.0e3)
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        r_m, _, _, _ = _path_state(s_obs - mid, rho, phi, kind)
+        f = mid - beta * torch.linalg.norm(r_o - r_m, dim=-1) - zeta
+        lo = torch.where(f < 0, mid, lo)
+        hi = torch.where(f < 0, hi, mid)
+    u = 0.5 * (lo + hi)
+    r_p, t_p, c_p, accel = _path_state(s_obs - u, rho, phi, kind)
+    d = r_o - r_p
+    big_r = torch.linalg.norm(d, dim=-1)
+    n = d / big_r[..., None]
+    bvec = beta * t_p
+    nb = n - bvec
+    k = (1.0 - (n * bvec).sum(-1)) ** 3
+    bdot = (beta ** 2 * c / rho) * c_p * accel[..., None]
+    e_vel = nb * ((1.0 - beta ** 2) / (k * big_r ** 2))[..., None]
+    e_rad = (nb * (n * bdot).sum(-1)[..., None] - bdot * (n * nb).sum(-1)[..., None]) / (c * (k * big_r)[..., None])
+    return ((e_vel + e_rad) * t_o).sum(-1) / (4.0 * math.pi * EPS0_F_PER_M)
+
+
+@torch._dynamo.disable()
+def csr_drift_delta_kick_retarded(
+    tau_m: torch.Tensor,
+    charge_per_particle_C: torch.Tensor | float,
+    rho_m: float,
+    phi_m: float,
+    z_travel_m: float,
+    length_m: float,
+    energy_eV: torch.Tensor,
+    mc2_eV: float = ELECTRON_MASS_EV,
+    n_bins: int = 256,
+    sg_halfwidth: int = 1,
+    sub_points: int = 4,
+    _use_warp: bool = True,
+) -> torch.Tensor:
+    """CSR kick over ``length_m`` of drift ``z_travel_m`` after the exit of a dipole of radius ``rho_m`` and bend angle ``phi_m``, from the
+    retarded field of a 1D line charge, with no small-angle or asymptotic approximation of the kernel.
+
+    The wake kernel is the difference of the point-charge field behind the bend and that of the same charge on an infinite straight line
+    (the 1D Coulomb term belongs to LSC), tabulated per bin by Gauss-Legendre cells and convolved with the line density; it is finite for
+    every ``zeta`` and zero until the retarded point reaches the bend. The result agrees with ``Stories/CLARA_CSRValidation/lw_reference``.
+    On CUDA with Warp the kernel is evaluated by one fused launch in float64 (``warp_kernels.retarded_wake_difference``); otherwise by the
+    PyTorch bisection of ``_retarded_wake``."""
+    n = tau_m.shape[-1]
+    if n < 2 or length_m <= 0.0 or rho_m == 0.0 or phi_m <= 0.0:
+        return torch.zeros_like(tau_m)
+    rho = abs(rho_m)
+    gamma = float(energy_eV) / mc2_eV
+    idx, w, valid, _, dtau, nb = _fixed_grid(tau_m, n_bins, margin=0.1)
+    lam = _bin_line_density(charge_per_particle_C, idx, w, valid, nb, dtau)
+    if sg_halfwidth:
+        width = 2 * sg_halfwidth + 1
+        weights = torch.ones((1, 1, width), dtype=lam.dtype, device=lam.device) / width
+        lam = torch.nn.functional.conv1d(lam[None, None], weights, padding=sg_halfwidth)[0, 0]
+    gl_x, gl_w = np.polynomial.legendre.leggauss(sub_points)
+    gl_x = torch.tensor(gl_x, dtype=tau_m.dtype, device=tau_m.device)
+    gl_w = torch.tensor(gl_w, dtype=tau_m.dtype, device=tau_m.device)
+    cell = torch.arange(nb, dtype=tau_m.dtype, device=tau_m.device)
+    s_obs = rho * phi_m + z_travel_m
+
+    beta = math.sqrt(1.0 - 1.0 / gamma ** 2)
+    zeta_thr = z_travel_m * (1.0 - beta)     # the retarded point is still on the exit straight section below this: identical to a line
+
+    def wake(zeta):
+        # a difference of two Coulomb-dominated fields is only meaningful once the retarded point has reached the arc
+        if _use_warp and _warp_f64_wake_ready(zeta):
+            diff = warp_kernels.retarded_wake_difference(zeta.to(torch.float64).contiguous(), s_obs, rho, phi_m, beta, 1.001 * zeta_thr)
+            return (diff / (4.0 * math.pi * EPS0_F_PER_M)).to(zeta.dtype)
+        diff = _retarded_wake(zeta, s_obs, rho, phi_m, "bend", gamma) - _retarded_wake(zeta, s_obs, rho, phi_m, "line", gamma)
+        return torch.where(zeta > 1.001 * zeta_thr, diff, torch.zeros_like(diff))
+
+    # cells 4..nb-1: ``sub_points`` Gauss-Legendre points each
+    zeta = ((cell[4:, None] + 0.5 + 0.5 * gl_x[None, :]) * dtau).reshape(-1)
+    far = (wake(zeta).reshape(nb - 4, sub_points) * (0.5 * gl_w)[None, :]).sum(-1) * dtau
+    # the first four cells, where the wake is sharpest near the bend: cell 0 on geometric panels from just above zeta_thr, cells 1-3 on eight panels
+    lo_exp = math.log10(min(max(1.01 * zeta_thr / float(dtau), 1e-9), 0.5))
+    edges = torch.cat([dtau * torch.logspace(lo_exp, 0, 40, dtype=tau_m.dtype, device=tau_m.device)[:-1],
+                       dtau * torch.linspace(1.0, 4.0, 3 * 8 + 1, dtype=tau_m.dtype, device=tau_m.device)])
+    lo, hi = edges[:-1], edges[1:]
+    pts = (0.5 * (hi - lo))[:, None] * gl_x[None, :] + (0.5 * (hi + lo))[:, None]
+    near_w = (wake(pts.reshape(-1)).reshape(pts.shape) * (0.5 * (hi - lo))[:, None] * gl_w[None, :]).sum(-1)
+    first = torch.stack([near_w[:39].sum(), near_w[39:47].sum(), near_w[47:55].sum(), near_w[55:63].sum()])
+    kernel = torch.cat([first, far])                 # V/m per C: integral over each bin
+    fft_size = 1 << (2 * nb - 1).bit_length()
+    spectrum = torch.fft.rfft(lam.flip(0), n=fft_size) * torch.fft.rfft(kernel, n=fft_size)
+    field_grid = torch.fft.irfft(spectrum, n=fft_size)[:nb].flip(0)    # sources are behind: larger tau
+    field = _gather_linear(field_grid, idx, w, valid)
+    return length_m * field / energy_eV
 
 
 _csr_fast_graph_cache: dict[tuple, _CSRFastGraph] = {}
@@ -848,8 +1062,10 @@ def csr_steady_state_delta_kick_fast(
     n_bins: int = 256,
     smooth_passes: int | None = None,
     sg_halfwidth: int = 1,
+    slippage_m: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Elegant-style steady-state CSR in O(N + B log B) time and O(N+B) memory."""
+    """Elegant-style CSR in O(N + B log B) time and O(N+B) memory: steady state, or with ``slippage_m`` (the slippage length
+    ``rho * phi**3 / 24`` of the bend angle accumulated at the end of this slice) the entrance transient; see ``_csr_fast_field``."""
     n = tau_m.shape[-1]
     if n < 2 or length_m <= 0.0 or rho_m == 0.0:
         return torch.zeros_like(tau_m)
@@ -859,15 +1075,18 @@ def csr_steady_state_delta_kick_fast(
         raise ValueError("smooth_passes must be nonnegative")
     vector_charge = isinstance(charge_per_particle_C, torch.Tensor) and charge_per_particle_C.dim() > 0
     hashable_softening = softening_m is None or isinstance(softening_m, (int, float))
+    transient = slippage_m is not None
+    if transient:
+        slippage_m = torch.as_tensor(slippage_m, dtype=tau_m.dtype, device=tau_m.device)
     if tau_m.is_cuda and not vector_charge and hashable_softening:
-        key = (n, n_bins, smooth_passes, tau_m.dtype, tau_m.device, softening_m, sg_halfwidth)
+        key = (n, n_bins, smooth_passes, tau_m.dtype, tau_m.device, softening_m, sg_halfwidth, transient)
         graph = _csr_fast_graph_cache.get(key)
         if graph is None:
             with torch.cuda.device(tau_m.device):
                 graph = _CSRFastGraph(*key)
             _csr_fast_graph_cache[key] = graph
-        field = graph.run(tau_m, charge_per_particle_C)
+        field = graph.run(tau_m, charge_per_particle_C, slippage_m)
     else:
-        field = _csr_fast_field(tau_m, charge_per_particle_C, n_bins, smooth_passes, sg_halfwidth, softening_m)
+        field = _csr_fast_field(tau_m, charge_per_particle_C, n_bins, smooth_passes, sg_halfwidth, softening_m, slippage_m)
     csr_constant = 2.0 / ((3.0 * rho_m * rho_m) ** (1.0 / 3.0) * 4.0 * math.pi * EPS0_F_PER_M)
     return csr_constant * length_m * field / energy_eV

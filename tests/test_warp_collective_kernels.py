@@ -92,3 +92,47 @@ def test_collective_cic_dispatch_converts_indices_to_int32(monkeypatch):
     charge = torch.tensor(1e-12, device="cuda")
     collective._bin_line_density(charge, bin_idx, interp_w, valid, n_bins, dtau)
     assert calls == [(torch.int32, torch.float32, torch.bool)]
+
+
+def test_warp_retarded_drift_kernel_matches_torch_bisection():
+    generator = torch.Generator(device="cuda").manual_seed(77)
+    tau = torch.randn(32_768, device="cuda", dtype=torch.float64, generator=generator) * 6.6e-5
+    charge = torch.tensor(3e-15, dtype=torch.float64, device="cuda")
+    energy = torch.tensor(190e6, dtype=torch.float64, device="cuda")
+    for z_travel in (0.01, 0.5):
+        reference = collective.csr_drift_delta_kick_retarded(
+            tau, charge, 1.52, 0.1325, z_travel, 0.01, energy, n_bins=128, _use_warp=False,
+        )
+        candidate = collective.csr_drift_delta_kick_retarded(
+            tau, charge, 1.52, 0.1325, z_travel, 0.01, energy, n_bins=128, _use_warp=True,
+        )
+        assert reference.abs().max() > 0
+        torch.testing.assert_close(candidate, reference, rtol=1e-6, atol=1e-6 * float(reference.abs().max()))
+
+
+def test_warp_stupakov_drift_kernel_matches_torch_bisection():
+    generator = torch.Generator(device="cuda").manual_seed(78)
+    tau = torch.randn(32_768, device="cuda", dtype=torch.float64, generator=generator) * 6.6e-5
+    charge = torch.tensor(3e-15, dtype=torch.float64, device="cuda")
+    energy = torch.tensor(190e6, dtype=torch.float64, device="cuda")
+    for z_travel in (0.01, 0.5):
+        reference = collective.csr_drift_delta_kick_fast(
+            tau, charge, 1.52, 0.1325, z_travel, 0.01, energy, n_bins=128, _use_warp=False,
+        )
+        candidate = collective.csr_drift_delta_kick_fast(
+            tau, charge, 1.52, 0.1325, z_travel, 0.01, energy, n_bins=128, _use_warp=True,
+        )
+        assert reference.abs().max() > 0
+        torch.testing.assert_close(candidate, reference, rtol=1e-9, atol=1e-9 * float(reference.abs().max()))
+
+
+def test_warp_drift_kernels_on_cpu_match_torch_bisection():
+    generator = torch.Generator().manual_seed(79)
+    tau = torch.randn(8_192, dtype=torch.float64, generator=generator) * 6.6e-5
+    charge = torch.tensor(3e-15, dtype=torch.float64)
+    energy = torch.tensor(190e6, dtype=torch.float64)
+    for kick in (collective.csr_drift_delta_kick_retarded, collective.csr_drift_delta_kick_fast):
+        reference = kick(tau, charge, 1.52, 0.1325, 0.3, 0.01, energy, n_bins=64, _use_warp=False)
+        candidate = kick(tau, charge, 1.52, 0.1325, 0.3, 0.01, energy, n_bins=64, _use_warp=True)
+        assert reference.abs().max() > 0
+        torch.testing.assert_close(candidate, reference, rtol=1e-6, atol=1e-6 * float(reference.abs().max()))

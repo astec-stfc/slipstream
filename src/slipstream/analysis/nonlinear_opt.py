@@ -291,13 +291,19 @@ def gradient_free(objective, theta: torch.Tensor, bounds, method: str = "Powell"
     if max_evaluations < 1:
         raise ValueError("max_evaluations must be positive")
     best = [np.clip(theta.detach().cpu().numpy(), limits[:, 0], limits[:, 1]), float("inf")]
+    widths = limits[:, 1] - limits[:, 0]
     calls = 0
+    seen: dict[bytes, float] = {}
 
     class BudgetExhausted(Exception):
         pass
 
     def evaluate(x):
         nonlocal calls
+        x = np.asarray(x, dtype=float)
+        key = x.tobytes()
+        if key in seen:  # optimisers re-request x0 and accepted points; objectives are deterministic
+            return seen[key]
         if calls >= max_evaluations:
             raise BudgetExhausted
         calls += 1
@@ -305,7 +311,8 @@ def gradient_free(objective, theta: torch.Tensor, bounds, method: str = "Powell"
             value = float(objective(torch.as_tensor(x, dtype=theta.dtype, device=theta.device)))
         if np.isfinite(value) and value < best[1]:
             best[:] = [x.copy(), value]
-        return value if np.isfinite(value) else float("inf")
+        seen[key] = value if np.isfinite(value) else float("inf")
+        return seen[key]
 
     try:
         evaluate(best[0])
@@ -314,7 +321,6 @@ def gradient_free(objective, theta: torch.Tensor, bounds, method: str = "Powell"
                 import cma
             except ImportError as exc:
                 raise ImportError("CMA-ES requires the optional cma package") from exc
-            widths = limits[:, 1] - limits[:, 0]
             strategy = cma.CMAEvolutionStrategy((best[0] - limits[:, 0]) / widths, 1 / 6, {
                 "bounds": [0, 1],
                 "seed": seed + 1, "verbose": -9, "maxfevals": max_evaluations})
@@ -326,8 +332,18 @@ def gradient_free(objective, theta: torch.Tensor, bounds, method: str = "Powell"
             differential_evolution(evaluate, limits, seed=seed, polish=False,
                                    maxiter=max_evaluations, popsize=5, x0=best[0])
         else:
-            minimize(evaluate, best[0], method=method, bounds=limits,
-                     options={"maxfev": max_evaluations, "maxiter": max_evaluations})
+            # Search the unit box so steps and tolerances scale with each knob's bound width;
+            # scipy's default Nelder-Mead simplex (5% of |x0|) is too small for staircase DA areas.
+            u0 = (best[0] - limits[:, 0]) / widths
+            options = {"maxfev": max_evaluations, "maxiter": max_evaluations}
+            if method == "Nelder-Mead":
+                step = np.where(u0 < 0.5, 0.25, -0.25)
+                options["initial_simplex"] = np.vstack([u0, u0 + np.diag(step)])
+            else:
+                options["xtol"] = 1e-3
+            x0 = best[0].copy()  # exact x0, so the cache absorbs the optimiser's repeat of it
+            minimize(lambda u: evaluate(x0 if np.array_equal(u, u0) else limits[:, 0] + widths * u),
+                     u0, method=method, bounds=[(0, 1)] * len(u0), options=options)
     except BudgetExhausted:
         pass
     return SearchResult(torch.as_tensor(best[0], dtype=theta.dtype, device=theta.device),

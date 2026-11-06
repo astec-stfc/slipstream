@@ -39,6 +39,14 @@ equivalents in other shells are `set CXX=clang-cl` in `cmd.exe` and
 
 Compilation is opt-in for the ring and linac trackers:
 
+`RingMap` also supports regional compilation on CPU, including tensor-strength
+derivatives. For repeated fixed-shape maps, pass `device="cpu", compile=True`
+when constructing the map. Keep eager execution available for short runs and
+debugging. Measure the first evaluation separately from warm calls: the first
+backward pass can compile additional kernels, and persistent compiler caches
+can change startup cost between processes. Check the observables and derivatives
+at the selected dtype and integration settings before using a compiled preset.
+
 ```python
 from slipstream import LinacTracker, NativeTracker
 
@@ -150,7 +158,10 @@ used alongside Warp.
 
 Some native ring-map forward paths also select Warp automatically for CUDA
 tracking when the state does not require gradients and the map is eligible.
-Gradient-based or unsupported paths stay in PyTorch.
+Gradient-based or unsupported paths stay in PyTorch. This applies with
+`RingMap(compile=True)` too. The packed Warp turn was faster than compiled
+per-element kernels at 1e2-1e5 particles; see
+[ring_warp](modules/tracking/native/ring_warp.md).
 
 To inspect whether the optional Warp module is present and applicable:
 

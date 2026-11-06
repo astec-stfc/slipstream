@@ -10,6 +10,19 @@ Implements selected fixed-lattice one-turn ring transport using a packed Warp ke
 
 - This is a CUDA forward-only optimization; tensor-gradient strengths and unsupported physics use PyTorch fallback.
 - Packing returns `None` for unsupported maps, including RF.
+- Field-free elements (drifts, zero-strength multipoles and exact sector bends
+  without K1/K2) take one exact step, as `elements.track_element` does; only
+  elements with kicks are sliced into `n_kicks` integrator stages.
+- Edge maps use the chromatic curvature `h/(1+delta)`, matching
+  `elements._edge_kick`. Earlier versions used `h`, which put off-momentum
+  particles at bends with nonzero edge angles about 1e-6 off.
+- One particle's turn is a serial dependency chain, so the stage loop uses
+  precomputed reciprocals rather than IEEE divisions. Warp `fast_math` was
+  measured only about 15% faster again and is not enabled.
+- RTX 3050, MLS example, float32 `RingMap.track`: 0.41, 0.57 and 5.4 ms per
+  turn at 1e2, 1e4 and 1e5 particles. Compiled per-element kernels replayed in a
+  CUDA graph took 0.60, 1.54 and 14.4 ms. Before the two changes above, this
+  kernel took 3.6 ms at 1e2 particles and 25 ms at 1e5 particles.
 
 ### `Model and numerical conventions`
 

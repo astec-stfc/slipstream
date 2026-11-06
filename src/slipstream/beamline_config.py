@@ -44,19 +44,36 @@ def _bool(value, where):
         raise ValueError(f"{where} must be a boolean")
 
 
-def read_config(path):
-    """Validate and normalize a config; all paths are anchored to its file."""
+def read_config(path, *, overrides: dict[str, object] | None = None):
+    """Validate a config with dotted-key overrides; paths stay local to its file."""
     path = Path(path).resolve()
     with path.open(encoding="utf-8") as stream:
         cfg = _mapping(yaml.safe_load(stream), "study", {
             "lattice", "energy_eV", "mc2_eV", "bunch", "tracker", "run", "reference",
-        }, {"lattice", "energy_eV", "bunch"})
+        })
+    if overrides is not None:
+        if not isinstance(overrides, dict):
+            raise ValueError("overrides must be a mapping of dotted keys to values")
+        for key, value in overrides.items():
+            if not isinstance(key, str) or any(not part for part in key.split(".")):
+                raise ValueError("Override keys must be nonempty dotted paths, such as tracker.csr")
+            parts = key.split(".")
+            section = cfg
+            for part in parts[:-1]:
+                section = section.setdefault(part, {})
+                if not isinstance(section, dict):
+                    raise ValueError(f"Cannot override {key}: {part} is not a mapping")
+            section[parts[-1]] = value
+    cfg = _mapping(cfg, "study", {
+        "lattice", "energy_eV", "mc2_eV", "bunch", "tracker", "run", "reference",
+    }, {"lattice", "energy_eV", "bunch"})
     base = path.parent
-    lattice = _mapping(cfg["lattice"], "lattice", {"path", "root", "wakes", "wake_base_dir"}, {"path", "root"})
+    lattice = _mapping(cfg["lattice"], "lattice", {"path", "root", "wakes", "wake_base_dir", "strict_import"}, {"path", "root"})
     lattice["path"] = _path(lattice["path"], base, "lattice.path")
     if not isinstance(lattice["root"], str) or not lattice["root"]:
         raise ValueError("lattice.root must be a nonempty string")
     _bool(lattice.get("wakes", True), "lattice.wakes")
+    _bool(lattice.get("strict_import", False), "lattice.strict_import")
     lattice["wake_base_dir"] = (
         _path(lattice["wake_base_dir"], base, "lattice.wake_base_dir")
         if "wake_base_dir" in lattice else lattice["path"].parent
@@ -69,13 +86,14 @@ def read_config(path):
     bool_options = {
         "compile", "lsc", "csr", "fast_collective_effects", "always_change_p0",
         "dipole_collective_subcycle", "compile_collective_chunks",
+        "csr_transient",
     }
     numeric_options = {
         "bunch_charge_C", "pipe_radius_b_m", "lsc_radius_factor", "csr_softening_m",
     }
     int_options = {"n_kicks", "n_kicks_bend", "integration_order", "n_slices"}
     tracker = _mapping(cfg.get("tracker", {}), "tracker", bool_options | numeric_options | int_options | {
-        "device", "dtype", "compile_mode",
+        "device", "dtype", "compile_mode", "csr_drift_model",
     })
     for name in bool_options & tracker.keys():
         if name == "compile_collective_chunks" and tracker[name] is None:
@@ -87,6 +105,12 @@ def read_config(path):
         _number(tracker[name], f"tracker.{name}", positive=name != "bunch_charge_C")
     for name in int_options & tracker.keys():
         _number(tracker[name], f"tracker.{name}", integer=True, minimum=1)
+    if tracker.get("csr_drift_model", "overtaking") not in ("overtaking", "stupakov", "retarded"):
+        raise ValueError("tracker.csr_drift_model must be overtaking, stupakov or retarded")
+    if tracker.get("csr_transient", False) or tracker.get("csr_drift_model", "overtaking") != "overtaking":
+        if not (tracker.get("csr", False) and tracker.get("fast_collective_effects", False)):
+            raise ValueError("tracker.csr_transient and non-overtaking csr_drift_model require "
+                             "tracker.csr=true and tracker.fast_collective_effects=true")
     if tracker.get("integration_order", 4) not in (4, 6, 8):
         raise ValueError("tracker.integration_order must be 4, 6 or 8")
     dtype = tracker.get("dtype", "float64")
@@ -103,6 +127,11 @@ def read_config(path):
     if parsed_device.type not in {"cpu", "cuda"} or parsed_device.type == "cpu" and parsed_device.index is not None:
         raise ValueError("tracker.device must be cpu, cuda or cuda:<index>")
     tracker["device"] = device
+    if parsed_device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("tracker.device requests CUDA, but CUDA is unavailable; use tracker.device=cpu")
+        if parsed_device.index is not None and parsed_device.index >= torch.cuda.device_count():
+            raise ValueError(f"tracker.device={device} is unavailable; found {torch.cuda.device_count()} CUDA device(s)")
     if tracker.get("compile_mode") not in (None, "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"):
         raise ValueError("Unsupported tracker.compile_mode")
 
@@ -167,7 +196,7 @@ def read_config(path):
         for name, value in reference.items():
             _number(value, f"reference.{name}")
     return dict(lattice=lattice, energy_eV=energy, mc2_eV=mass, tracker=tracker,
-                bunch=bunch, run=run, reference=reference, path=path)
+                bunch=bunch, run=run, reference=reference, path=path, config_yaml=yaml.safe_dump(cfg, sort_keys=True))
 
 
 def load_sdds_particles(path, energy_eV, mc2_eV, device, dtype, time_origin_s=0.0):

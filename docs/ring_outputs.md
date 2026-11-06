@@ -44,6 +44,8 @@ compaction, bending angle, element count and sampled optics maxima.
 Rigidity assumes unit charge magnitude by default; pass `charge_e` for other
 charge states. Slip factor includes the closed-orbit dispersion contribution
 to time of flight: eta = beta_rel * d(tau)/d(delta) / circumference.
+For one superperiod of a symmetric ring, pass `periods=N`; whole-machine
+values are then reported, with an explicit `periods` row.
 Momentum compaction adds 1/gamma². A supplied optics table must come from
 the same ring and retain its DataFrame attributes. CSV export is for display
 and downstream analysis, not reconstruction of the cached one-turn matrix.

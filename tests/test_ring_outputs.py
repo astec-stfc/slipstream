@@ -54,6 +54,18 @@ def test_derived_parameters_against_relativistic_closed_forms():
         ring_parameters(r, frame, charge_e=0)
 
 
+def test_superperiod_parameters_match_whole_ring():
+    whole = ring_parameters(ring()).set_index('parameter').value
+    cell = RingMap(ring().specs[:4], 3e9, device='cpu', dtype=torch.float64, n_kicks=4)
+    scaled = ring_parameters(cell, periods=3).set_index('parameter').value
+    assert scaled['periods'] == 3 and whole['periods'] == 1
+    for name in ('circumference', 'revolution_frequency', 'Qx_fractional', 'Qy_fractional', 'Qx_accumulated',
+                 'Qy_accumulated', 'chromaticity_x', 'chromaticity_y', 'slip_factor', 'element_count'):
+        assert scaled[name] == pytest.approx(whole[name], rel=1e-9, abs=1e-12), name
+    with pytest.raises(ValueError, match='periods'):
+        ring_parameters(cell, periods=0)
+
+
 def test_local_coupling_is_rejected_even_if_one_turn_coupling_cancels():
     specs = [ElementSpec('SK1', 'multipole', 0., integrated_multipoles=((1, .1),), tilt=math.pi/4),
              ElementSpec('SK2', 'multipole', 0., integrated_multipoles=((1, -.1),), tilt=math.pi/4)] + ring().specs

@@ -1,0 +1,4 @@
+! Synthetic CSR bend and downstream drift; not an operational machine.
+B: CSRCSBEND, L=0.2, ANGLE=0.1, CSR=1, BINS=64, SG_HALFWIDTH=1, N_SLICES=8
+D: CSRDRIFT, L=0.1
+CSRDEMO: LINE=(B,D)

@@ -73,11 +73,15 @@ def ring_optics_table(ring: RingMap, drift_samples: int = 8) -> pd.DataFrame:
 
 
 def ring_parameters(ring: RingMap, optics: pd.DataFrame | None = None,
-                    charge_e: float = 1., include_chromaticity: bool = True) -> pd.DataFrame:
-    """Derived machine parameters as columns ``parameter, value, unit``."""
+                    charge_e: float = 1., include_chromaticity: bool = True, periods: int = 1) -> pd.DataFrame:
+    """Derived machine parameters as columns ``parameter, value, unit``. ``ring`` may be one of
+    ``periods`` identical superperiods; circumference, revolution time, tunes, chromaticity,
+    bending angle and element count then describe the whole machine."""
     C = ring.circumference_m
     if not math.isfinite(C) or C <= 0 or not math.isfinite(charge_e) or charge_e == 0:
         raise ValueError('positive finite circumference and finite nonzero charge required')
+    if not isinstance(periods, int) or periods < 1:
+        raise ValueError('periods must be a positive integer')
     E, mass = float(ring.energy_eV), float(ring.mc2_eV)
     if not 0 < mass < E:
         raise ValueError('total energy must exceed positive rest energy')
@@ -85,24 +89,26 @@ def ring_parameters(ring: RingMap, optics: pd.DataFrame | None = None,
     gamma = E / mass
     beta = math.sqrt(1 - gamma**-2)
     M, D = table.attrs['one_turn_matrix'], table.attrs['dispersion0']
-    eta = beta * float(M[4, 5] + M[4, :4] @ D) / C
+    eta = beta * float(M[4, 5] + M[4, :4] @ D) / C  # per-period path lengthening / period length
+    C *= periods
     rows = [('energy', E, 'eV'), ('kinetic_energy', E - mass, 'eV'),
             ('momentum', E * beta, 'eV/c'), ('gamma', gamma, '1'), ('beta_rel', beta, '1'),
             ('circumference', C, 'm'), ('revolution_period', C / (beta * C_LIGHT), 's'),
             ('revolution_frequency', beta * C_LIGHT / C, 'Hz'),
             ('magnetic_rigidity', E * beta / (C_LIGHT * abs(charge_e)), 'T m'),
-            ('Qx_fractional', table.attrs['Qx'], '1'), ('Qy_fractional', table.attrs['Qy'], '1'),
-            ('Qx_accumulated', table.mu_x_rad.iloc[-1] / (2 * math.pi), '1'),
-            ('Qy_accumulated', table.mu_y_rad.iloc[-1] / (2 * math.pi), '1'),
+            ('Qx_fractional', periods * table.attrs['Qx'] % 1, '1'),
+            ('Qy_fractional', periods * table.attrs['Qy'] % 1, '1'),
+            ('Qx_accumulated', periods * table.mu_x_rad.iloc[-1] / (2 * math.pi), '1'),
+            ('Qy_accumulated', periods * table.mu_y_rad.iloc[-1] / (2 * math.pi), '1'),
             ('slip_factor', eta, '1'), ('momentum_compaction', eta + gamma**-2, '1'),
             ('beta_x_max_sampled', table.beta_x_m.max(), 'm'),
             ('beta_y_max_sampled', table.beta_y_m.max(), 'm'),
             ('abs_Dx_max_sampled', table.D_x_m.abs().max(), 'm'),
-            ('net_bending_angle', sum(spec.angle for spec in ring.specs), 'rad'),
-            ('element_count', len(ring.specs), '1')]
+            ('net_bending_angle', periods * sum(spec.angle for spec in ring.specs), 'rad'),
+            ('element_count', periods * len(ring.specs), '1'), ('periods', periods, '1')]
     if include_chromaticity:
         xi = chromaticity(ring.float64_reference())
-        rows += [('chromaticity_x', float(xi[0]), '1'), ('chromaticity_y', float(xi[1]), '1')]
+        rows += [('chromaticity_x', periods * float(xi[0]), '1'), ('chromaticity_y', periods * float(xi[1]), '1')]
     return pd.DataFrame(rows, columns=['parameter', 'value', 'unit'])
 
 

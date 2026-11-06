@@ -263,3 +263,16 @@ memoization). unbounded -- grows by one entry per distinct
 sw/tw/sol tuple built in this process; fine for how this is used (one
 entry per Injector.track() call), add an eviction policy if that stops
 being true.
+
+### `_retarded_wake_kernel` / `retarded_wake_difference`
+
+One thread per `zeta`: the retarded Lienard-Wiechert field of a trailing point charge on a bend (lead-in straight, arc, exit straight) minus that on an
+infinite straight line, in float64, on CUDA or on Warp's CPU backend. It replaces the 100-step PyTorch bisection of
+`collective._retarded_wake` (about 30 small operations per step), which is launch-bound: at 10^6 particles one retarded drift call takes 6.7 ms with
+the kernel and 206 ms without it (agreement 1e-8 or better; `tests/test_warp_collective_kernels.py`). `csr_drift_delta_kick_retarded(_use_warp=...)`
+selects it; PyTorch remains the reference path.
+
+### `_stupakov_phi_kernel` / `stupakov_phi`
+
+The root `phi` of `phi^3 (phi + 4x) / (phi + x) = 24 l / rho` in `[0, phi_m]` for every `l / rho` of a CSR drift step (bisection, one thread per
+bin), the Warp counterpart of `collective._solve_stupakov_phi`. Used by `csr_drift_delta_kick_fast(_use_warp=...)`; float64, CUDA or CPU.

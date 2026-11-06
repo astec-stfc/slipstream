@@ -24,6 +24,11 @@ orbit with zero momentum offset, like elegant's `find_aperture`/
 Newton fixed point of the one-turn map, differentiable in any
 tensor strength `ring` carries (`create_graph=True`).
 
+Without `create_graph`, residual turns here and in `closed_orbit` use the
+packed Warp kernel when the map has one. On CUDA the eager PyTorch turn is
+launch-bound: `closed_orbit` on the MLS example took 0.8 ms, against
+0.58 s eager. Jacobians remain eager PyTorch.
+
 The convergence check runs *after* the Newton update, not before --
 deliberately, not merely for the usual "check what you just computed"
 reason. At the LOCO operating point (correctors and K1 errors exactly
@@ -135,6 +140,8 @@ passes subdivide each ray's bracketing interval by `n_r`, so the
 final resolution is `r_max / n_r**(refine+1)`. `batch_shape` prefixes
 the particle batch -- e.g. `(M,)` with a `with_strengths` error
 ensemble of shape `(M, 1)`, launched from the nominal closed orbit.
+Launches start at `opt.closed_orbit` when `opt` is given, otherwise at
+`closed_orbit(ring, delta)`; the scan does not compute Twiss parameters.
 
 ### `frequency_map`
 

@@ -188,6 +188,40 @@ def test_million_particles_without_recording():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
+@pytest.mark.parametrize("exact_dipole", [True, False])
+def test_cuda_warp_turn_matches_cpu(exact_dipole):
+    # Field-free drift/sextupole/bend take the one-step path; the rest are sliced.
+    specs = [ElementSpec("D", "drift", .5), ElementSpec("QF", "quad", .3, k1=1.5),
+             ElementSpec("S", "sext", .1, k2=30.), ElementSpec("SZ", "sext", .1),
+             ElementSpec("B", "bend", 1., angle=.2, e1=.1, e2=.05, hgap=.02, edge_order=2),
+             ElementSpec("BQ", "bend", 1., angle=.2, k1=-.3, k2=2.),
+             ElementSpec("QD", "quad", .3, k1=-1.5, dx=1e-4, tilt=2e-3)]
+    cpu = RingMap(specs, 1e9, device="cpu", dtype=torch.float64, exact_dipole=exact_dipole)
+    cuda = RingMap(specs, 1e9, device="cuda", dtype=torch.float64, exact_dipole=exact_dipole)
+    if cuda._warp_params is None:
+        pytest.skip("Warp unavailable")
+    state = torch.tensor([[.002, .0001, -.001, -.0002, 0., .01], [-.003, .0002, .0015, .0001, 1e-4, -.005]],
+                         dtype=torch.float64)
+    torch.testing.assert_close(cuda.turn(state.cuda()).cpu(), cpu.turn(state), atol=1e-14, rtol=1e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
+def test_cuda_warp_closed_orbit_matches_cpu():
+    # Offset quads give a nonzero orbit, so Newton needs Jacobian steps after Warp residuals.
+    specs = [ElementSpec("QF", "quad", .2, k1=1.2, dx=2e-4), ElementSpec("D", "drift", 1.),
+             ElementSpec("B", "bend", .5, angle=.1, e1=.05), ElementSpec("QD", "quad", .2, k1=-1.2, dy=1e-4),
+             ElementSpec("D", "drift", 1.)] * 4
+    cpu = RingMap(specs, 1e9, device="cpu", dtype=torch.float64)
+    cuda = RingMap(specs, 1e9, device="cuda", dtype=torch.float64)
+    if cuda._warp_params is None:
+        pytest.skip("Warp unavailable")
+    for delta in (0.0, 2e-3):
+        expected = nl.closed_orbit(cpu, delta)
+        assert expected[:4].abs().max() > 1e-5
+        torch.testing.assert_close(nl.closed_orbit(cuda, delta).cpu(), expected, atol=1e-12, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
 def test_cuda_higher_multipole_matches_cpu():
     specs = [ElementSpec("O", "oct", .2, k3=3000, skew_multipoles=((2, 5.),))]
     cpu = RingMap(specs, 3e9, device="cpu")

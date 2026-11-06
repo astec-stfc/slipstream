@@ -247,8 +247,14 @@ default) make this an `RFCW` equivalent: real elegant's own wake
 placement is ``drift(L_k/2) -> RF energy kick -> [wake kick(s)] ->
 drift(L_k/2)`` per sub-kick -- the wake sits between the energy kick
 and the following half-drift, at the same `tau` already computed
-for the RF phase, applied once per sub-kick using the same, undivided
-`charge_per_particle_C` each time. Reuses
+for the RF phase, applied at every sub-kick with the same
+`charge_per_particle_C` and multiplied by `wake_scale`. The wake table is a
+*per-cell* wake (as in elegant's `RFCW`), so `wake_scale` is
+`length / cell_length / n_kicks` (`ElementSpec.cell_length`, from `CELL_LENGTH`; unset means the table
+is for the whole element, `wake_scale = 1 / n_kicks`): the total over the element is
+`length / cell_length` cells whatever `n_kicks` is. Before 1 Nov 2026 the whole table was applied at every sub-kick, which is
+`n_kicks` cells instead (2.95 times too strong for CLARA L02-L04, 360 kicks in 122 cells); the two agree only for
+`n_kicks = 1, cell_length = length`, the only case the older tests used. Reuses
 `ShortRangeWake.voltage_at`/`TransverseWake.kick_at` unmodified
 and the same sign/normalization convention
 `tracker._rf_and_damping` uses for the once-per-turn case.

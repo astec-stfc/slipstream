@@ -6,6 +6,9 @@
 
 Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, local LSC and CSR. By default the reference momentum follows the bunch centroid after elements. Ring equilibrium damping, excitation and IBS are not applied.
 
+Opt-in [local dipole radiation](radiation.md) adds classical loss and Gaussian
+ISR for aligned pure dipoles with a fixed reference (`always_change_p0=False`).
+
 ### Limits and conventions
 
 - CSR requires CSR-enabled specs; `lsc=True` acts in finite-length elements.
@@ -33,9 +36,8 @@ genuinely different physics regime, not a special case of a ring with
   pass, and forcing a ring-only `Lattice` onto a linac section is a real
   correctness hazard (`Vrf_V=0` makes `Lattice.phi_s` raise
   `ZeroDivisionError`). `LinacTracker` needs no `Lattice` at all.
-- Deferred, documented gaps (real CLARA `.lte`/`.ele` survey): CSR (see
-  ````), incoherent SR, RF-focusing, transverse
-  deflecting cavities.
+- Local dipole ISR is available within the limits in [radiation](radiation.md).
+  Transverse deflecting cavities remain unsupported.
 
 Section "joining" (CLARA's own multi-`.lte`, bunch-dump-chained
 convention) needs no new mechanism: track through one section's `specs`,
@@ -183,10 +185,16 @@ Construct `LinacTracker(specs, energy_eV, ..., bunch_charge_C=...)` and call `tr
 def resolve_wakes(specs: list[ElementSpec], base_dir: str | Path='.') -> list[ElementSpec]: ...
 class LinacTracker:
     ...
-    def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, n_kicks: int=1, n_kicks_bend: int=4, integration_order: int=4, compile: bool=False, compile_mode: str | None=None, always_change_p0: bool=True, errors: list[SampledError] | None=None, fiducial: FiducialReference | None=None, bunch_charge_C: float=0.0, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, lsc_radius_factor: float=1.7, csr_softening_m: float | None=None, compile_collective_chunks: bool | None=None, fast_collective_effects: bool=False, dipole_collective_subcycle: bool=False): ...
+    def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, n_kicks: int=1, n_kicks_bend: int=4, integration_order: int=4, compile: bool=False, compile_mode: str | None=None, always_change_p0: bool=True, errors: list[SampledError] | None=None, fiducial: FiducialReference | None=None, bunch_charge_C: float=0.0, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, lsc_radius_factor: float=1.7, csr_softening_m: float | None=None, compile_collective_chunks: bool | None=None, fast_collective_effects: bool=False, dipole_collective_subcycle: bool=False, csr_transient: bool=False, csr_drift_model: str='overtaking', generator: torch.Generator | None=None): ...
     def track(self, particles6: torch.Tensor, return_trajectory: bool=False, reference_energy_eV: torch.Tensor | None=None) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def fiducialize(self, particles0: torch.Tensor) -> FiducialReference: ...
 ```
+
+### Wake conventions
+
+Wake tables are per cell: `ElementSpec.cell_length` (`CELL_LENGTH`) sets how much of the table each sub-kick applies
+(`length / cell_length / n_kicks`, see `elements.md`). `LinacTracker.track` gives any `TransverseWake` that has no fixed bin window one from the
+time span of the first bunch tracked (plus half that span each side); set `set_fixed_bin_window` yourself for a bunch that changes length a lot.
 
 ### `resolve_wakes`
 
@@ -240,7 +248,7 @@ RF phase reference this tracker measures against, generalized from
 own `phase_rad` gets an additional `-omega_rf*t_ref_s` term (that
 element's own `omega_rf`) before `_build_params` sees it.
 
-Per-bend incoherent radiation is not modeled. CSR and the supported RF
+Per-bend incoherent radiation is opt-in for the [bounded pure-dipole model](radiation.md). CSR and the supported RF
 focusing branches are optional local element effects.
 
 `bunch_charge_C` (default `0.0`) is this pass's single-bunch
@@ -268,6 +276,13 @@ specializations.
 
 `fast_collective_effects` (default `False`) swaps `lsc`/`csr`
 to the fixed-bin-grid approximations
+
+`csr_transient=True` selects the binned entrance-transient bend model;
+`csr_drift_model="overtaking" | "stupakov" | "retarded"` selects downstream
+drift treatment. Transients and non-default drift models require `csr=True`
+and `fast_collective_effects=True`. See [model settings](../../../model_settings.md)
+for a selection table and runnable comparisons. Construct a new tracker to
+change these choices; element parameters retain their construction-time settings.
 
 `dipole_collective_subcycle` (default `False`) applies the LSC/CSR
 kick `n_kicks_bend` times per real dipole (at `length/n_kicks_bend`

@@ -1,0 +1,12 @@
+{
+  "work_function_eV": 4.607821627393073,
+  "pulse_energy_J": 5.39e-07,
+  "x0": -129.87545059806953,
+  "baseline_pC": 2.3722387920343553,
+  "chi2_per_point": 1.3732159292846533,
+  "qe": 0.001045434533412339,
+  "qe_field_V_per_m": 109000000.0,
+  "wavelength_nm": 266.0,
+  "field_enhancement": 1.0,
+  "crest_deg": 144.14105692902174
+}

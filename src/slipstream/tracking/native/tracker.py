@@ -86,6 +86,14 @@ class _ElementParams(NamedTuple):
     csr_bins: int = 256
     csr_sg_halfwidth: int = 1
     csr_substeps: tuple = ()
+    csr_drift_phi_m: float = 0.0
+    csr_drift_dz: float = 0.01
+    csr_stupakov: str = ""
+    """``LinacTracker(csr_drift_model=...)`` when ``"stupakov"`` or ``"retarded"``: this CSR drift is tracked in ``csr_drift_dz`` kicks with that kernel."""
+    csr_transient: bool = False
+    """``LinacTracker(csr_transient=True)``: this element's CSR kick uses the entrance-transient model (fast kernel only)."""
+    csr_phi_eval: float = 0.0
+    """Bend angle accumulated from the entrance of the dipole to the centre of this slice (rad): the angle at which its entrance-transient wake (slippage length) is evaluated."""
     exact_dipole: bool = False
     k3: float = 0.0
     multipoles: tuple = ()
@@ -105,17 +113,24 @@ class _ElementParams(NamedTuple):
     """The corrector's own strength (``ElementSpec.kick_x``/``kick_y``,
     whichever ``kick_plane`` selects) -- ``RingMap.with_strengths``'s
     occurrence-safe override target."""
+    synch_rad: bool = False
+    isr: bool = False
+    radiation_substeps: tuple = ()
+    wake_scale: float = 1.0
+    """RF-kind only: the fraction of the per-cell wake table applied at each sub-kick, ``length / cell_length / n_kicks`` (elegant's ``wake.factor``)."""
 
 
 def _build_params(
     specs: list[ElementSpec], n_kicks: int, n_kicks_bend: int,
     energy_eV: float, mc2_eV: float, device: torch.device, dtype: torch.dtype,
     integration_order: int = 4, rf_mode: str = "lumped", change_p0_override: bool | None = None,
-    exact_dipole: bool = False,
+    exact_dipole: bool = False, allow_local_radiation: bool = False,
 ) -> list[_ElementParams]:
     """Compute build params; see the module documentation for details."""
     out = []
     for s in specs:
+        if (s.synch_rad or s.isr) and not allow_local_radiation:
+            raise NotImplementedError("Local bend radiation requires LinacTracker; ring radiation accounting is separate")
         if s.kind == "rf" and rf_mode == "per_element":
             change_p0 = s.change_p0 if change_p0_override is None else change_p0_override
             out.append(_ElementParams(
@@ -124,6 +139,7 @@ def _build_params(
                 is_rf=True, voltage_V=s.voltage_V, phase_rad=s.phase_rad,
                 omega_rf=2.0 * math.pi * s.frequency_Hz, change_p0=change_p0,
                 wake=s.wake, transverse_wake_x=s.transverse_wake_x, transverse_wake_y=s.transverse_wake_y,
+                wake_scale=s.length / (s.cell_length if s.cell_length > 0.0 else s.length) / s.n_kicks if s.length > 0.0 else 1.0,
                 beta_wave=s.beta_wave,
                 end1_focus=s.end1_focus, end2_focus=s.end2_focus, body_focus_model=s.body_focus_model,
             ))
@@ -149,9 +165,11 @@ def _build_params(
             edge1_effects=s.edge1_effects, edge2_effects=s.edge2_effects,
             csr_bins=s.csr_bins, csr_sg_halfwidth=s.csr_sg_halfwidth,
             csr_drift_rho_m=s.csr_drift_rho_m, csr_drift_start_m=s.csr_drift_start_m,
+            csr_drift_phi_m=s.csr_drift_phi_m, csr_drift_dz=s.csr_drift_dz,
             exact_dipole=exact_dipole,
             k3=s.k3, multipoles=s.multipoles, skew_multipoles=s.skew_multipoles,
             integrated_multipoles=s.integrated_multipoles,
+            synch_rad=s.synch_rad, isr=s.isr,
         ))
     return out
 
@@ -169,7 +187,7 @@ def _apply_one_element(
         return _rf_cavity_kick(
             particles6, p.length, p.voltage_V, p.phase_rad, p.omega_rf, energy_eV, mc2_eV, change_p0=p.change_p0,
             wake=p.wake, transverse_wake_x=p.transverse_wake_x, transverse_wake_y=p.transverse_wake_y,
-            charge_per_particle_C=charge_per_particle_C, n_kicks=p.n_kicks, beta_wave=p.beta_wave,
+            charge_per_particle_C=charge_per_particle_C, n_kicks=p.n_kicks, beta_wave=p.beta_wave, wake_scale=p.wake_scale,
             end1_focus=p.end1_focus, end2_focus=p.end2_focus, body_focus_model=p.body_focus_model,
             compile_sub_kicks=compile_rf_sub_kicks,
         )

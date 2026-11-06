@@ -15,7 +15,7 @@ from .tracking.native.linac import LinacTracker, resolve_wakes
 
 
 class BeamlineStudy:
-    """Describe BeamlineStudy; see the module documentation for details."""
+    """Generate, track and save a canonical bunch using one reusable linac tracker."""
 
     def __init__(
         self, specs: list[ElementSpec], energy_eV: float,
@@ -48,22 +48,22 @@ class BeamlineStudy:
     @classmethod
     def from_lattice_file(
         cls, lte_path: str | Path, root_name: str, energy_eV: float,
-        mc2_eV: float = ELECTRON_MASS_EV, wake_base_dir: str | Path = ".", **kwargs,
+        mc2_eV: float = ELECTRON_MASS_EV, wake_base_dir: str | Path | None = None, *,
+        strict_import: bool = False, import_audit: list[dict[str, object]] | None = None, **kwargs,
     ) -> "BeamlineStudy":
-        """``parse_elegant_lattice`` + ``resolve_wakes`` (any ``WAKEFILE=``
-        paths resolved relative to ``wake_base_dir``, default the current
-        directory) -- a machine's own ``.lte`` straight into a study."""
-        specs = resolve_wakes(parse_elegant_lattice(lte_path, root_name), base_dir=wake_base_dir)
+        """Read a lattice; wake paths default to the lattice's own directory."""
+        specs = resolve_wakes(parse_elegant_lattice(lte_path, root_name, strict=strict_import, audit=import_audit),
+                              base_dir=Path(lte_path).resolve().parent if wake_base_dir is None else wake_base_dir)
         return cls(specs, energy_eV, mc2_eV=mc2_eV, **kwargs)
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "BeamlineStudy":
-        """Build one reusable tracker from a strict YAML run configuration."""
+    def from_yaml(cls, path: str | Path, *, overrides: dict[str, object] | None = None) -> "BeamlineStudy":
+        """Build a study, applying validated dotted-key overrides before construction."""
         from .beamline_config import read_config
 
-        config = read_config(path)
+        config = read_config(path, overrides=overrides)
         lattice = config["lattice"]
-        specs = parse_elegant_lattice(lattice["path"], lattice["root"])
+        specs = parse_elegant_lattice(lattice["path"], lattice["root"], strict=lattice.get("strict_import", False))
         if lattice.get("wakes", True):
             specs = resolve_wakes(specs, base_dir=lattice["wake_base_dir"])
         study = cls(specs, config["energy_eV"], mc2_eV=config["mc2_eV"], **config["tracker"])
@@ -81,7 +81,8 @@ class BeamlineStudy:
         self._tracker._set_reference_energy(self.energy_eV)
         self._tracker.bunch_charge_C = cfg["tracker"].get("bunch_charge_C", 0.0)
         kwargs = dict(return_trajectory=cfg["run"].get("return_trajectory", False),
-                      reference=cfg["reference"], metadata={"config_path": str(cfg["path"]), "source": source})
+                      reference=cfg["reference"], metadata={"config_path": str(cfg["path"]), "source": source,
+                                                          "config_yaml": cfg["config_yaml"]})
         if source == "astra":
             injector = Injector.from_astra(bunch["path"], mc2_eV=self.mc2_eV)
             result = self.track_with_injector(injector, n_particles=bunch.get("n_particles"),

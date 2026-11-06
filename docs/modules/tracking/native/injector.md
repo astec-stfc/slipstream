@@ -6,6 +6,13 @@
 
 Tracks cathode emission and Cartesian proper velocities through standing/traveling-wave cavities, solenoids, magnets, apertures and cylindrical or 3D space charge with optional cathode images. Cavity auto-phasing finds maximum energy gain sequentially.
 
+Optional local binary Coulomb collisions are configured by
+`Injector.ibs = InjectorIBSSettings(...)`; see [injector IBS](injector_ibs.md)
+for the model, physical cutoffs, float64 requirement and validation limits.
+IBS defaults off and is explicitly unsupported in `track_differentiable`.
+
+Localized longitudinal wake kicks (ASTRA `&WAKE`, monopole tables) are configured by `Injector.wakes`, read by `from_astra`; see [injector wake](injector_wake.md). They are unsupported in `track_differentiable`.
+
 ### Limits and conventions
 
 - YAML paths are relative to the machine file and physical fields/settings use SI.
@@ -26,6 +33,13 @@ beta_coarse`, else `dt_coarse`` (near the cathode the particle starts
 at rest under a strong field and needs the fine step; once `v~c` the
 push degenerates to a quadrature of `Ez` along the line). Fields no
 candidate is inside are skipped.
+
+The small trial batch runs in CPU float64 NumPy, evaluating only `Ez`
+from the same standing/traveling-wave tables used by particle tracking.
+Empty drift intervals are advanced analytically by summing whole time
+steps, stopping before any live candidate reaches the next field. The
+phase grids and integration steps inside fields are unchanged; each scan
+computes its results afresh without compilation or saved trajectories.
 
 A candidate whose `uz` reverses (phased to decelerate at the cathode)
 is retired at its current energy -- it cannot be the crest, and would
@@ -370,7 +384,10 @@ is re-fit every recompute -- but the CELL SIZES are snapped to the `_snap_h3d`
 ladder, so the expensive Green's function is rebuilt only on a bucket change
 (amortised), not per recompute. The requested
 box retains the stateless path's full particle extent and 5%-of-span margin so
-caching does not also change the discretised physics. Eager before emission
+caching does not also change the discretised physics by default. Set
+`SpaceChargeSettings.box_padding_3d` to a finite nonnegative fraction to vary
+the margin separately from `n_xyz`; increasing it at fixed `n_xyz` also makes
+the cells larger. The cylindrical `box_margin` is a separate setting. Eager before emission
 (`sc3d_fn=None`): the active set's shape changes nearly every step there and
 would recompile constantly.
 
@@ -406,6 +423,8 @@ class SpaceChargeSettings:
     ...
 class Quadrupole:
     ...
+class Corrector:
+    ...
 class Aperture:
     ...
 class Injector:
@@ -421,8 +440,8 @@ class Injector:
     def magnet_elements(self, device='cpu', dtype=torch.float64, frame_all: bool | None=None) -> tuple[tuple, tuple]: ...
     def auto_phase(self, verbose: bool=True) -> list[float]: ...
     def initial_beam(self, n_particles: int | None, device, dtype: torch.dtype, verbose: bool=False) -> dict: ...
-    def track(self, n_particles: int | None=None, device: str | None=None, dtype: torch.dtype | str=torch.float64, use_compile: bool=True, record_every: int=10, z_stop_m: float | None=None, mesh: str | None=None, verbose: bool=True, dump_dir: str | Path | None=None, return_particles: bool=False) -> dict: ...
-    def track_differentiable(self, params: dict | None=None, *, n_steps: int | None=None, dt_schedule=None, beam: dict | None=None, n_particles: int | None=None, device: str | None=None, dtype: torch.dtype | str=torch.float64, use_compile: bool=False, record_every: int=0, space_charge: bool | None=None, sc_box_m: tuple[float, float] | None=None, sc_image_steps: int=0, checkpoint_every: int=0, return_particles: bool=False) -> dict: ...
+    def track(self, n_particles: int | None=None, device: str | None=None, dtype: torch.dtype | str=torch.float64, use_compile: bool=True, record_every: int=10, z_stop_m: float | None=None, mesh: str | None=None, verbose: bool=True, dump_dir: str | Path | None=None, return_particles: bool=False, screen_z_m: float | None=None, use_warp: bool=True) -> dict: ...
+    def track_differentiable(self, params: dict | None=None, *, n_steps: int | None=None, dt_schedule=None, beam: dict | None=None, n_particles: int | None=None, device: str | None=None, dtype: torch.dtype | str=torch.float64, use_compile: bool=False, record_every: int=0, space_charge: bool | None=None, sc_box_m: tuple[float, float] | None=None, sc_image_steps: int=0, checkpoint_every: int=0, return_particles: bool=False, screen_z_m: float | None=None) -> dict: ...
 def parabolic_vertex(degs: torch.Tensor, gains: torch.Tensor, i: int, h: float) -> float: ...
 ```
 
@@ -511,11 +530,24 @@ Used only when `mesh="adaptive"`:
   macroparticle occupancy; set to zero to disable the noise guard.
 
 `smooth_r` / `smooth_z`: binomial `(1,2,1)/4` smoothing passes on
-the deposited charge-density grid before the Poisson solve, matching
-ASTRA's own `&CHARGE` `smooth_x`/`smooth_y`/`smooth_z`. Default
-0 (off) -- with it off, PIC deposition noise scales with charge per
-macroparticle and can dominate the native-vs-ASTRA emittance gap at
-high bunch charge.
+the deposited charge-density grid before the Poisson solve. Default
+0 (off). `Injector.from_astra` imports ASTRA's `&CHARGE`
+`smooth_x`/`smooth_y`/`smooth_z` only for `LSPCH3D = T`: ASTRA applies them to its
+3-D FFT algorithm only (manual section 6.6), so its cylindrical algorithm -- the one
+this solver is compared with -- never smooths. Importing them anyway blurred a density
+ASTRA does not blur: at the converged emission step it moved the CLARA 100 pC
+emittance by -9 % (see `Stories/CLARA_InjectorConvergence`).
+
+`emission_steps`: the number of steps across the emission window (latest minus earliest
+emission time of the beam); the emission-phase step is `min(Injector.dt_s, window /
+emission_steps)`, 0 keeps `dt_s`. A macroparticle is pushed from the first step at or
+after its emission time, so a step that is coarse against the window quantises the
+emission; ASTRA instead starts each particle at its own emission time. For the 2.9 ps
+CLARA window the 100 pC emittance is +14.7 % of ASTRA's at a 100 fs step and converged
+(-7.7 %, smoothing on; +1.2 %, off) at 50 fs and below, at no cost in run time. After
+emission a fixed-step run returns to `dt_s` and an adaptive one to its own rule. A
+`photocathode` run keeps `dt_s`: there it is the resolution of the emission law the
+caller chose. An in-flight beam has no window.
 
 `smooth_gamma_ref`: smoothing is blended in with weight
 `1 / (1 + (gamma/smooth_gamma_ref)**2)`, fading out at high gamma —
@@ -523,7 +555,7 @@ full-strength smoothing helps near the cathode but measurably hurts
 further downstream. Default 3.0 is a measured compromise across a
 5pC/100pC A/B, not a clean derivation from first principles.
 
-`dt_adaptive` (**experimental, not yet validated as a net win**):
+`dt_adaptive` (the default; step errors measured in `Stories/CLARA_InjectorConvergence`):
 re-derive the tracking step at every space-charge recompute from the
 *live* local transverse space-charge frequency instead of tracking the
 whole line at one fixed step. See `_local_sc_omega`:
@@ -624,10 +656,18 @@ are left to `magnet_elements`. Needs `crest_deg` set -- see
 `"cavities[i].e_max_V_per_m"`, `"solenoids[i].b_max_T"`, `i` the list index) onto the
 built fields as tensors, so gradients reach them; the crest stays the nominal one.
 
+### `Corrector`
+
+A steering magnet: the uniform transverse field `bx_T`, `by_T` over `length_m` centred on `z_m` (`Injector.correctors`). It
+kicks a particle of charge `q` by `dp_x = -q B_y L` and `dp_y = +q B_x L` whatever its energy, so settings that centre a
+beam at one gun phase leave the slower electrons of another phase off axis. The strengths are tensors in the compiled
+step: changing them does not recompile. The CLARA example sets the two S01 correctors to centre the beam on the BPM and
+the screen at a reference phase (`examples/photocathode/schottky_scan.py`).
+
 ### `Injector.magnet_elements`
 
 The lab-frame magnets `magnets.magnet_fields` evaluates: dipoles, quadrupoles that are
-placed, profile-table or carry multipoles, and placed solenoids -- plus `placed_sol`, the
+placed, profile-table or carry multipoles, placed solenoids and the steering `Injector.correctors` -- plus `placed_sol`, the
 `(place, table)` pairs of the solenoids among them (for the canonical-emittance `Bz`).
 
 `frame_all` (default: whether the machine has any dipole) also routes the *unplaced* solenoids
@@ -683,6 +723,14 @@ full 6D macroparticle file in openPMD-beamphysics format
 h5py so simba isn't a dependency here) and a copy of the machine
 alongside them for reproducibility.
 
+With `Injector.photocathode` set (see [`photocathode`](photocathode.md)) the macroparticle
+charges come from the laser pulse energy and the Schottky-dependent quantum efficiency,
+limited by the surface field of the charge already emitted, instead of from the beam file.
+Macroparticles that cannot be extracted are dropped (`n_suppressed`), those that fall back
+through the cathode plane are absorbed (`n_returned`), and `out["emission"]` reports the
+ideal, emitted, returned and surviving charge. `track_differentiable` does not support it.
+Trajectory statistics remain macroparticle averages, not charge-weighted.
+
 ### `Injector.track_differentiable`
 
 `track` as one autograd graph: the same `_fused_step`, `_fused_sc_fields` and
@@ -728,6 +776,41 @@ one block, instead of every step (~255 B per particle-step in float32), for one 
 adds `"trajectory"` (`TRAJ_KEYS` columns as tensors, plus `t_ns`); `return_particles`
 the final state (all particles, plus the `alive` mask).
 
+### Screen-plane observation
+
+Both trackers accept `screen_z_m=<finite lab z in metres>`. The optional `out["screen"]`
+records each emitted particle's first forward crossing, interpolated on the pusher's straight
+step segment. It returns full-length `x`, `y`, `z`, `ux`, `uy`, `uz` (metres and proper
+velocities in m/s), per-particle `t_s` (float64 seconds), signed `q` (C) and boolean
+`crossed`. Unobserved coordinates/time and charge are zero; always use `crossed` when
+selecting observations. The supplied macroparticle charge is retained exactly for observed
+particles, including those lost downstream after crossing. A swept aperture check up to
+the plane excludes losses before observation. Particles remain in the tracker after
+crossing; the monitor does not remove bunch charge from space-charge deposition.
+
+`z_plane_m`, `n_crossed`, `n_unobserved_alive`, `n_lost_before_screen` and
+`incomplete_charge_C` distinguish observation, aperture loss and unfinished transport.
+Missing observations are reported, never silently interpreted as physical transmission
+loss. Require `n_unobserved_alive == 0` before treating a screen image as complete.
+Backward, stationary, not-yet-emitted or initially downstream particles may remain
+unobserved. No backward projection or new crossing is fabricated for them.
+
+Ordinary tracking with this option stops after its centroid reaches `z_stop_m` **and**
+every particle has crossed or been lost, subject to its existing maximum step count.
+Default stopping is unchanged. Differentiable tracking retains its fixed schedule; select
+or replay a schedule long enough over the complete fit bounds and check completeness.
+The crossing state passes through checkpoint blocks, with no additional per-step host
+synchronization. `use_compile` also compiles the crossing helper on CUDA.
+
+This is a finite-step observation, not an exact event solver under within-step acceleration.
+Converge the step size against the intended image/observable error budget. Derivatives
+are piecewise smooth while the crossing and loss masks stay fixed; loss/crossing transitions
+and emission-time comparisons have no useful gradient. Screen monitoring does not change
+the differentiable tracker's existing treatment of aperture-lost particles in space charge
+or endpoint statistics; use a loss-free fit domain or validate ordinary tracking separately.
+The common-time endpoint and dump files remain unchanged and should not be confused
+with this plane observation.
+
 ### `parabolic_vertex`
 
 Sub-grid peak position from the three points bracketing index `i`
@@ -762,7 +845,8 @@ Handoff to a downstream s-based tracker (E3, BeamlineStudy.track_with_injector)
 ### `SpaceChargeSettings`
 
 "cylindrical" or "3d" (Cartesian open-boundary FFT, space_charge.SpaceCharge3D) -- see
-docs/tracking_native.md's "3D space charge". Mesh/box/smoothing knobs above are cylindrical-only.
+docs/tracking_native.md's "3D space charge". The cylindrical box and smoothing knobs do not set the Cartesian box;
+use `box_padding_3d` and `n_xyz` for the latter.
 
 ### `SpaceChargeSettings`
 
