@@ -1,13 +1,12 @@
 """RFCW wakes are per-cell tables: each sub-kick applies ``length / cell_length / n_kicks`` of the table (elegant's ``wake.factor``)."""
 from __future__ import annotations
 
-import math
 
 import numpy as np
 import pytest
 import torch
 
-from slipstream.constants import C_LIGHT, ELECTRON_MASS_EV
+from slipstream.constants import C_LIGHT
 from slipstream.tracking.native.lattice_import import ElementSpec, parse_elegant_lattice
 from slipstream.tracking.native.linac import LinacTracker
 from slipstream.wakefields.shortrange import ShortRangeWake
