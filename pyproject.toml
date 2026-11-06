@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slipstream-accel"
-version = "1.0.0"
+version = "1.0.1"
 description = "Native accelerator beam-dynamics and tracking tools"
 readme = "README.md"
 requires-python = ">=3.10"
