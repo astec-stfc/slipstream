@@ -355,7 +355,7 @@ class LinacTracker:
         if fiducial is not None:
             effective_specs = [
                 replace(s, phase_rad=s.phase_rad - 2.0 * math.pi * s.frequency_Hz * fiducial.t_ref_s)
-                if s.kind == "rf" else s
+                if s.kind in ("rf", "tdc") else s
                 for s in effective_specs
             ]
         self._element_params = _build_params(
@@ -501,9 +501,9 @@ class LinacTracker:
         if unknown:
             raise KeyError(f"no such element(s) in lattice: {sorted(unknown)}")
         allowed = {
-            "k1": lambda s: s.kind not in ("rf", "hkick", "vkick"), "k2": lambda s: s.kind not in ("rf", "hkick", "vkick"),
+            "k1": lambda s: s.kind not in ("rf", "tdc", "hkick", "vkick"), "k2": lambda s: s.kind not in ("rf", "tdc", "hkick", "vkick"),
             "kick_x": lambda s: s.kind == "hkick", "kick_y": lambda s: s.kind == "vkick",
-            "voltage_V": lambda s: s.kind == "rf", "phase_rad": lambda s: s.kind == "rf",
+            "voltage_V": lambda s: s.kind in ("rf", "tdc"), "phase_rad": lambda s: s.kind in ("rf", "tdc"),
         }
         for key, values in requested.items():
             for name in values:

@@ -215,6 +215,16 @@ codebase's torch version (`specialize_float=False`).
 remaining structural choices -- at most 3 compiled variants
 regardless of `n_kicks`.
 
+### `_tdc_kick`
+
+A thin transverse deflecting cavity (`ElementSpec(kind="tdc")`): `drift(length/2) -> kick -> drift(length/2)`, with `length` possibly zero.
+With `a = V / (p0 c)` and `arg = phase_rad + omega_rf * tau / c`, the particle receives `dp = a * sin(arg)` along the deflection direction
+`(cos(tilt), sin(tilt))` (`tilt = 0` is `x`, `pi/2` is `y`) and, from the Panofsky-Wenzel theorem, `d(delta) = -a * omega_rf / (beta0 * c) * q * cos(arg)`
+with `q` the offset along that direction (a late particle is kicked towards `+q`; one at positive `q` loses energy where the kick is rising).
+The pair is symplectic for `dx^dpx + dy^dpy - beta0 dtau^ddelta`, the time and energy form; the tests check this and that the opposite sign of the
+energy term is not. Phase zero is the zero crossing of the deflection. Not modelled: transverse focusing and second-order terms of the mode,
+the finite length of the kick, wakes and any change of the reference energy.
+
 ### `_rf_cavity_kick`
 
 Real elegant's own RFCA transport (`simple_rfca.c`):
