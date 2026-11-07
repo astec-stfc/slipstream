@@ -48,6 +48,8 @@ class TransverseWake:
     def set_fixed_bin_window(self, t_min_s: float, t_max_s: float) -> None: ...
     def prepare(self, dtype: torch.dtype, device: str | torch.device) -> None: ...
     def kick_at(self, tau: torch.Tensor, offset: torch.Tensor, charge_per_particle_C: torch.Tensor | float) -> torch.Tensor: ...
+    overflow: torch.Tensor | None  # property
+    def reset_overflow(self) -> None: ...
 ```
 
 ### `TransverseWake`
@@ -87,6 +89,11 @@ present bunch's own dipole wake, given its own transverse offset
 charge-weighted *offset* (the source bunch's dipole moment) rather
 than charge alone -- `PyHEADTAIL`'s `DipoleWakeKickX` is the
 reference for this weighting.
+
+`deposit="cic"` and `monitor_overflow` behave as for `ShortRangeWake` (see there): the charge-weighted
+offset is spread over two bins and the kick is read back by interpolation, so `kick_at` has a gradient
+to `tau` as well as to `offset`; the default `"ngp"` has the gradient to `offset` only. The window
+is always fixed (`kick_at` raises without one).
 
 ## Numerical and implementation notes
 

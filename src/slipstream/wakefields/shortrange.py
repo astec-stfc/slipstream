@@ -53,13 +53,56 @@ def trim_wake(t: np.ndarray, W: np.ndarray, t_min: float, t_max: float) -> tuple
     return t[mask], W[mask]
 
 
+def _capturing() -> bool:
+    """Whether a CUDA graph capture is underway on the current stream (False on a CPU-only PyTorch build, where the query raises)."""
+    return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
+
+def _bin_nodes(tau: torch.Tensor, dt_s: float, lo: int, deposit: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Grid nodes and weights of every particle for a fixed window starting at node ``lo``: indices and weights of shape ``(k, N)``,
+    ``k = 1`` for the nearest grid point (``"ngp"``, no gradient to ``tau``) or ``k = 2`` for cloud in cell (``"cic"``, linear
+    weights that depend on ``tau``). The node ``j`` sits at ``(lo + j) * dt_s``; an index outside ``[0, n_bins)`` is out of the window."""
+    u = tau / dt_s
+    if deposit == "ngp":
+        return (torch.round(u).to(torch.int64) - lo)[None], torch.ones_like(tau)[None]
+    i0 = torch.floor(u)
+    frac = u - i0
+    idx0 = i0.to(torch.int64) - lo
+    return torch.stack([idx0, idx0 + 1]), torch.stack([1.0 - frac, frac])
+
+
+def _deposit(idx: torch.Tensor, weight: torch.Tensor, n_bins: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Scatter ``weight`` (``(k, N)``) onto ``n_bins`` nodes; weight outside the window goes to a discarded extra bin. Returns the
+    grid and the boolean ``(N,)`` mask of particles with every node inside the window."""
+    inside = (idx >= 0) & (idx < n_bins)
+    safe = torch.where(inside, idx, n_bins)
+    grid = torch.zeros(n_bins + 1, dtype=weight.dtype, device=weight.device)
+    for k in range(idx.shape[0]):
+        grid.scatter_add_(0, safe[k], weight[k])
+    return grid[:n_bins], inside.all(0)
+
+
+def _readback(field_bin: torch.Tensor, idx: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Field at every particle from the node values ``field_bin``, with the weights of ``_bin_nodes``; outside the window the edge node."""
+    return (field_bin[idx.clamp(0, field_bin.shape[0] - 1)] * weight).sum(0)
+
+
 @dataclass
 class ShortRangeWake:
-    """A short-range wake potential table W(t) [V/C] on a uniform time grid."""
+    """A short-range wake potential table W(t) [V/C] on a uniform time grid.
+
+    With a fixed bin window (``set_fixed_bin_window``) the binning has a static shape and no host synchronisation, so it can be
+    captured in a CUDA graph. ``deposit="cic"`` (fixed window only) spreads each particle over its two neighbouring nodes and reads the
+    voltage back by linear interpolation, which gives a gradient to the longitudinal position; the default ``"ngp"`` rounds to the
+    nearest node and has none. ``monitor_overflow`` keeps the largest fraction of particles outside the fixed window seen since the
+    last ``reset_overflow`` in the tensor ``overflow`` (updated in place, so it works inside a CUDA graph)."""
 
     t_s: np.ndarray
     W_V_per_C: np.ndarray
+    deposit: str = "ngp"
+    monitor_overflow: bool = False
     dt_s: float = field(init=False)
+    _overflow: torch.Tensor | None = field(init=False, default=None, repr=False)
     _fixed_lo_idx: int | None = field(init=False, default=None, repr=False)
     _fixed_n_bins: int | None = field(init=False, default=None, repr=False)
     # Precomputed by set_fixed_bin_window/prepare.
@@ -69,6 +112,8 @@ class ShortRangeWake:
     _W_fft_cache: dict = field(init=False, default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        if self.deposit not in ("ngp", "cic"):
+            raise ValueError("deposit must be 'ngp' or 'cic'")
         self.t_s = np.asarray(self.t_s, dtype=np.float64)
         self.W_V_per_C = np.asarray(self.W_V_per_C, dtype=np.float64)
         dt = np.diff(self.t_s)
@@ -139,31 +184,47 @@ class ShortRangeWake:
             return
         W = torch.as_tensor(self.W_V_per_C, dtype=dtype, device=device)
         self._fixed_W_fft = torch.fft.rfft(W, n=self._fixed_conv_len)
+        if self.monitor_overflow:
+            self._overflow = torch.zeros((), dtype=dtype, device=device)
+
+    @property
+    def overflow(self) -> torch.Tensor | None:
+        """Largest fraction of particles outside the fixed window since ``reset_overflow`` (a 0-d tensor), or ``None`` if not monitored."""
+        return self._overflow
+
+    def reset_overflow(self) -> None:
+        if self._overflow is not None:
+            self._overflow.zero_()
 
     def voltage_at(self, tau: torch.Tensor, charge_per_particle_C: torch.Tensor | float) -> torch.Tensor:
         """Voltage [V] felt by each particle from the present bunch's own short-range wake."""
-        idx = torch.round(tau / self.dt_s).to(torch.int64)
         if self._fixed_n_bins is not None:
             lo, n_bins = self._fixed_lo_idx, self._fixed_n_bins
-            # Fixed-shape extra bin excludes out-of-range charge.
-            in_range = (idx >= lo) & (idx < lo + n_bins)
-            safe_idx = torch.where(in_range, idx - lo, n_bins)
-            charge_bin_full = torch.zeros(n_bins + 1, dtype=tau.dtype, device=tau.device)
-            # Scatter counts, then scale by macro-charge.
-            charge_bin_full.scatter_add_(0, safe_idx, torch.ones_like(tau))
-            charge_bin = charge_bin_full[:n_bins] * charge_per_particle_C
-            idx_readback = idx.clamp(lo, lo + n_bins - 1)
+            idx, weight = _bin_nodes(tau, self.dt_s, lo, self.deposit)
+            # Fixed-shape extra bin excludes out-of-range charge; scatter weights, then scale by macro-charge.
+            counts, in_window = _deposit(idx, weight, n_bins)
+            charge_bin = counts * charge_per_particle_C
 
             if self._fixed_W_fft is None:
                 raise RuntimeError("call ShortRangeWake.prepare(dtype, device) before voltage_at")
+            if self._overflow is not None:
+                self._overflow.copy_(torch.maximum(self._overflow, (1.0 - in_window.to(tau.dtype).mean()).detach().to(self._overflow.dtype)))
             conv_len = self._fixed_conv_len
             fb = self._fixed_W_fft
             fa = torch.fft.rfft(charge_bin, n=conv_len)
             full = torch.fft.irfft(fa * fb, n=conv_len)
             start = -self._fixed_o_min_w
             V_bin = full[start:start + n_bins]
-            return V_bin[idx_readback - lo]
+            return _readback(V_bin, idx, weight)
 
+        if self.deposit != "ngp":
+            raise RuntimeError("deposit='cic' needs a fixed bin window (set_fixed_bin_window)")
+        if _capturing():
+            raise RuntimeError(
+                "a CUDA graph cannot capture the dynamic wake window (it reads the bunch extent on the host); call set_fixed_bin_window "
+                "(or LinacTracker.with_wake_windows) before capture"
+            )
+        idx = torch.round(tau / self.dt_s).to(torch.int64)
         lo = int(idx.min().item())
         n_bins = int(idx.max().item()) - lo + 1
         hist_idx = idx - lo
