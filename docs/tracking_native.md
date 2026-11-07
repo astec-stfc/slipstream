@@ -83,6 +83,113 @@ flags (including imported `SYNCH_RAD`/`ISR`). This bounded model requires
 eager electron tracking with `always_change_p0=False`; see the
 [local radiation reference](modules/tracking/native/radiation.md).
 
+### Gradients through a linac pass
+
+`LinacTracker.track` is differentiable with respect to the input particles,
+including through LSC and CSR with `fast_collective_effects=True`, on CPU and
+CUDA. The fast kernels skip their forward-only CUDA graphs whenever an input
+requires grad, so no flag is needed. Each call builds its own charge tensor, so
+several charged passes can be accumulated into one loss before a single
+`backward()`.
+
+```python
+tracker = LinacTracker(specs, 150e6, device="cuda", bunch_charge_C=100e-12,
+                       csr=True, lsc=True, pipe_radius_b_m=0.01, fast_collective_effects=True)
+# image_loss and beam_for stand for your own screen model and scan settings
+loss = sum(image_loss(tracker.track(beam_for(setting))[0]) for setting in settings)
+loss.backward()
+```
+
+Limits to know before relying on a gradient:
+
+- Wakes: by default the longitudinal `ShortRangeWake` rounds particles to integer bins and passes
+  no gradient to `tau`, and the transverse wake passes gradient to the offsets only;
+  `with_wake_windows(..., deposit="cic")` (below) gives both a gradient to `tau`. RF phase,
+  voltage and magnet strengths are Python floats unless set as tensors with `with_settings` (below), so no gradient reaches them otherwise.
+- The grid origin and spacing of the binned kernels follow the live extremes of `tau`.
+- Float32 gradients of a binned density derivative are rough: in the test chicane
+  (16384 particles, 256 bins) they differ from float64 by 8-18 % in `x`, `tau` and `delta`,
+  against 1e-6 without CSR. Compare with float64 for the bin count, smoothing and particle
+  count in use; `torch.use_deterministic_algorithms(True)` removes the run-to-run noise of
+  float32 scatter but not that difference.
+
+The step is launch-bound, so a fixed-shape forward and backward can be captured in one CUDA
+graph (measured 5.7 to 15 times faster than eager on a 15-element chicane with CSR). Warm up
+first on a side stream, as the PyTorch CUDA-graph documentation describes, so that the dense
+smoothing operator, cuFFT plans and cached scalar constants exist before capture, then capture
+`track`, the loss and `backward()` together and replay it with new values copied into the static
+input. The step must contain no host synchronisation and no host-to-device scalar construction.
+`tests/test_collective_gradients.py` and `tests/test_linac_scan_parameters.py` hold working
+examples. Under deterministic algorithms a CSR-only replay matched eager bit for bit in float32.
+
+Capture was checked, with and without gradients, on CUDA in float64 for: drifts, quadrupoles,
+sextupoles, correctors, bends, RF cavities without wakes (with `always_change_p0` on or off and
+with per-element `change_p0`), fast CSR (steady state, `csr_transient`, `csr_n_slices`) and
+fast LSC (including `dipole_collective_subcycle`), and `csr_drift_model="stupakov"`. A scalar
+bunch charge no longer replays the manual forward-only graphs of the fast kernels inside an
+outer capture (that failed before). Wakes capture once their bin window is fixed
+(`with_wake_windows`, below); without it the longitudinal window is read from the data and a capture
+raises a `RuntimeError` naming the fix. Not capturable: `csr_drift_model="retarded"`, which reads the
+reference energy on the host and raises a `RuntimeError` during capture instead of invalidating
+it. Of the Warp kernels only the Stupakov `stupakov_phi` launch was exercised under capture (Warp 1.17, RTX 3050): it captured and replayed correctly; the others were not.
+
+### Wakes: fixed windows, CIC deposit, overflow
+
+`tracker.with_wake_windows(particles6=bunch, margin=1.0, deposit="cic", monitor_overflow=True)`
+returns a copy whose longitudinal and transverse wakes all use one fixed bin window, sized from a
+representative bunch (or given as `window_s=(t_min, t_max)` in seconds). The binning then has static
+shapes and no host reads, so RF cavities with wakes capture in a CUDA graph together with the rest of
+the line. With the window covering the bunch the result equals the default dynamic window (the
+nearest-bin result is unchanged to rounding). `deposit="cic"` (cloud in cell) is second-order
+accurate against the exact pairwise sum where the default nearest-bin deposit is first-order, and
+it is differentiable in `tau`. Particles outside the window feel the edge bin and add no charge, so
+leave margin for the bunch to lengthen along the line and read `tracker.wake_overflow()` (a tensor,
+the largest outside fraction since `reset_wake_overflow()`) after a pass; it is a tensor so that
+checking it inside a graph costs no host read.
+
+### Beam reconstruction with a differentiable screen
+
+`slipstream.reconstruction` turns the pieces above into the forward model of a GPSR-style fit:
+`Screen` renders a bunch onto a fixed pixel grid (cloud in cell, differentiable, blur, gain and
+background), `ScanModel(tracker, screen, [("Q1", "k1")])` tracks the whole bunch at each row of a
+scan table (through `with_settings`) and returns one image per row, and `GraphedStep` captures
+`loss_fn()` and its `backward()` as one CUDA graph and replays it with new scan tables or
+parameters (eager on the CPU). `ScanModel` has the `set_lattice_parameters` and
+`track_and_observe` methods GPSR calls and accepts a Cheetah beam, so it can replace a Cheetah
+lattice in `GPSR(beam_generator, lattice)`. See [reconstruction](modules/reconstruction.md) for
+the conventions, limits and an example.
+
+### Transverse deflecting cavity
+
+`ElementSpec(name, "tdc", length, voltage_V=..., frequency_Hz=..., phase_rad=..., tilt=...)` (or elegant's `RFDF` / `RFTM110`) is a thin
+deflecting cavity: a kick `V / (p0 c) * sin(phase + omega * tau / c)` along `tilt` (0 is `x`, pi/2 is `y`) and the Panofsky-Wenzel energy change
+that goes with it, so it streaks the bunch (`tau` onto the deflected plane) and leaves the longitudinal phase space correlated with the offset.
+Its `voltage_V` and `phase_rad` are scannable through `with_settings` and the phase follows the fiducial arrival time like an RF cavity's.
+Phase zero is the zero crossing. There is no focusing, no wake and no reference-energy change; see `elements._tdc_kick` for the model.
+
+### Scan settings as tensors
+
+Quadrupole and sextupole strengths, corrector kicks and RF voltage and phase are fixed when a
+`LinacTracker` is built. `tracker.with_settings(k1={"Q1": k}, voltage_V={"L1": v},
+phase_rad={"L1": phi})` returns a copy in which the named elements (case-insensitive, every
+occurrence) take those values. Floats give the same result as rebuilding the tracker; tensors
+keep their autograd history and are read on every call. In a captured graph that means a scan
+needs one capture: create the settings as static tensors, capture, then `copy_` each new value
+into them before `graph.replay()`.
+
+```python
+k = torch.tensor(2.0, device="cuda", dtype=torch.float64)
+scan = tracker.with_settings(k1={"Q1": k})
+# ... warm up, capture `scan.track(static_beam)` + loss + backward ...
+for value in settings:
+    k.fill_(value)
+    graph.replay()
+```
+
+An override replaces the value including any sampled error. The phase is the element's phase as
+in `ElementSpec`; the tracker's fiducial shift is applied on top. The reference offset of a bend
+with a tensor `k1` or `k2` stays at its build-time value, which is zero for a straight magnet.
+
 ## Injector usage
 
 Build an injector from an ASTRA deck, then track its distribution:

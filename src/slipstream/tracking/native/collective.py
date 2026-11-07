@@ -2,6 +2,7 @@
 docs/modules/tracking/native/collective.md."""
 from __future__ import annotations
 
+import functools
 import math
 
 import numpy as np
@@ -35,6 +36,44 @@ _CHUNK_TARGET_ELEMENTS = 2**21
 _CSR_WARP_MIN_N = 32_768
 
 
+def _grad_live(*values) -> bool:
+    """Whether autograd would record an operation on any tensor in ``values``. The forward-only CUDA graphs and in-place chunk
+    steps below are valid only when this is false."""
+    if not torch.is_grad_enabled():
+        return False
+    for value in values:
+        if isinstance(value, torch.Tensor) and value.requires_grad:
+            return True
+    return False
+
+
+@functools.lru_cache(maxsize=4096)
+def _scalar_on(value: float, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    """A cached 0-d constant (never modify it in place). Building one from a Python float is a host-to-device copy, which a CUDA
+    graph capture rejects; the first (warm-up) call pays it and later calls, including inside a capture, only look it up."""
+    return torch.as_tensor(value, dtype=dtype, device=device)
+
+
+def _const(value, like: torch.Tensor) -> torch.Tensor:
+    """``value`` as a 0-d tensor of ``like``'s dtype and device (a tensor is converted, a Python number is cached)."""
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype=like.dtype, device=like.device)
+    return _scalar_on(float(value), like.dtype, like.device)
+
+
+def _capturing() -> bool:
+    """Whether a CUDA graph capture is underway on the current stream. False on a CPU-only PyTorch build, where
+    ``torch.cuda.is_current_stream_capturing`` raises."""
+    return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
+
+def _graph_replay_ok(*values) -> bool:
+    """Whether a manually captured forward-only CUDA graph may be replayed: not when autograd would record an operation (see
+    ``_grad_live``), and not inside an outer graph capture, where a nested ``replay`` is illegal. In both cases the caller takes its
+    ordinary PyTorch path, which an outer capture records and autograd differentiates."""
+    return not _grad_live(*values) and not _capturing()
+
+
 def _chunk_rows_for(n: int, cols: int) -> int:
     """Row-block size for a chunked ``(rows, cols)`` buffer, capped so
     ``rows * cols <= _CHUNK_TARGET_ELEMENTS``."""
@@ -50,6 +89,10 @@ def _kde_chunk_step(
     diff_chunk = tau_sorted_chunk.unsqueeze(-1) - window_chunk
     phi_chunk = torch.exp(-0.5 * (diff_chunk / bandwidth_m) ** 2) / (bandwidth_m * math.sqrt(2.0 * math.pi))
     density_chunk = (charge_chunk * phi_chunk).sum(dim=-1)
+    if _grad_live(tau_sorted_chunk, window_chunk, charge_chunk, bandwidth_m):
+        # Autograd saves diff_chunk, so the storage-reusing in-place chain below is not allowed.
+        weight = -(diff_chunk / (bandwidth_m * bandwidth_m)) * phi_chunk * charge_chunk
+        return density_chunk, weight.sum(dim=-1)
     # Reuse diff_chunk's storage for the derivative weight instead of a third buffer.
     diff_chunk.div_(bandwidth_m * bandwidth_m).neg_().mul_(phi_chunk).mul_(charge_chunk)
     density_deriv_chunk = diff_chunk.sum(dim=-1)
@@ -73,6 +116,11 @@ def _csr_chunk_step(
     """One row-block's worth of the CSR all-vs-all kernel sum."""
     diff_chunk = tau_chunk.unsqueeze(-1) - tau_all.unsqueeze(-2)  # (..., end-start, n)
     behind_chunk = diff_chunk < 0.0  # CSR propagates from later tau toward the head
+    if _grad_live(tau_chunk, tau_all, score, softening_m):
+        # Out-of-place, with a finite argument where masked so the zero gradient is not 0 * inf.
+        softened = torch.where(behind_chunk, diff_chunk * diff_chunk + softening_m * softening_m, torch.ones_like(diff_chunk))
+        term = softened.pow(-1.0 / 6.0) * score.unsqueeze(-2)
+        return torch.where(behind_chunk, term, torch.zeros_like(term)).sum(dim=-1)
     diff_chunk.pow_(2).add_(softening_m * softening_m).pow_(1.0 / 6.0).reciprocal_()  # softened |ds|^-1/3
     diff_chunk.mul_(score.unsqueeze(-2))  # score_j * kernel_ij
     diff_chunk.masked_fill_(~behind_chunk, 0.0)  # zero sources at or ahead of the observer
@@ -129,7 +177,10 @@ def _csr_chunked_pairwise_sum(
     ):
         return warp_kernels.csr_pairwise_sum(tau_m, score, softening_m)
 
-    if _use_graph and compile_chunks and tau_m.is_cuda and tau_m.ndim == 1:
+    if (
+        _use_graph and compile_chunks and tau_m.is_cuda and tau_m.ndim == 1
+        and _graph_replay_ok(tau_m, score, softening_m)  # a replayed graph records no autograd history
+    ):
         graph = _get_csr_pairwise_graph(n, tau_m.dtype, tau_m.device)
         return graph.run(tau_m, score, softening_m)
 
@@ -291,7 +342,7 @@ def _gaussian_kde_density_and_deriv(
         return density, density_deriv
 
     has_tensor_charge = isinstance(charge_per_particle_C, torch.Tensor) and charge_per_particle_C.dim() > 0
-    if tau_m.is_cuda and not has_tensor_charge:
+    if tau_m.is_cuda and not has_tensor_charge and _graph_replay_ok(tau_m, charge_per_particle_C, bandwidth_m):
         graph = _get_kde_windowed_graph(n, w, tau_m.dtype, tau_m.device, compile_chunks)
         return graph.run(tau_m, charge_per_particle_C, bandwidth_m)
 
@@ -375,7 +426,7 @@ def _lsc_csr_delta_kicks(
     if pipe_radius_b_m is None:
         form_factor = torch.ones((), dtype=tau_m.dtype, device=tau_m.device)
     else:
-        b_over_a = torch.as_tensor(pipe_radius_b_m, dtype=a_m.dtype, device=a_m.device) / a_m
+        b_over_a = pipe_radius_b_m / a_m
         form_factor = 1.0 + 2.0 * torch.log(b_over_a)
     e_field_per_length = (
         _Z0_OHM / (4.0 * math.pi * (energy_eV / mc2_eV) ** 2)
@@ -385,14 +436,14 @@ def _lsc_csr_delta_kicks(
     if softening_m is None:
         softening = 0.5 * h_m
     else:
-        softening = torch.as_tensor(softening_m, dtype=tau_m.dtype, device=tau_m.device)
+        softening = _const(softening_m, tau_m)
     density_floor = 1e-6 * density.abs().max().clamp(min=1e-300)
     score = density_deriv / torch.clamp(density, min=density_floor)
     weighted_sum = _csr_chunked_pairwise_sum(
         tau_m, score, softening, n, compile_chunks=compile_chunks,
     )
     csr_constant = 2.0 / ((3.0 * csr_rho_m * csr_rho_m) ** (1.0 / 3.0) * 4.0 * math.pi * EPS0_F_PER_M)
-    csr_length = torch.as_tensor(csr_length_m, dtype=tau_m.dtype, device=tau_m.device)
+    csr_length = _const(csr_length_m, tau_m)
     csr_kick = csr_constant * csr_length * charge_per_particle_C * weighted_sum / energy_eV
     return lsc_kick, csr_kick
 
@@ -421,7 +472,7 @@ def lsc_delta_kick(
     if pipe_radius_b_m is None:
         form_factor = torch.ones((), dtype=tau_m.dtype, device=tau_m.device)
     else:
-        b_over_a = torch.as_tensor(pipe_radius_b_m, dtype=a_m.dtype, device=a_m.device) / a_m
+        b_over_a = pipe_radius_b_m / a_m
         form_factor = 1.0 + 2.0 * torch.log(b_over_a)
 
     h_m = torch.clamp(silverman_bandwidth_m(tau_m), min=tiny)
@@ -459,7 +510,7 @@ def csr_steady_state_delta_kick(
     if softening_m is None:
         softening_m = 0.5 * h_m
     else:
-        softening_m = torch.as_tensor(softening_m, dtype=tau_m.dtype, device=tau_m.device)
+        softening_m = _const(softening_m, tau_m)
 
     density, density_deriv = _gaussian_kde_density_and_deriv(tau_m, charge_per_particle_C, h_m, compile_chunks=compile_chunks)
     # Score function (log-density derivative), floored relative to the KDE's
@@ -575,7 +626,7 @@ def csr_steady_state_delta_kick_subquadratic(
     if softening_m is None:
         softening_m = 0.5 * h_m
     else:
-        softening_m = torch.as_tensor(softening_m, dtype=tau_m.dtype, device=tau_m.device).reshape(())
+        softening_m = _const(softening_m, tau_m).reshape(())
     density, density_deriv = _gaussian_kde_density_and_deriv(
         tau_m, charge_per_particle_C, h_m, compile_chunks=tau_m.is_cuda,
     )
@@ -640,10 +691,29 @@ def _bin_line_density(
     return lam / dtau
 
 
+# Many passes are applied as one precomputed matrix up to this grid size (4096 float64 bins is 128 MiB).
+_DENSE_SMOOTH_MIN_PASSES = 8
+_DENSE_SMOOTH_MAX_BINS = 4096
+
+
+@functools.lru_cache(maxsize=8)
+def _dense_smoother(n: int, passes: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    """``T**passes`` for the zero-padded ``(1,2,1)/4`` smoother ``T``, built in float64 on first use. ``T`` is a Dirichlet tridiagonal
+    Toeplitz matrix with eigenvectors ``sin(pi j k / (n + 1))`` and eigenvalues ``cos(pi k / (2 (n + 1)))**2``. Build it outside a
+    CUDA-graph capture (any earlier call does)."""
+    k = torch.arange(1, n + 1, dtype=torch.float64, device=device)
+    q = math.sqrt(2.0 / (n + 1)) * torch.sin(torch.outer(k, k) * (math.pi / (n + 1)))
+    mu = torch.cos(k * (math.pi / (2.0 * (n + 1)))) ** 2
+    return ((q * mu ** passes) @ q).to(dtype)
+
+
 def _smooth_bins(lam: torch.Tensor, passes: int) -> torch.Tensor:
     """Binomial ``(1,2,1)/4`` smoothing, ``passes`` times (same convention as
     ``space_charge.smooth_rho``) -- suppresses the CIC histogram's shot noise before it gets
-    amplified by ``1/dtau`` in the derivative step."""
+    amplified by ``1/dtau`` in the derivative step. Many passes on a modest grid are one matrix-vector product
+    (``_dense_smoother``) instead of ``passes`` dependent launches; the result is the same operator."""
+    if lam.ndim == 1 and passes >= _DENSE_SMOOTH_MIN_PASSES and lam.shape[-1] <= _DENSE_SMOOTH_MAX_BINS:
+        return _dense_smoother(lam.shape[-1], passes, lam.dtype, lam.device) @ lam
     for _ in range(passes):
         pad = torch.zeros_like(lam[:1])
         padded = torch.cat([pad, lam, pad])
@@ -689,7 +759,7 @@ class _LSCFastGraph:
             if pipe_radius_b_m is None:
                 form_factor = torch.ones((), dtype=dtype, device=device)
             else:
-                b_over_a = torch.as_tensor(pipe_radius_b_m, dtype=dtype, device=device) / a_m
+                b_over_a = pipe_radius_b_m / a_m  # a Python float: building a device tensor here would break graph capture
                 form_factor = 1.0 + 2.0 * torch.log(b_over_a)
             bin_idx, interp_w, valid, _, dtau, nb = _fixed_grid(self._tau, n_bins)
             lam = _bin_line_density(self._charge, bin_idx, interp_w, valid, nb, dtau)
@@ -758,7 +828,10 @@ def lsc_delta_kick_fast(
     if n < 2 or length_m <= 0.0:
         return torch.zeros_like(tau_m)
     has_tensor_charge = isinstance(charge_per_particle_C, torch.Tensor) and charge_per_particle_C.dim() > 0
-    if tau_m.is_cuda and not has_tensor_charge:
+    if (
+        tau_m.is_cuda and not has_tensor_charge
+        and _graph_replay_ok(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV)
+    ):
         graph = _get_lsc_fast_graph(n, n_bins, smooth_passes, tau_m.dtype, tau_m.device, pipe_radius_b_m, radius_factor)
         e_field_per_length = graph.run(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV)
     else:
@@ -768,7 +841,7 @@ def lsc_delta_kick_fast(
         if pipe_radius_b_m is None:
             form_factor = torch.ones((), dtype=tau_m.dtype, device=tau_m.device)
         else:
-            b_over_a = torch.as_tensor(pipe_radius_b_m, dtype=a_m.dtype, device=a_m.device) / a_m
+            b_over_a = pipe_radius_b_m / a_m
             form_factor = 1.0 + 2.0 * torch.log(b_over_a)
 
         bin_idx, interp_w, valid, _, dtau, n_bins = _fixed_grid(tau_m, n_bins)
@@ -809,7 +882,7 @@ def _csr_fast_field(
     weights = torch.where(j == 0, 0.9, torch.where(j == 1, 1.1, j.clamp(min=1).pow(-1 / 3)))
     kernel = weights * dtau.pow(2 / 3)
     if softening_m is not None:
-        eps = torch.as_tensor(softening_m, dtype=tau_m.dtype, device=tau_m.device)
+        eps = _const(softening_m, tau_m)
         softened = ((j * dtau).square() + eps.square()).clamp(min=torch.finfo(tau_m.dtype).tiny).pow(-1 / 6)
         softened = softened * dtau * torch.where(j == 0, 0.5, 1.0)
         kernel = torch.where(eps > 0, softened, kernel)
@@ -910,8 +983,8 @@ def csr_drift_delta_kick_fast(
         weights = torch.ones((1, 1, width), dtype=lam.dtype, device=lam.device) / width
         lam = torch.nn.functional.conv1d(lam[None, None], weights, padding=sg_halfwidth)[0, 0]
     derivative = _grid_deriv(lam, dtau)
-    x = torch.as_tensor(z_travel_m / rho, dtype=tau_m.dtype, device=tau_m.device)
-    phi = torch.as_tensor(phi_m, dtype=tau_m.dtype, device=tau_m.device)
+    x = _const(z_travel_m / rho, tau_m)
+    phi = _const(phi_m, tau_m)
     l_c = rho * phi ** 2 * (phi + 3.0 * x) / 6.0
     l_m = rho * phi ** 3 * (phi + 4.0 * x) / (24.0 * (phi + x))
     m = torch.arange(nb, dtype=tau_m.dtype, device=tau_m.device)
@@ -1004,6 +1077,11 @@ def csr_drift_delta_kick_retarded(
     n = tau_m.shape[-1]
     if n < 2 or length_m <= 0.0 or rho_m == 0.0 or phi_m <= 0.0:
         return torch.zeros_like(tau_m)
+    if _capturing():
+        raise RuntimeError(
+            "csr_drift_model='retarded' reads the reference energy on the host (and passes it to its kernels as a constant), so it "
+            "cannot be captured in a CUDA graph; use 'stupakov' or 'overtaking'"
+        )
     rho = abs(rho_m)
     gamma = float(energy_eV) / mc2_eV
     idx, w, valid, _, dtau, nb = _fixed_grid(tau_m, n_bins, margin=0.1)
@@ -1077,8 +1155,11 @@ def csr_steady_state_delta_kick_fast(
     hashable_softening = softening_m is None or isinstance(softening_m, (int, float))
     transient = slippage_m is not None
     if transient:
-        slippage_m = torch.as_tensor(slippage_m, dtype=tau_m.dtype, device=tau_m.device)
-    if tau_m.is_cuda and not vector_charge and hashable_softening:
+        slippage_m = _const(slippage_m, tau_m)
+    if (
+        tau_m.is_cuda and not vector_charge and hashable_softening
+        and _graph_replay_ok(tau_m, charge_per_particle_C, slippage_m)
+    ):
         key = (n, n_bins, smooth_passes, tau_m.dtype, tau_m.device, softening_m, sg_halfwidth, transient)
         graph = _csr_fast_graph_cache.get(key)
         if graph is None:

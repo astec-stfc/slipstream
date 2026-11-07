@@ -25,6 +25,7 @@ _BEND_TYPES = {"CSBEND", "CSBEN", "CSRCSBEND", "CSRCSBEN", "SBEND", "SBEN"}
 _CSR_BEND_TYPES = {"CSRCSBEND", "CSRCSBEN"}  # the subset that gets a CSR kick, see ElementSpec.csr
 _LINE_TYPES = {"LINE"}
 _RF_TYPES = {"RFCA", "RFCW"}
+_TDC_TYPES = {"RFDF", "RFTM110"}  # thin transverse deflecting cavity, see elements._tdc_kick
 _HKICK_TYPES = {"HKICK"}
 _VKICK_TYPES = {"VKICK"}
 _DRIFT_TYPES = {"DRIFT", "CSRDRIFT"}
@@ -37,6 +38,7 @@ _IMPORTED_PARAMS = {
                                 "EDGE1_EFFECTS", "EDGE2_EFFECTS", "CSR", "BINS", "SG_HALFWIDTH", "N_SLICES",
                                 "SYNCH_RAD", "ISR"}),
     **dict.fromkeys(_HKICK_TYPES | _VKICK_TYPES, {"L", "KICK"}),
+    **dict.fromkeys(_TDC_TYPES, {"L", "VOLTAGE", "FREQUENCY", "PHASE", "TILT"}),
     **dict.fromkeys(_RF_TYPES, {"L", "VOLT", "PHASE", "FREQ", "CHANGE_P0", "WAKEFILE", "TCOLUMN", "WZCOLUMN",
                               "WXCOLUMN", "WYCOLUMN", "N_KICKS", "END1_FOCUS", "END2_FOCUS", "BODY_FOCUS_MODEL", "CELL_LENGTH", "ZWAKE", "TRWAKE",
                               "WAKES_AT_END"}),
@@ -114,6 +116,17 @@ class ElementSpec:
     """``kind="vkick"`` only, elegant's ``VKICK``'s own ``KICK=``."""
     synch_rad: bool = False
     isr: bool = False
+
+
+def slice_count(
+    spec: ElementSpec, n_kicks: int, n_kicks_bend: int, n_kicks_quad: int | None = None, n_kicks_sext: int | None = None,
+) -> int:
+    """Kicks per element: bends use ``n_kicks_bend``, ``quad``/``sext`` use ``n_kicks_quad``/``n_kicks_sext``
+    (``None`` falls back to ``n_kicks``), everything else uses ``n_kicks``."""
+    if spec.angle != 0.0:
+        return n_kicks_bend
+    per_kind = n_kicks_quad if spec.kind == "quad" else n_kicks_sext if spec.kind == "sext" else None
+    return n_kicks if per_kind is None else per_kind
 
 
 def _split_statements(text: str) -> list[tuple[str, str]]:
@@ -264,6 +277,12 @@ def parse_elegant_lattice(
                 end1_focus=_float(params, "END1_FOCUS") != 0.0,
                 end2_focus=_float(params, "END2_FOCUS") != 0.0,
                 body_focus_model=body_focus_model,
+            )
+        elif etype in _TDC_TYPES:
+            # PHASE is degrees; TILT rotates the deflection plane (0 = x, pi/2 = y). The cavity is applied as a thin kick at its centre.
+            elements[name] = ElementSpec(
+                name, "tdc", length, voltage_V=_float(params, "VOLTAGE"), phase_rad=_float(params, "PHASE") * math.pi / 180.0,
+                frequency_Hz=_float(params, "FREQUENCY"), tilt=_float(params, "TILT"),
             )
         elif etype in _HKICK_TYPES:
             elements[name] = ElementSpec(name, "hkick", length, kick_x=_float(params, "KICK"))

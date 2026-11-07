@@ -41,6 +41,8 @@ class ShortRangeWake:
     def set_fixed_bin_window(self, t_min_s: float, t_max_s: float) -> None: ...
     def prepare(self, dtype: torch.dtype, device: str | torch.device) -> None: ...
     def voltage_at(self, tau: torch.Tensor, charge_per_particle_C: torch.Tensor | float) -> torch.Tensor: ...
+    overflow: torch.Tensor | None  # property
+    def reset_overflow(self) -> None: ...
 ```
 
 ### `wake_potential_from_impedance`
@@ -80,6 +82,20 @@ natively.
 ### `ShortRangeWake`
 
 A short-range wake potential table W(t) [V/C] on a uniform time grid.
+
+Two options select how a particle meets the fixed bin window (both are plain dataclass fields, so
+`dataclasses.replace(wake, deposit="cic")` makes a copy):
+
+- `deposit`: `"ngp"` (default) rounds `tau` to the nearest bin and has no gradient to `tau`;
+  `"cic"` (cloud in cell) spreads each particle over its two neighbouring bins with linear weights
+  and reads the voltage back by linear interpolation, so `voltage_at` is differentiable in `tau`.
+  Against the exact pairwise sum for a Gaussian bunch and a continuous causal wake, the NGP error
+  halves when the bin width halves (first order) and the CIC error falls by four (second order);
+  CIC was 6 to 50 times more accurate at bin widths of 0.4 to 0.05 bunch sigma. CIC needs a fixed
+  window. The two agree exactly for particles sitting on bin centres.
+- `monitor_overflow`: after `prepare`, `overflow` is a 0-d tensor holding the largest fraction of
+  particles outside the window since `reset_overflow()`, updated in place (so it works inside a
+  CUDA graph; read it when you want to, it costs no host synchronisation).
 
 `t_s` may include a small negative "acausal precursor" -- expected for
 a pseudo-Green-function wake from a finite-length probe bunch, not a bug.
@@ -135,3 +151,10 @@ short-range wake.
 Bins `tau` onto the same absolute dt-grid as the wake table (bin k
 and wake sample k both sit at time k*dt from a common t=0),
 convolves, and reads the result back at each particle's own bin.
+
+With a fixed window the shapes are static and nothing is read on the host, so the call can be
+captured in a CUDA graph; the nearest-bin result is bit-for-bit what it was before `deposit` existed.
+Without one, the window follows the live `tau` range through `.item()` calls: that cannot be
+captured, and during a capture it raises a `RuntimeError` naming `set_fixed_bin_window` (a host read
+there would otherwise invalidate the capture and the CUDA context). A particle outside the fixed
+window contributes no charge (CIC: only the part of it that falls inside) and reads the edge bin.

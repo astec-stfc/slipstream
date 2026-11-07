@@ -11,7 +11,7 @@ import torch
 
 from ..sdds_io import sdds_object
 from .impedance import Impedance
-from .shortrange import next_fast_fft_len, trim_wake, wake_potential_from_impedance
+from .shortrange import _bin_nodes, _deposit, _readback, next_fast_fft_len, trim_wake, wake_potential_from_impedance
 
 
 @dataclass
@@ -22,7 +22,10 @@ class TransverseWake:
 
     t_s: np.ndarray
     W_V_per_C_per_m: np.ndarray
+    deposit: str = "ngp"
+    monitor_overflow: bool = False
     dt_s: float = field(init=False)
+    _overflow: torch.Tensor | None = field(init=False, default=None, repr=False)
     _fixed_lo_idx: int | None = field(init=False, default=None, repr=False)
     _fixed_n_bins: int | None = field(init=False, default=None, repr=False)
     _fixed_o_min_w: int | None = field(init=False, default=None, repr=False)
@@ -30,6 +33,8 @@ class TransverseWake:
     _fixed_W_fft: torch.Tensor | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.deposit not in ("ngp", "cic"):
+            raise ValueError("deposit must be 'ngp' or 'cic'")
         self.t_s = np.array(self.t_s, dtype=np.float64)
         self.W_V_per_C_per_m = np.array(self.W_V_per_C_per_m, dtype=np.float64)
         dt = np.diff(self.t_s)
@@ -93,6 +98,17 @@ class TransverseWake:
             return
         W = torch.as_tensor(self.W_V_per_C_per_m, dtype=dtype, device=device)
         self._fixed_W_fft = torch.fft.rfft(W, n=self._fixed_conv_len)
+        if self.monitor_overflow:
+            self._overflow = torch.zeros((), dtype=dtype, device=device)
+
+    @property
+    def overflow(self) -> torch.Tensor | None:
+        """See ``ShortRangeWake.overflow``."""
+        return self._overflow
+
+    def reset_overflow(self) -> None:
+        if self._overflow is not None:
+            self._overflow.zero_()
 
     def kick_at(
         self, tau: torch.Tensor, offset: torch.Tensor, charge_per_particle_C: torch.Tensor | float
@@ -105,15 +121,13 @@ class TransverseWake:
             raise RuntimeError("call TransverseWake.prepare(dtype, device) before kick_at")
 
         lo, n_bins = self._fixed_lo_idx, self._fixed_n_bins
-        idx = torch.round(tau / self.dt_s).to(torch.int64)
-        in_range = (idx >= lo) & (idx < lo + n_bins)
-        safe_idx = torch.where(in_range, idx - lo, n_bins)
-        dipole_bin_full = torch.zeros(n_bins + 1, dtype=tau.dtype, device=tau.device)
+        idx, weight = _bin_nodes(tau, self.dt_s, lo, self.deposit)
         # Scatter bare offset, scale by charge_per_particle_C after binning -- same reasoning as
         # Match the longitudinal wake's fixed-window binning.
-        dipole_bin_full.scatter_add_(0, safe_idx, offset)
-        dipole_bin = dipole_bin_full[:n_bins] * charge_per_particle_C
-        idx_readback = idx.clamp(lo, lo + n_bins - 1)
+        dipole_bin, in_window = _deposit(idx, weight * offset, n_bins)
+        dipole_bin = dipole_bin * charge_per_particle_C
+        if self._overflow is not None:
+            self._overflow.copy_(torch.maximum(self._overflow, (1.0 - in_window.to(tau.dtype).mean()).detach().to(self._overflow.dtype)))
 
         conv_len = self._fixed_conv_len
         fb = self._fixed_W_fft
@@ -121,4 +135,4 @@ class TransverseWake:
         full = torch.fft.irfft(fa * fb, n=conv_len)
         start = -self._fixed_o_min_w
         V_bin = full[start:start + n_bins]
-        return V_bin[idx_readback - lo]
+        return _readback(V_bin, idx, weight)

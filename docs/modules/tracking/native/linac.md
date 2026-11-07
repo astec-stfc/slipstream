@@ -188,6 +188,10 @@ class LinacTracker:
     def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, n_kicks: int=1, n_kicks_bend: int=4, integration_order: int=4, compile: bool=False, compile_mode: str | None=None, always_change_p0: bool=True, errors: list[SampledError] | None=None, fiducial: FiducialReference | None=None, bunch_charge_C: float=0.0, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, lsc_radius_factor: float=1.7, csr_softening_m: float | None=None, compile_collective_chunks: bool | None=None, fast_collective_effects: bool=False, dipole_collective_subcycle: bool=False, csr_transient: bool=False, csr_drift_model: str='overtaking', generator: torch.Generator | None=None): ...
     def track(self, particles6: torch.Tensor, return_trajectory: bool=False, reference_energy_eV: torch.Tensor | None=None) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def fiducialize(self, particles0: torch.Tensor) -> FiducialReference: ...
+    def with_settings(self, k1: dict | None=None, k2: dict | None=None, kick_x: dict | None=None, kick_y: dict | None=None, voltage_V: dict | None=None, phase_rad: dict | None=None) -> LinacTracker: ...
+    def with_wake_windows(self, window_s: tuple[float, float] | None=None, particles6: torch.Tensor | None=None, margin: float=0.5, deposit: str='ngp', monitor_overflow: bool=False) -> LinacTracker: ...
+    def wake_overflow(self) -> torch.Tensor | None: ...
+    def reset_wake_overflow(self) -> None: ...
 ```
 
 ### Wake conventions
@@ -255,8 +259,11 @@ focusing branches are optional local element effects.
 charge -- not `NativeTracker`'s own circulating `bunch_current_A`,
 since there's no "current" for one pass.
 `charge_per_particle_C = bunch_charge_C / n_particles` is computed
-lazily in `.track()`. Every wake-carrying element's wake object gets
-`.prepare(dtype, device)` called once here.
+lazily in `.track()`, as a new 0-d tensor on every call: autograd saves it,
+so refilling one shared tensor in place would invalidate the backward of an
+earlier pass (two charged passes summed into one loss). `_set_reference_energy`
+likewise replaces the stored reference-energy tensor. Every wake-carrying
+element's wake object gets `.prepare(dtype, device)` called once here.
 
 `lsc`/`csr` (both default `False`) turn on the two
 `collective.py` kernels. `csr=True` only affects elements with
@@ -308,6 +315,45 @@ index -1 the beamline exit) -- a stand-in for CLARA-style
 (the same per-element step `return_trajectory=False` calls) for
 each element's own physics -- only the trajectory bookkeeping (a
 growing Python list + a final `torch.stack`) stays uncompiled.
+
+### `LinacTracker.with_settings`
+
+A copy of the tracker in which every element of each named family (names are case-insensitive;
+all occurrences) takes the given float or tensor: `k1`, `k2` for any magnet that is not an RF cavity or
+a corrector, `kick_x` for `HKICK`, `kick_y` for `VKICK`, `voltage_V` and `phase_rad` for RF and for a transverse deflecting cavity (`kind="tdc"`).
+Unknown names raise `KeyError`; a setting that does not apply to the element's kind raises
+`ValueError`. The copy shares the original's compiled step functions and replaces only the
+per-element parameter list, so the original is unchanged.
+
+A tensor is moved to the tracker's device and dtype and stored as is, so it keeps its autograd
+history and is read at every `track` call. This is what lets one captured CUDA graph replay a
+scan: write each new value into the static tensor with `copy_` or `fill_`. For `phase_rad` the
+fiducial shift `omega_rf * t_ref_s` is not folded into the tensor (that would be evaluated once,
+at construction); it is kept in `_ElementParams.phase_shift_rad` and subtracted when the cavity
+is applied. An override replaces the value including any sampled error. `_set_reference_energy`
+keeps the build-time reference offset of a magnet whose `k1` or `k2` is a tensor, because
+recomputing it would read the tensor on the host; the offset is zero for a straight magnet. The
+bends' `csr_substeps` receive the same override.
+
+### `LinacTracker.with_wake_windows`
+
+A copy of the tracker in which every longitudinal and transverse wake uses one fixed time window,
+so that a pass with wakes has static shapes and no host synchronisation and can be captured in a
+CUDA graph. Without it the longitudinal window follows the live `tau` range (`.item()` calls) and
+the transverse window is frozen from the first bunch tracked (and set on the user's own wake
+object); neither of those behaviours changes when this method is not used.
+
+Pass the window as `window_s=(t_min, t_max)` in seconds (`tau / c`), or a representative bunch as
+`particles6` to size it as the `tau` extent plus `margin` times that extent on each side (a host read:
+do it before capture). Exactly one of the two is required. The wake objects are copied
+(`dataclasses.replace`), prepared for the tracker's dtype and device, and shared between elements
+that shared them, so the original tracker and any other user of the same wake are untouched. Charge
+outside the window is dropped and a particle outside it reads the edge bin, so size the window for the
+whole line; `monitor_overflow=True` records the largest outside fraction, read with
+`wake_overflow()` (a 0-d tensor, `None` if nothing is monitored) and cleared by
+`reset_wake_overflow()`. `deposit="cic"` gives the wakes a gradient to `tau`
+(see `ShortRangeWake`). A transverse wake with no window raises during capture instead of reading
+the bunch on the host. Not exercised: `compile=True` with monitored wakes.
 
 ### `LinacTracker.fiducialize`
 

@@ -36,7 +36,7 @@ Call `periodic_twiss_table` with element specs, reference energy and matching in
 ### API reference
 
 ```python
-def periodic_twiss_table(specs: list[ElementSpec], energy_eV: float, mc2_eV: float, n_kicks: int=16, n_kicks_bend: int=64, integration_order: int=4) -> tuple[TwissTable, float, float]: ...
+def periodic_twiss_table(specs: list[ElementSpec], energy_eV: float, mc2_eV: float, n_kicks: int=16, n_kicks_bend: int=64, integration_order: int=4, n_kicks_quad: int | None=None, n_kicks_sext: int | None=None) -> tuple[TwissTable, float, float]: ...
 ```
 
 ### `periodic_twiss_table`
@@ -60,5 +60,8 @@ particle tracking compounds multiplicatively across a 290-fold matrix
 product for tune/beta extraction, and `beta=M12/sin(mu)` is highly
 sensitive to the resulting phase error. This is a one-time,
 `lru_cache`d cost with no per-turn tracking-speed impact, so there's
-no reason to reuse the tracker's cheaper default here. See
+no reason to reuse the tracker's cheaper default here.
+`n_kicks_quad`/`n_kicks_sext` (default `None`, meaning `n_kicks`)
+override the count for `quad`/`sext` elements, matching
+`RingMap`'s per-kind kick counts. See
 docs/tracking_native.md for the convergence numbers.

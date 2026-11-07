@@ -40,7 +40,38 @@ tensor value. See docs/tracking_native.md for the derivation.
 CSR's all-vs-all sum (no compact support to window against), row-
 chunked the same way as the KDE's windowed branch. `compile_chunks`
 (default off) routes each chunk through the compiled step instead of
-eager.
+eager. When a differentiated input is live (`_grad_live`), the chunk
+steps use out-of-place expressions, with a finite argument where the
+one-sided mask is false so the masked gradient is not `0 * inf`; the
+in-place, storage-reusing versions remain for forward-only calls.
+
+### `_grad_live`
+
+True when grad mode is on and any tensor argument requires grad. Every
+forward-only fast path in this module (the manually captured CUDA graphs,
+the in-place chunk steps) is taken only when it is false: a replayed graph
+or an in-place chain records no autograd history, and without this test the
+result would silently have no gradient (graph) or fail in backward (in
+place).
+
+### `_graph_replay_ok`
+
+`not _grad_live(...)` and not inside an outer CUDA graph capture. The four sites that replay a
+manually captured forward-only graph (`csr_steady_state_delta_kick_fast`, `lsc_delta_kick_fast`,
+the pairwise CSR sum and the windowed KDE) test this, not `_grad_live` alone: replaying a graph
+inside another capture is illegal (`cudaErrorStreamCaptureUnsupported`) and, with a scalar bunch
+charge, made a forward-only whole-iteration capture fail. In either case the caller takes its
+ordinary PyTorch path, which the outer capture records and autograd differentiates.
+
+### `_scalar_on` and `_const`
+
+`_const(value, like)` is a 0-d tensor with `like`'s dtype and device: a tensor is converted, a
+Python number comes from `_scalar_on`, an `lru_cache`d constructor. Building a tensor from a float
+on CUDA is a host-to-device copy, which a CUDA graph capture rejects; the warm-up call pays it and
+later calls (including inside a capture) look it up. Cached tensors are shared: never modify one in
+place. Used for the CSR softening, CSR length, transient slippage and the Stupakov drift geometry.
+`csr_drift_delta_kick_retarded` raises a `RuntimeError` when called during a capture, because it
+reads the reference energy on the host and passes it to its kernels as a constant.
 
 ### `_CSRPairwiseGraph`
 
@@ -108,6 +139,19 @@ noise before it gets amplified by `1/dtau` in the derivative step.
 `passes` is a plain Python int (static under `torch.compile`). See
 docs/tracking_native.md for why the default is in the hundreds, not one.
 
+For `passes >= 8` on a 1D grid of at most 4096 bins the passes are applied
+as one matrix-vector product with `_dense_smoother(n, passes, dtype,
+device)`: the same operator, not an approximation. The smoother with
+zero padding is a Dirichlet tridiagonal Toeplitz matrix, so its power is
+`Q diag(cos(pi k / (2 (n + 1)))**(2 passes)) Q` with
+`Q[j, k] = sqrt(2 / (n + 1)) sin(pi j k / (n + 1))`, built once in float64
+and cached per `(n, passes, dtype, device)` (16 MiB in float32 at 2048
+bins). It matches the pass loop to 1e-15 in float64. At 16384 particles
+and 2048 bins it replaces ~60-100 ms (210-245 ms with backward) of
+sequential launches with ~1.5-2 ms (4-6 ms with backward). The first call
+for a key builds the matrix, so do it outside a CUDA-graph capture; any
+earlier call, including the warm-up passes, does.
+
 ### `_LSCFastGraph`
 
 CUDA-graph capture of the fixed-bin-grid LSC kernel's tensor math,
@@ -120,7 +164,11 @@ element/lattice-specific** (`length_m`/`energy_eV` are applied
 after `run()` returns, in plain eager Python -- see
 `lsc_delta_kick_fast`) -- so one graph is reused across every
 LSC-active element of every lattice sharing this key: a true
-compile-once block.
+compile-once block. The graph is forward-only: `lsc_delta_kick_fast`
+does not use it when a differentiated input requires grad, and the same
+tensor math then runs eagerly and is differentiable. The pipe form
+factor divides a Python float by a tensor so that nothing is copied from
+host to device inside a capture.
 
 ### `_csr_fast_field`
 
@@ -203,9 +251,23 @@ per element -- and replayed for every call sharing that key.
 `length_m` is applied after replay, in plain eager Python (one
 multiply -- not worth graph-capturing).
 
+Gradients: the graph records no autograd history, so it is used only when
+no differentiated input requires grad (`_grad_live`). With `tau_m`,
+`x_m`, `y_m` or the charge requiring grad the same operations run eagerly
+and the kick is differentiable, with a scalar charge, on every device;
+the derivative is that of the discretised model, including the grid
+origin and spacing, which follow the live minimum and maximum of `tau_m`.
+Float32 gradients of a binned density derivative are rough at about 64
+particles per bin (8-18 % against float64 for the CSR kernel in the test
+chicane at 256 bins), so check them against float64 for the configuration
+in use.
+
 ### `csr_steady_state_delta_kick_fast`
 
 Elegant-style steady-state CSR in O(N + B log B) time and O(N+B) memory.
+Differentiable on every device with a scalar charge: the forward-only CUDA
+graph is bypassed when `tau_m` (or `slippage_m`) requires grad, see
+`lsc_delta_kick_fast`.
 
 Uses CIC deposition, degree-one Savitzky-Golay histogram smoothing,
 a central derivative, and near-cell-corrected trapezoidal

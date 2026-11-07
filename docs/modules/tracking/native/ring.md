@@ -35,6 +35,18 @@ double-single; small nonlinear remainders are plain float32
 (`double_single._hy_*`) -- cheaper, ~1e-12..1e-10 per element
 instead of ~1e-15.
 
+## Per-kind kick counts
+
+`n_kicks` applies to every non-bend element and `n_kicks_bend` to bends.
+`n_kicks_quad` and `n_kicks_sext` (default `None`, meaning `n_kicks`)
+override the count for `kind="quad"` and `kind="sext"` elements, e.g.
+`RingMap(specs, E, n_kicks=2, n_kicks_quad=8, n_kicks_sext=1)`. Quadrupole
+kicks set the tune accuracy; extra sextupole kicks mostly add cost, so
+many quadrupole kicks with a single sextupole kick gave the same tune error
+1.4x faster in float64 and 2.2x faster in float32 (1.5x / 2.2x at 50 000
+particles) in a separate study. The split is kept by `float64_reference()`;
+`periodic_twiss_table` takes the same two keywords.
+
 ## Usage
 
 Construct `RingMap(specs, energy_eV, ...)`, use `with_strengths`/`with_alignments`, `turn`, tapped turns and `track`. `track_loss_map` localizes losses; `float64_reference` creates an accuracy reference.
@@ -48,7 +60,7 @@ class RingLossMap:
     ...
 class RingMap:
     ...
-    def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, n_kicks: int=2, n_kicks_bend: int=8, integration_order: int=6, device: str | torch.device | None=None, dtype: torch.dtype | None=None, compile: bool=False, exact_dipole: bool=True, double_single: bool | str=False): ...
+    def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, n_kicks: int=2, n_kicks_bend: int=8, integration_order: int=6, device: str | torch.device | None=None, dtype: torch.dtype | None=None, compile: bool=False, exact_dipole: bool=True, double_single: bool | str=False, n_kicks_quad: int | None=None, n_kicks_sext: int | None=None): ...
     def circumference_m(self) -> float: ...
     def with_strengths(self, k1: dict[str, torch.Tensor] | None=None, k2: dict[str, torch.Tensor] | None=None, kick_x: dict[str, torch.Tensor] | None=None, kick_y: dict[str, torch.Tensor] | None=None, dx: dict[str, torch.Tensor] | None=None, dy: dict[str, torch.Tensor] | None=None, tilt: dict[str, torch.Tensor] | None=None) -> 'RingMap': ...
     def float64_reference(self) -> 'RingMap': ...

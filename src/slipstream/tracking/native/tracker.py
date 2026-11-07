@@ -23,9 +23,9 @@ from .ring_physics import (
     rms_emittance,
     transverse_damping_excitation,
 )
-from .elements import _corrector_kick, _rf_cavity_kick, reference_offset, track_element
+from .elements import _corrector_kick, _rf_cavity_kick, _tdc_kick, reference_offset, track_element
 from .errors import FiducialReference, SampledError, apply_errors, resolve_rf_errors
-from .lattice_import import ElementSpec
+from .lattice_import import ElementSpec, slice_count
 from .optics import periodic_twiss_table
 
 
@@ -118,6 +118,12 @@ class _ElementParams(NamedTuple):
     radiation_substeps: tuple = ()
     wake_scale: float = 1.0
     """RF-kind only: the fraction of the per-cell wake table applied at each sub-kick, ``length / cell_length / n_kicks`` (elegant's ``wake.factor``)."""
+    is_tdc: bool = False
+    """``ElementSpec.kind == "tdc"``: a thin transverse deflecting cavity (``elements._tdc_kick``) with ``voltage_V``, ``phase_rad``, ``omega_rf``
+    and the deflection direction ``tilt``."""
+    phase_shift_rad: float = 0.0
+    """RF-kind (and TDC) only: subtracted from ``phase_rad`` when the cavity is applied. ``LinacTracker.with_settings`` sets it to the fiducial shift
+    so that a tensor ``phase_rad`` is read, unmodified, at every call (a shift applied once at construction would go stale in a replayed CUDA graph)."""
 
 
 def _build_params(
@@ -125,12 +131,19 @@ def _build_params(
     energy_eV: float, mc2_eV: float, device: torch.device, dtype: torch.dtype,
     integration_order: int = 4, rf_mode: str = "lumped", change_p0_override: bool | None = None,
     exact_dipole: bool = False, allow_local_radiation: bool = False,
+    n_kicks_quad: int | None = None, n_kicks_sext: int | None = None,
 ) -> list[_ElementParams]:
     """Compute build params; see the module documentation for details."""
     out = []
     for s in specs:
         if (s.synch_rad or s.isr) and not allow_local_radiation:
             raise NotImplementedError("Local bend radiation requires LinacTracker; ring radiation accounting is separate")
+        if s.kind == "tdc":
+            out.append(_ElementParams(
+                s.length, 0.0, 0.0, 0.0, 0.0, 0.0, 1, integration_order, torch.zeros(6, device=device, dtype=dtype),
+                tilt=s.tilt, is_tdc=True, voltage_V=s.voltage_V, phase_rad=s.phase_rad, omega_rf=2.0 * math.pi * s.frequency_Hz,
+            ))
+            continue
         if s.kind == "rf" and rf_mode == "per_element":
             change_p0 = s.change_p0 if change_p0_override is None else change_p0_override
             out.append(_ElementParams(
@@ -152,7 +165,7 @@ def _build_params(
                 is_kick=True, kick_plane=plane, kick_value=s.kick_x if plane == "x" else s.kick_y,
             ))
             continue
-        nk = n_kicks_bend if s.angle != 0.0 else n_kicks
+        nk = slice_count(s, n_kicks, n_kicks_bend, n_kicks_quad, n_kicks_sext)
         # dx=dy=tilt=0 always -- see _ElementParams's own docstring.
         offset = reference_offset(
             s.length, s.angle, s.k1, s.k2, s.e1, s.e2, energy_eV, mc2_eV, nk, integration_order,
@@ -183,9 +196,15 @@ def _apply_one_element(
     through unchanged)."""
     if p.is_kick:
         return _corrector_kick(particles6, p.length, p.kick_value, p.kick_plane, energy_eV, mc2_eV), energy_eV
+    if p.is_tdc:
+        return _tdc_kick(
+            particles6, p.length, p.voltage_V, p.phase_rad - p.phase_shift_rad if p.phase_shift_rad else p.phase_rad, p.omega_rf,
+            p.tilt, energy_eV, mc2_eV,
+        ), energy_eV
     if p.is_rf:
         return _rf_cavity_kick(
-            particles6, p.length, p.voltage_V, p.phase_rad, p.omega_rf, energy_eV, mc2_eV, change_p0=p.change_p0,
+            particles6, p.length, p.voltage_V, p.phase_rad - p.phase_shift_rad if p.phase_shift_rad else p.phase_rad, p.omega_rf, energy_eV, mc2_eV,
+            change_p0=p.change_p0,
             wake=p.wake, transverse_wake_x=p.transverse_wake_x, transverse_wake_y=p.transverse_wake_y,
             charge_per_particle_C=charge_per_particle_C, n_kicks=p.n_kicks, beta_wave=p.beta_wave, wake_scale=p.wake_scale,
             end1_focus=p.end1_focus, end2_focus=p.end2_focus, body_focus_model=p.body_focus_model,

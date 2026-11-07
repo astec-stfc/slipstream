@@ -14,6 +14,7 @@ from ...constants import C_LIGHT, ELECTRON_MASS_EV
 from ...wakefields.shortrange import ShortRangeWake
 from ...wakefields.transverse import TransverseWake
 from .collective import (
+    _capturing,
     _lsc_csr_delta_kicks,
     csr_steady_state_delta_kick,
     csr_drift_delta_kick_fast,
@@ -137,6 +138,11 @@ def _track_csr_drift_stupakov(
     """A CSR drift in kicks of ``csr_drift_dz``: half a step of drift, then a Stupakov-model kick at the centre of every step
     (the wake is evaluated for the distribution as it stands there), whole steps in between, half a step at the end."""
     if p.csr_stupakov == "retarded":
+        if _capturing():  # fail cleanly: a host read during capture invalidates the whole capture
+            raise RuntimeError(
+                "csr_drift_model='retarded' reads the reference energy on the host, so it cannot be captured in a CUDA graph; "
+                "use 'stupakov' or 'overtaking'"
+            )
         # the retarded kernel is smooth in the distance behind the bend, so the steps grow with it: short close to the exit, where the
         # wake changes fastest, and up to ten times ``csr_drift_dz`` far from it
         steps, z = [], p.csr_drift_start_m
@@ -349,7 +355,7 @@ class LinacTracker:
         if fiducial is not None:
             effective_specs = [
                 replace(s, phase_rad=s.phase_rad - 2.0 * math.pi * s.frequency_Hz * fiducial.t_ref_s)
-                if s.kind == "rf" else s
+                if s.kind in ("rf", "tdc") else s
                 for s in effective_specs
             ]
         self._element_params = _build_params(
@@ -454,11 +460,14 @@ class LinacTracker:
             def refresh(p):
                 if p.is_rf or p.is_kick:
                     return p
-                offset = reference_offset(
-                    p.length, p.angle, p.k1, p.k2, p.e1, p.e2, energy_eV, self.mc2_eV,
-                    p.n_kicks, p.integration_order, p.hgap, p.fint, p.edge_order,
-                    p.edge1_effects, p.edge2_effects, p.exact_dipole,
-                ).to(device=self.device, dtype=self.dtype).clone()
+                if isinstance(p.k1, torch.Tensor) or isinstance(p.k2, torch.Tensor):
+                    offset = p.offset  # a with_settings() strength: keep the build-time reference offset
+                else:
+                    offset = reference_offset(
+                        p.length, p.angle, p.k1, p.k2, p.e1, p.e2, energy_eV, self.mc2_eV,
+                        p.n_kicks, p.integration_order, p.hgap, p.fint, p.edge_order,
+                        p.edge1_effects, p.edge2_effects, p.exact_dipole,
+                    ).to(device=self.device, dtype=self.dtype).clone()
                 return p._replace(
                     offset=offset, csr_substeps=tuple(refresh(sub) for sub in p.csr_substeps),
                     radiation_substeps=tuple((refresh(a), refresh(b)) for a, b in p.radiation_substeps),
@@ -466,7 +475,126 @@ class LinacTracker:
 
             self._element_params = [refresh(p) for p in self._element_params]
             self._reference_energy_eV = energy_eV
-        self._energy_eV_t.fill_(energy_eV)
+        self._energy_eV_t = torch.full_like(self._energy_eV_t, energy_eV)  # not in place: an earlier pass may have saved it
+
+    def with_settings(
+        self, k1: dict | None = None, k2: dict | None = None, kick_x: dict | None = None, kick_y: dict | None = None,
+        voltage_V: dict | None = None, phase_rad: dict | None = None,
+    ) -> "LinacTracker":
+        """Copy of this tracker in which every element of each named family (case-insensitive) takes the given value.
+
+        Each argument maps element names to a float or a tensor: ``k1`` and ``k2`` (magnets other than RF and correctors),
+        ``kick_x`` and ``kick_y`` (``HKICK`` / ``VKICK``), ``voltage_V`` and ``phase_rad`` (RF; ``phase_rad`` is the element's
+        phase as in ``ElementSpec``, and the tracker's fiducial shift is applied on top). A tensor keeps its autograd history and,
+        in a CUDA graph, is read at replay time: capture once with a static tensor, then ``copy_`` each new setting into it. An
+        override replaces the value including any sampled error. The reference offset of a magnet with a tensor ``k1`` or ``k2``
+        stays at its build-time value."""
+        requested = {
+            key: {name.upper(): value for name, value in values.items()}
+            for key, values in dict(k1=k1, k2=k2, kick_x=kick_x, kick_y=kick_y, voltage_V=voltage_V, phase_rad=phase_rad).items()
+            if values
+        }
+        by_name: dict[str, list[ElementSpec]] = {}
+        for spec in self.specs:
+            by_name.setdefault(spec.name.upper(), []).append(spec)
+        unknown = set().union(*(set(values) for values in requested.values()), set()) - set(by_name)
+        if unknown:
+            raise KeyError(f"no such element(s) in lattice: {sorted(unknown)}")
+        allowed = {
+            "k1": lambda s: s.kind not in ("rf", "tdc", "hkick", "vkick"), "k2": lambda s: s.kind not in ("rf", "tdc", "hkick", "vkick"),
+            "kick_x": lambda s: s.kind == "hkick", "kick_y": lambda s: s.kind == "vkick",
+            "voltage_V": lambda s: s.kind in ("rf", "tdc"), "phase_rad": lambda s: s.kind in ("rf", "tdc"),
+        }
+        for key, values in requested.items():
+            for name in values:
+                if not all(allowed[key](spec) for spec in by_name[name]):
+                    raise ValueError(f"{key} does not apply to element {name} ({by_name[name][0].kind})")
+        as_value = lambda v: v.to(device=self.device, dtype=self.dtype) if isinstance(v, torch.Tensor) else v  # noqa: E731
+        t_ref_s = self.fiducial.t_ref_s if self.fiducial is not None else 0.0
+
+        def override(p, name):
+            changes = {}
+            for key in ("k1", "k2"):
+                if name in requested.get(key, {}):
+                    changes[key] = as_value(requested[key][name])
+            if p.is_kick and name in requested.get("kick_x" if p.kick_plane == "x" else "kick_y", {}):
+                changes["kick_value"] = as_value(requested["kick_x" if p.kick_plane == "x" else "kick_y"][name])
+            if name in requested.get("voltage_V", {}):
+                changes["voltage_V"] = as_value(requested["voltage_V"][name])
+            if name in requested.get("phase_rad", {}):
+                changes["phase_rad"] = as_value(requested["phase_rad"][name])
+                changes["phase_shift_rad"] = p.omega_rf * t_ref_s
+            if p.csr_substeps:
+                changes["csr_substeps"] = tuple(override(sub, name) for sub in p.csr_substeps)
+            return p._replace(**changes) if changes else p
+
+        if len(self.specs) != len(self._element_params):
+            raise RuntimeError("element parameters no longer match the lattice specs")
+        new = object.__new__(LinacTracker)
+        new.__dict__.update(self.__dict__)
+        new._element_params = [override(p, spec.name.upper()) for spec, p in zip(self.specs, self._element_params)]
+        return new
+
+    def with_wake_windows(
+        self, window_s: tuple[float, float] | None = None, particles6: torch.Tensor | None = None, margin: float = 0.5,
+        deposit: str = "ngp", monitor_overflow: bool = False,
+    ) -> "LinacTracker":
+        """Copy of this tracker in which every longitudinal and transverse wake uses one fixed time window.
+
+        Give the window directly as ``window_s = (t_min, t_max)`` in seconds (``tau / c``, the unit of ``set_fixed_bin_window``), or let it be
+        sized from a representative bunch ``particles6`` as its ``tau`` extent plus ``margin`` times that extent on each side (this reads the
+        bunch on the host, so do it before any capture). A fixed window has a static shape and no host synchronisation, so a pass with wakes
+        can be captured in a CUDA graph; the default longitudinal window follows the live ``tau`` range and cannot. Charge outside the window
+        is dropped and a particle outside it reads the edge value, so size the window for the whole line (``monitor_overflow=True`` keeps the
+        largest fraction of particles outside it in ``wake_overflow()``, a tensor, with no host read).
+
+        ``deposit="cic"`` spreads each particle over its two neighbouring bins and reads the voltage back by linear interpolation, giving the
+        wakes a gradient to ``tau``; ``"ngp"`` (nearest bin, the existing behaviour) has none. The wake objects are copied, so the original
+        tracker and any other user of the same ``ShortRangeWake`` / ``TransverseWake`` are untouched."""
+        if (window_s is None) == (particles6 is None):
+            raise ValueError("give exactly one of window_s and particles6")
+        if window_s is None:
+            tau_s = particles6[..., 4] / C_LIGHT
+            lo, hi = float(tau_s.min()), float(tau_s.max())
+            window_s = (lo - margin * (hi - lo), hi + margin * (hi - lo))
+        copies: dict[int, object] = {}
+
+        def fixed(wake):
+            if wake is None:
+                return None
+            if id(wake) not in copies:
+                new = replace(wake, deposit=deposit, monitor_overflow=monitor_overflow)
+                new.set_fixed_bin_window(*window_s)
+                new.prepare(self.dtype, self.device)
+                copies[id(wake)] = new
+            return copies[id(wake)]
+
+        new = object.__new__(LinacTracker)
+        new.__dict__.update(self.__dict__)
+        new._element_params = [
+            p._replace(wake=fixed(p.wake), transverse_wake_x=fixed(p.transverse_wake_x), transverse_wake_y=fixed(p.transverse_wake_y))
+            if (p.wake is not None or p.transverse_wake_x is not None or p.transverse_wake_y is not None) else p
+            for p in self._element_params
+        ]
+        return new
+
+    def _monitored_wakes(self) -> list:
+        wakes = {}
+        for p in self._element_params:
+            for wake in (p.wake, p.transverse_wake_x, p.transverse_wake_y):
+                if wake is not None and wake.overflow is not None:
+                    wakes[id(wake)] = wake
+        return list(wakes.values())
+
+    def wake_overflow(self) -> torch.Tensor | None:
+        """Largest fraction of particles outside a fixed wake window since ``reset_wake_overflow`` (0-d tensor), or ``None`` if no wake is
+        monitored (``with_wake_windows(monitor_overflow=True)``)."""
+        wakes = self._monitored_wakes()
+        return torch.stack([wake.overflow for wake in wakes]).max() if wakes else None
+
+    def reset_wake_overflow(self) -> None:
+        for wake in self._monitored_wakes():
+            wake.reset_overflow()
 
     def _ensure_transverse_wake_windows(self, particles6: torch.Tensor) -> None:
         """A transverse wake convolves on a fixed bin window. Give any that has none the time span of the first bunch tracked, with half that
@@ -474,6 +602,11 @@ class LinacTracker:
         todo = {id(w): w for p in self._element_params for w in (p.transverse_wake_x, p.transverse_wake_y) if w is not None and w._fixed_n_bins is None}
         if not todo:
             return
+        if _capturing():
+            raise RuntimeError(
+                "a transverse wake has no bin window yet and sizing it reads the bunch on the host; run one eager pass first or use "
+                "LinacTracker.with_wake_windows before capture"
+            )
         tau_s = particles6[..., 4] / C_LIGHT
         lo, hi = float(tau_s.min()), float(tau_s.max())
         pad = 0.5 * (hi - lo)
@@ -488,7 +621,10 @@ class LinacTracker:
         particles6 = particles6.to(device=self.device, dtype=self.dtype)
         if self.bunch_charge_C != 0.0:
             self._ensure_transverse_wake_windows(particles6)
-        self._charge_per_particle_C.fill_(self.bunch_charge_C / particles6.shape[0])
+        # A fresh tensor per call: autograd saves it, so an in-place refill would invalidate an earlier pass's backward.
+        self._charge_per_particle_C = torch.full(
+            (), self.bunch_charge_C / particles6.shape[0], dtype=self.dtype, device=self.device,
+        )
         csr_active = self.csr and self.bunch_charge_C != 0.0
         if reference_energy_eV is not None:
             if any(p.synch_rad or p.isr for p in self._element_params):

@@ -16,6 +16,7 @@ from .data.results import BeamlineResult, TrackingResult
 from .lattice.lattice import Lattice
 from .lattice.optics import TransverseOptics
 from .lattice.ramp import RampProfile
+from .reconstruction import GraphedStep, ScanModel, Screen
 from .tracking.native import (
     ElementSpec, Injector, InjectorIBSSettings, LinacTracker, NativeTracker, NativeTrackResult, Photocathode, parse_elegant_lattice,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "ElementSpec",
     "FlatChamber",
     "FreqScan",
+    "GraphedStep",
     "Impedance",
     "Injector",
     "InjectorIBSSettings",
@@ -64,6 +66,8 @@ __all__ = [
     "RingMap",
     "Resonator",
     "RoundChamber",
+    "ScanModel",
+    "Screen",
     "ShortRangeWake",
     "TrackingResult",
     "TransverseOptics",
