@@ -10,6 +10,7 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 - [beamline_config](beamline_config.md): Normalizes total energy and rest mass in eV, bunch charge in coulombs and canonical native coordinates.
 - [constants](constants.md): Shared constants include the speed of light, elementary charge, electron rest energy, classical electron radius, vacuum permittivity and permeability.
 - [ibs](ibs.md): Computes amplitude-normalized intrabeam-scattering growth rates in inverse seconds.
+- [reconstruction](reconstruction.md): Differentiable screen images, a scan forward model with the GPSR lattice interface, and a CUDA-graph step for gradient-based beam reconstruction.
 - [sdds_io](sdds_io.md): SDDS values retain the units and meanings of their reader; this module provides shared access to the binding, rather than physical conversion.
 - [serialization](serialization.md): Serialization preserves scalar machine parameters; it introduces no transport or coordinate conversion.
 - [_compile_env](_compile_env.md): Cache configuration changes compilation storage, without changing transport or physical models.

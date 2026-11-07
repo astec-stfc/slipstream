@@ -147,6 +147,18 @@ leave margin for the bunch to lengthen along the line and read `tracker.wake_ove
 the largest outside fraction since `reset_wake_overflow()`) after a pass; it is a tensor so that
 checking it inside a graph costs no host read.
 
+### Beam reconstruction with a differentiable screen
+
+`slipstream.reconstruction` turns the pieces above into the forward model of a GPSR-style fit:
+`Screen` renders a bunch onto a fixed pixel grid (cloud in cell, differentiable, blur, gain and
+background), `ScanModel(tracker, screen, [("Q1", "k1")])` tracks the whole bunch at each row of a
+scan table (through `with_settings`) and returns one image per row, and `GraphedStep` captures
+`loss_fn()` and its `backward()` as one CUDA graph and replays it with new scan tables or
+parameters (eager on the CPU). `ScanModel` has the `set_lattice_parameters` and
+`track_and_observe` methods GPSR calls and accepts a Cheetah beam, so it can replace a Cheetah
+lattice in `GPSR(beam_generator, lattice)`. See [reconstruction](modules/reconstruction.md) for
+the conventions, limits and an example.
+
 ### Scan settings as tensors
 
 Quadrupole and sextupole strengths, corrector kicks and RF voltage and phase are fixed when a

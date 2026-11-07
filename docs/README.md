@@ -20,6 +20,7 @@ entry points; [model settings](model_settings.md) explains switches and CSR choi
 ## Usage
 
 - [Native tracking](tracking_native.md) and [beamline YAML studies](beamline_studies.md).
+- [Beam reconstruction](tracking_native.md#beam-reconstruction-with-a-differentiable-screen): screen images, scan models and CUDA-graph steps for GPSR-style fits.
 - [File formats](formats.md), [ring tables and plots](ring_outputs.md) and
   [nonlinear optimization](nonlinear_optimisation.md).
 - [Compilation and CUDA](compilation.md): toolchains, precision, caches and
