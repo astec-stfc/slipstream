@@ -118,6 +118,17 @@ class ElementSpec:
     isr: bool = False
 
 
+def slice_count(
+    spec: ElementSpec, n_kicks: int, n_kicks_bend: int, n_kicks_quad: int | None = None, n_kicks_sext: int | None = None,
+) -> int:
+    """Kicks per element: bends use ``n_kicks_bend``, ``quad``/``sext`` use ``n_kicks_quad``/``n_kicks_sext``
+    (``None`` falls back to ``n_kicks``), everything else uses ``n_kicks``."""
+    if spec.angle != 0.0:
+        return n_kicks_bend
+    per_kind = n_kicks_quad if spec.kind == "quad" else n_kicks_sext if spec.kind == "sext" else None
+    return n_kicks if per_kind is None else per_kind
+
+
 def _split_statements(text: str) -> list[tuple[str, str]]:
     """``[(name, rest), ...]`` -- ``rest`` is everything after the colon up
     to (not including) the next statement's ``NAME:`` or end of file, with

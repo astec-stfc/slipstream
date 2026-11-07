@@ -25,7 +25,7 @@ from .ring_physics import (
 )
 from .elements import _corrector_kick, _rf_cavity_kick, _tdc_kick, reference_offset, track_element
 from .errors import FiducialReference, SampledError, apply_errors, resolve_rf_errors
-from .lattice_import import ElementSpec
+from .lattice_import import ElementSpec, slice_count
 from .optics import periodic_twiss_table
 
 
@@ -131,6 +131,7 @@ def _build_params(
     energy_eV: float, mc2_eV: float, device: torch.device, dtype: torch.dtype,
     integration_order: int = 4, rf_mode: str = "lumped", change_p0_override: bool | None = None,
     exact_dipole: bool = False, allow_local_radiation: bool = False,
+    n_kicks_quad: int | None = None, n_kicks_sext: int | None = None,
 ) -> list[_ElementParams]:
     """Compute build params; see the module documentation for details."""
     out = []
@@ -164,7 +165,7 @@ def _build_params(
                 is_kick=True, kick_plane=plane, kick_value=s.kick_x if plane == "x" else s.kick_y,
             ))
             continue
-        nk = n_kicks_bend if s.angle != 0.0 else n_kicks
+        nk = slice_count(s, n_kicks, n_kicks_bend, n_kicks_quad, n_kicks_sext)
         # dx=dy=tilt=0 always -- see _ElementParams's own docstring.
         offset = reference_offset(
             s.length, s.angle, s.k1, s.k2, s.e1, s.e2, energy_eV, mc2_eV, nk, integration_order,

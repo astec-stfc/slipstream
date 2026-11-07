@@ -44,6 +44,9 @@ and contain the four transverse coordinates after recorded turns.
 `track_loss_map` additionally checks each element exit and returns the
 first loss element and its longitudinal position. A boundary check does
 not locate a loss inside an element; converge slicing when this matters.
+Quadrupole kicks set the tune accuracy, so converge them separately:
+`RingMap(..., n_kicks_quad=8, n_kicks_sext=1)` is cheaper than raising
+`n_kicks` for every element.
 
 `naff` extracts a fractional frequency and amplitude magnitude from complex signals
 whose sample axis is last. Use consecutive turn records for physical tunes.

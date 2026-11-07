@@ -45,11 +45,16 @@ class RingMap:
         n_kicks: int = 2, n_kicks_bend: int = 8, integration_order: int = 6,
         device: str | torch.device | None = None, dtype: torch.dtype | None = None,
         compile: bool = False, exact_dipole: bool = True, double_single: bool | str = False,
+        n_kicks_quad: int | None = None, n_kicks_sext: int | None = None,
     ):
         """``double_single=True``: every coordinate is a float32 ``hi + lo`` pair
-        (``double_single.py``, ~44-bit mantissa) -- float64-grade FMA on a consumer GPU."""
+        (``double_single.py``, ~44-bit mantissa) -- float64-grade FMA on a consumer GPU.
+        ``n_kicks_quad``/``n_kicks_sext`` override ``n_kicks`` for ``quad``/``sext`` elements (``None`` keeps ``n_kicks``)."""
         if double_single not in (False, True, "full", "hybrid"):
             raise ValueError(f"double_single must be False, True/'full' or 'hybrid', got {double_single!r}")
+        for name, count in (("n_kicks_quad", n_kicks_quad), ("n_kicks_sext", n_kicks_sext)):
+            if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 1):
+                raise ValueError(f"{name} must be a positive integer or None, got {count!r}")
         ds_hybrid = double_single == "hybrid"
         double_single = bool(double_single)
         if double_single and not exact_dipole:
@@ -67,12 +72,14 @@ class RingMap:
         self._kw = dict(
             energy_eV=energy_eV, mc2_eV=mc2_eV, n_kicks=n_kicks, n_kicks_bend=n_kicks_bend,
             integration_order=integration_order, exact_dipole=exact_dipole,
+            n_kicks_quad=n_kicks_quad, n_kicks_sext=n_kicks_sext,
         )
         self._overrides: tuple[dict, dict, dict, dict, dict, dict, dict] = ({}, {}, {}, {}, {}, {}, {})
         # rf_mode="lumped" folds every RF cavity into a drift -- frozen energy.
         self.params = _build_params(
             specs, n_kicks, n_kicks_bend, energy_eV, mc2_eV, self.device, self.dtype,
             integration_order=integration_order, exact_dipole=exact_dipole,
+            n_kicks_quad=n_kicks_quad, n_kicks_sext=n_kicks_sext,
         )
         self._energy_t = torch.tensor(energy_eV, dtype=self.dtype, device=self.device)
         self._mc2_t = torch.tensor(mc2_eV, dtype=self.dtype, device=self.device)
