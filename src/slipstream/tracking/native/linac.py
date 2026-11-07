@@ -535,12 +535,78 @@ class LinacTracker:
         new._element_params = [override(p, spec.name.upper()) for spec, p in zip(self.specs, self._element_params)]
         return new
 
+    def with_wake_windows(
+        self, window_s: tuple[float, float] | None = None, particles6: torch.Tensor | None = None, margin: float = 0.5,
+        deposit: str = "ngp", monitor_overflow: bool = False,
+    ) -> "LinacTracker":
+        """Copy of this tracker in which every longitudinal and transverse wake uses one fixed time window.
+
+        Give the window directly as ``window_s = (t_min, t_max)`` in seconds (``tau / c``, the unit of ``set_fixed_bin_window``), or let it be
+        sized from a representative bunch ``particles6`` as its ``tau`` extent plus ``margin`` times that extent on each side (this reads the
+        bunch on the host, so do it before any capture). A fixed window has a static shape and no host synchronisation, so a pass with wakes
+        can be captured in a CUDA graph; the default longitudinal window follows the live ``tau`` range and cannot. Charge outside the window
+        is dropped and a particle outside it reads the edge value, so size the window for the whole line (``monitor_overflow=True`` keeps the
+        largest fraction of particles outside it in ``wake_overflow()``, a tensor, with no host read).
+
+        ``deposit="cic"`` spreads each particle over its two neighbouring bins and reads the voltage back by linear interpolation, giving the
+        wakes a gradient to ``tau``; ``"ngp"`` (nearest bin, the existing behaviour) has none. The wake objects are copied, so the original
+        tracker and any other user of the same ``ShortRangeWake`` / ``TransverseWake`` are untouched."""
+        if (window_s is None) == (particles6 is None):
+            raise ValueError("give exactly one of window_s and particles6")
+        if window_s is None:
+            tau_s = particles6[..., 4] / C_LIGHT
+            lo, hi = float(tau_s.min()), float(tau_s.max())
+            window_s = (lo - margin * (hi - lo), hi + margin * (hi - lo))
+        copies: dict[int, object] = {}
+
+        def fixed(wake):
+            if wake is None:
+                return None
+            if id(wake) not in copies:
+                new = replace(wake, deposit=deposit, monitor_overflow=monitor_overflow)
+                new.set_fixed_bin_window(*window_s)
+                new.prepare(self.dtype, self.device)
+                copies[id(wake)] = new
+            return copies[id(wake)]
+
+        new = object.__new__(LinacTracker)
+        new.__dict__.update(self.__dict__)
+        new._element_params = [
+            p._replace(wake=fixed(p.wake), transverse_wake_x=fixed(p.transverse_wake_x), transverse_wake_y=fixed(p.transverse_wake_y))
+            if (p.wake is not None or p.transverse_wake_x is not None or p.transverse_wake_y is not None) else p
+            for p in self._element_params
+        ]
+        return new
+
+    def _monitored_wakes(self) -> list:
+        wakes = {}
+        for p in self._element_params:
+            for wake in (p.wake, p.transverse_wake_x, p.transverse_wake_y):
+                if wake is not None and wake.overflow is not None:
+                    wakes[id(wake)] = wake
+        return list(wakes.values())
+
+    def wake_overflow(self) -> torch.Tensor | None:
+        """Largest fraction of particles outside a fixed wake window since ``reset_wake_overflow`` (0-d tensor), or ``None`` if no wake is
+        monitored (``with_wake_windows(monitor_overflow=True)``)."""
+        wakes = self._monitored_wakes()
+        return torch.stack([wake.overflow for wake in wakes]).max() if wakes else None
+
+    def reset_wake_overflow(self) -> None:
+        for wake in self._monitored_wakes():
+            wake.reset_overflow()
+
     def _ensure_transverse_wake_windows(self, particles6: torch.Tensor) -> None:
         """A transverse wake convolves on a fixed bin window. Give any that has none the time span of the first bunch tracked, with half that
         span as a margin on each side (elegant's ``N_BINS = 0`` sizes its bins from the bunch in a similar way)."""
         todo = {id(w): w for p in self._element_params for w in (p.transverse_wake_x, p.transverse_wake_y) if w is not None and w._fixed_n_bins is None}
         if not todo:
             return
+        if _capturing():
+            raise RuntimeError(
+                "a transverse wake has no bin window yet and sizing it reads the bunch on the host; run one eager pass first or use "
+                "LinacTracker.with_wake_windows before capture"
+            )
         tau_s = particles6[..., 4] / C_LIGHT
         lo, hi = float(tau_s.min()), float(tau_s.max())
         pad = 0.5 * (hi - lo)

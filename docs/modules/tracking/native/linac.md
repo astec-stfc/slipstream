@@ -189,6 +189,9 @@ class LinacTracker:
     def track(self, particles6: torch.Tensor, return_trajectory: bool=False, reference_energy_eV: torch.Tensor | None=None) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def fiducialize(self, particles0: torch.Tensor) -> FiducialReference: ...
     def with_settings(self, k1: dict | None=None, k2: dict | None=None, kick_x: dict | None=None, kick_y: dict | None=None, voltage_V: dict | None=None, phase_rad: dict | None=None) -> LinacTracker: ...
+    def with_wake_windows(self, window_s: tuple[float, float] | None=None, particles6: torch.Tensor | None=None, margin: float=0.5, deposit: str='ngp', monitor_overflow: bool=False) -> LinacTracker: ...
+    def wake_overflow(self) -> torch.Tensor | None: ...
+    def reset_wake_overflow(self) -> None: ...
 ```
 
 ### Wake conventions
@@ -331,6 +334,26 @@ is applied. An override replaces the value including any sampled error. `_set_re
 keeps the build-time reference offset of a magnet whose `k1` or `k2` is a tensor, because
 recomputing it would read the tensor on the host; the offset is zero for a straight magnet. The
 bends' `csr_substeps` receive the same override.
+
+### `LinacTracker.with_wake_windows`
+
+A copy of the tracker in which every longitudinal and transverse wake uses one fixed time window,
+so that a pass with wakes has static shapes and no host synchronisation and can be captured in a
+CUDA graph. Without it the longitudinal window follows the live `tau` range (`.item()` calls) and
+the transverse window is frozen from the first bunch tracked (and set on the user's own wake
+object); neither of those behaviours changes when this method is not used.
+
+Pass the window as `window_s=(t_min, t_max)` in seconds (`tau / c`), or a representative bunch as
+`particles6` to size it as the `tau` extent plus `margin` times that extent on each side (a host read:
+do it before capture). Exactly one of the two is required. The wake objects are copied
+(`dataclasses.replace`), prepared for the tracker's dtype and device, and shared between elements
+that shared them, so the original tracker and any other user of the same wake are untouched. Charge
+outside the window is dropped and a particle outside it reads the edge bin, so size the window for the
+whole line; `monitor_overflow=True` records the largest outside fraction, read with
+`wake_overflow()` (a 0-d tensor, `None` if nothing is monitored) and cleared by
+`reset_wake_overflow()`. `deposit="cic"` gives the wakes a gradient to `tau`
+(see `ShortRangeWake`). A transverse wake with no window raises during capture instead of reading
+the bunch on the host. Not exercised: `compile=True` with monitored wakes.
 
 ### `LinacTracker.fiducialize`
 

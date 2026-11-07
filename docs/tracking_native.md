@@ -102,8 +102,9 @@ loss.backward()
 
 Limits to know before relying on a gradient:
 
-- Wakes: the longitudinal `ShortRangeWake` rounds particles to integer bins and passes no
-  gradient to `tau`; the transverse wake passes gradient to the offsets only. RF phase,
+- Wakes: by default the longitudinal `ShortRangeWake` rounds particles to integer bins and passes
+  no gradient to `tau`, and the transverse wake passes gradient to the offsets only;
+  `with_wake_windows(..., deposit="cic")` (below) gives both a gradient to `tau`. RF phase,
   voltage and magnet strengths are Python floats unless set as tensors with `with_settings` (below), so no gradient reaches them otherwise.
 - The grid origin and spacing of the binned kernels follow the live extremes of `tau`.
 - Float32 gradients of a binned density derivative are rough: in the test chicane
@@ -126,10 +127,25 @@ sextupoles, correctors, bends, RF cavities without wakes (with `always_change_p0
 with per-element `change_p0`), fast CSR (steady state, `csr_transient`, `csr_n_slices`) and
 fast LSC (including `dipole_collective_subcycle`), and `csr_drift_model="stupakov"`. A scalar
 bunch charge no longer replays the manual forward-only graphs of the fast kernels inside an
-outer capture (that failed before). Not capturable yet: the longitudinal and transverse wakes
-(their bin window is read from the data), and `csr_drift_model="retarded"`, which reads the
+outer capture (that failed before). Wakes capture once their bin window is fixed
+(`with_wake_windows`, below); without it the longitudinal window is read from the data and a capture
+raises a `RuntimeError` naming the fix. Not capturable: `csr_drift_model="retarded"`, which reads the
 reference energy on the host and raises a `RuntimeError` during capture instead of invalidating
 it. Of the Warp kernels only the Stupakov `stupakov_phi` launch was exercised under capture (Warp 1.17, RTX 3050): it captured and replayed correctly; the others were not.
+
+### Wakes: fixed windows, CIC deposit, overflow
+
+`tracker.with_wake_windows(particles6=bunch, margin=1.0, deposit="cic", monitor_overflow=True)`
+returns a copy whose longitudinal and transverse wakes all use one fixed bin window, sized from a
+representative bunch (or given as `window_s=(t_min, t_max)` in seconds). The binning then has static
+shapes and no host reads, so RF cavities with wakes capture in a CUDA graph together with the rest of
+the line. With the window covering the bunch the result equals the default dynamic window (the
+nearest-bin result is unchanged to rounding). `deposit="cic"` (cloud in cell) is second-order
+accurate against the exact pairwise sum where the default nearest-bin deposit is first-order, and
+it is differentiable in `tau`. Particles outside the window feel the edge bin and add no charge, so
+leave margin for the bunch to lengthen along the line and read `tracker.wake_overflow()` (a tensor,
+the largest outside fraction since `reset_wake_overflow()`) after a pass; it is a tensor so that
+checking it inside a graph costs no host read.
 
 ### Scan settings as tensors
 
