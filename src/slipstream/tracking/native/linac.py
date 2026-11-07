@@ -14,6 +14,7 @@ from ...constants import C_LIGHT, ELECTRON_MASS_EV
 from ...wakefields.shortrange import ShortRangeWake
 from ...wakefields.transverse import TransverseWake
 from .collective import (
+    _capturing,
     _lsc_csr_delta_kicks,
     csr_steady_state_delta_kick,
     csr_drift_delta_kick_fast,
@@ -137,6 +138,11 @@ def _track_csr_drift_stupakov(
     """A CSR drift in kicks of ``csr_drift_dz``: half a step of drift, then a Stupakov-model kick at the centre of every step
     (the wake is evaluated for the distribution as it stands there), whole steps in between, half a step at the end."""
     if p.csr_stupakov == "retarded":
+        if _capturing():  # fail cleanly: a host read during capture invalidates the whole capture
+            raise RuntimeError(
+                "csr_drift_model='retarded' reads the reference energy on the host, so it cannot be captured in a CUDA graph; "
+                "use 'stupakov' or 'overtaking'"
+            )
         # the retarded kernel is smooth in the distance behind the bend, so the steps grow with it: short close to the exit, where the
         # wake changes fastest, and up to ten times ``csr_drift_dz`` far from it
         steps, z = [], p.csr_drift_start_m
@@ -454,11 +460,14 @@ class LinacTracker:
             def refresh(p):
                 if p.is_rf or p.is_kick:
                     return p
-                offset = reference_offset(
-                    p.length, p.angle, p.k1, p.k2, p.e1, p.e2, energy_eV, self.mc2_eV,
-                    p.n_kicks, p.integration_order, p.hgap, p.fint, p.edge_order,
-                    p.edge1_effects, p.edge2_effects, p.exact_dipole,
-                ).to(device=self.device, dtype=self.dtype).clone()
+                if isinstance(p.k1, torch.Tensor) or isinstance(p.k2, torch.Tensor):
+                    offset = p.offset  # a with_settings() strength: keep the build-time reference offset
+                else:
+                    offset = reference_offset(
+                        p.length, p.angle, p.k1, p.k2, p.e1, p.e2, energy_eV, self.mc2_eV,
+                        p.n_kicks, p.integration_order, p.hgap, p.fint, p.edge_order,
+                        p.edge1_effects, p.edge2_effects, p.exact_dipole,
+                    ).to(device=self.device, dtype=self.dtype).clone()
                 return p._replace(
                     offset=offset, csr_substeps=tuple(refresh(sub) for sub in p.csr_substeps),
                     radiation_substeps=tuple((refresh(a), refresh(b)) for a, b in p.radiation_substeps),
@@ -467,6 +476,64 @@ class LinacTracker:
             self._element_params = [refresh(p) for p in self._element_params]
             self._reference_energy_eV = energy_eV
         self._energy_eV_t = torch.full_like(self._energy_eV_t, energy_eV)  # not in place: an earlier pass may have saved it
+
+    def with_settings(
+        self, k1: dict | None = None, k2: dict | None = None, kick_x: dict | None = None, kick_y: dict | None = None,
+        voltage_V: dict | None = None, phase_rad: dict | None = None,
+    ) -> "LinacTracker":
+        """Copy of this tracker in which every element of each named family (case-insensitive) takes the given value.
+
+        Each argument maps element names to a float or a tensor: ``k1`` and ``k2`` (magnets other than RF and correctors),
+        ``kick_x`` and ``kick_y`` (``HKICK`` / ``VKICK``), ``voltage_V`` and ``phase_rad`` (RF; ``phase_rad`` is the element's
+        phase as in ``ElementSpec``, and the tracker's fiducial shift is applied on top). A tensor keeps its autograd history and,
+        in a CUDA graph, is read at replay time: capture once with a static tensor, then ``copy_`` each new setting into it. An
+        override replaces the value including any sampled error. The reference offset of a magnet with a tensor ``k1`` or ``k2``
+        stays at its build-time value."""
+        requested = {
+            key: {name.upper(): value for name, value in values.items()}
+            for key, values in dict(k1=k1, k2=k2, kick_x=kick_x, kick_y=kick_y, voltage_V=voltage_V, phase_rad=phase_rad).items()
+            if values
+        }
+        by_name: dict[str, list[ElementSpec]] = {}
+        for spec in self.specs:
+            by_name.setdefault(spec.name.upper(), []).append(spec)
+        unknown = set().union(*(set(values) for values in requested.values()), set()) - set(by_name)
+        if unknown:
+            raise KeyError(f"no such element(s) in lattice: {sorted(unknown)}")
+        allowed = {
+            "k1": lambda s: s.kind not in ("rf", "hkick", "vkick"), "k2": lambda s: s.kind not in ("rf", "hkick", "vkick"),
+            "kick_x": lambda s: s.kind == "hkick", "kick_y": lambda s: s.kind == "vkick",
+            "voltage_V": lambda s: s.kind == "rf", "phase_rad": lambda s: s.kind == "rf",
+        }
+        for key, values in requested.items():
+            for name in values:
+                if not all(allowed[key](spec) for spec in by_name[name]):
+                    raise ValueError(f"{key} does not apply to element {name} ({by_name[name][0].kind})")
+        as_value = lambda v: v.to(device=self.device, dtype=self.dtype) if isinstance(v, torch.Tensor) else v  # noqa: E731
+        t_ref_s = self.fiducial.t_ref_s if self.fiducial is not None else 0.0
+
+        def override(p, name):
+            changes = {}
+            for key in ("k1", "k2"):
+                if name in requested.get(key, {}):
+                    changes[key] = as_value(requested[key][name])
+            if p.is_kick and name in requested.get("kick_x" if p.kick_plane == "x" else "kick_y", {}):
+                changes["kick_value"] = as_value(requested["kick_x" if p.kick_plane == "x" else "kick_y"][name])
+            if name in requested.get("voltage_V", {}):
+                changes["voltage_V"] = as_value(requested["voltage_V"][name])
+            if name in requested.get("phase_rad", {}):
+                changes["phase_rad"] = as_value(requested["phase_rad"][name])
+                changes["phase_shift_rad"] = p.omega_rf * t_ref_s
+            if p.csr_substeps:
+                changes["csr_substeps"] = tuple(override(sub, name) for sub in p.csr_substeps)
+            return p._replace(**changes) if changes else p
+
+        if len(self.specs) != len(self._element_params):
+            raise RuntimeError("element parameters no longer match the lattice specs")
+        new = object.__new__(LinacTracker)
+        new.__dict__.update(self.__dict__)
+        new._element_params = [override(p, spec.name.upper()) for spec, p in zip(self.specs, self._element_params)]
+        return new
 
     def _ensure_transverse_wake_windows(self, particles6: torch.Tensor) -> None:
         """A transverse wake convolves on a fixed bin window. Give any that has none the time span of the first bunch tracked, with half that

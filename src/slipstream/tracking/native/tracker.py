@@ -118,6 +118,9 @@ class _ElementParams(NamedTuple):
     radiation_substeps: tuple = ()
     wake_scale: float = 1.0
     """RF-kind only: the fraction of the per-cell wake table applied at each sub-kick, ``length / cell_length / n_kicks`` (elegant's ``wake.factor``)."""
+    phase_shift_rad: float = 0.0
+    """RF-kind only: subtracted from ``phase_rad`` when the cavity is applied. ``LinacTracker.with_settings`` sets it to the fiducial shift
+    so that a tensor ``phase_rad`` is read, unmodified, at every call (a shift applied once at construction would go stale in a replayed CUDA graph)."""
 
 
 def _build_params(
@@ -185,7 +188,8 @@ def _apply_one_element(
         return _corrector_kick(particles6, p.length, p.kick_value, p.kick_plane, energy_eV, mc2_eV), energy_eV
     if p.is_rf:
         return _rf_cavity_kick(
-            particles6, p.length, p.voltage_V, p.phase_rad, p.omega_rf, energy_eV, mc2_eV, change_p0=p.change_p0,
+            particles6, p.length, p.voltage_V, p.phase_rad - p.phase_shift_rad if p.phase_shift_rad else p.phase_rad, p.omega_rf, energy_eV, mc2_eV,
+            change_p0=p.change_p0,
             wake=p.wake, transverse_wake_x=p.transverse_wake_x, transverse_wake_y=p.transverse_wake_y,
             charge_per_particle_C=charge_per_particle_C, n_kicks=p.n_kicks, beta_wave=p.beta_wave, wake_scale=p.wake_scale,
             end1_focus=p.end1_focus, end2_focus=p.end2_focus, body_focus_model=p.body_focus_model,
