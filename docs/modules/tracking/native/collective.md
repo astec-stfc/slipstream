@@ -54,6 +54,25 @@ or an in-place chain records no autograd history, and without this test the
 result would silently have no gradient (graph) or fail in backward (in
 place).
 
+### `_graph_replay_ok`
+
+`not _grad_live(...)` and not inside an outer CUDA graph capture. The four sites that replay a
+manually captured forward-only graph (`csr_steady_state_delta_kick_fast`, `lsc_delta_kick_fast`,
+the pairwise CSR sum and the windowed KDE) test this, not `_grad_live` alone: replaying a graph
+inside another capture is illegal (`cudaErrorStreamCaptureUnsupported`) and, with a scalar bunch
+charge, made a forward-only whole-iteration capture fail. In either case the caller takes its
+ordinary PyTorch path, which the outer capture records and autograd differentiates.
+
+### `_scalar_on` and `_const`
+
+`_const(value, like)` is a 0-d tensor with `like`'s dtype and device: a tensor is converted, a
+Python number comes from `_scalar_on`, an `lru_cache`d constructor. Building a tensor from a float
+on CUDA is a host-to-device copy, which a CUDA graph capture rejects; the warm-up call pays it and
+later calls (including inside a capture) look it up. Cached tensors are shared: never modify one in
+place. Used for the CSR softening, CSR length, transient slippage and the Stupakov drift geometry.
+`csr_drift_delta_kick_retarded` raises a `RuntimeError` when called during a capture, because it
+reads the reference energy on the host and passes it to its kernels as a constant.
+
 ### `_CSRPairwiseGraph`
 
 CUDA graph for the exact CSR chunk loop at one fixed particle count.

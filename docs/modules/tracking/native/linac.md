@@ -188,6 +188,7 @@ class LinacTracker:
     def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, n_kicks: int=1, n_kicks_bend: int=4, integration_order: int=4, compile: bool=False, compile_mode: str | None=None, always_change_p0: bool=True, errors: list[SampledError] | None=None, fiducial: FiducialReference | None=None, bunch_charge_C: float=0.0, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, lsc_radius_factor: float=1.7, csr_softening_m: float | None=None, compile_collective_chunks: bool | None=None, fast_collective_effects: bool=False, dipole_collective_subcycle: bool=False, csr_transient: bool=False, csr_drift_model: str='overtaking', generator: torch.Generator | None=None): ...
     def track(self, particles6: torch.Tensor, return_trajectory: bool=False, reference_energy_eV: torch.Tensor | None=None) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def fiducialize(self, particles0: torch.Tensor) -> FiducialReference: ...
+    def with_settings(self, k1: dict | None=None, k2: dict | None=None, kick_x: dict | None=None, kick_y: dict | None=None, voltage_V: dict | None=None, phase_rad: dict | None=None) -> LinacTracker: ...
 ```
 
 ### Wake conventions
@@ -311,6 +312,25 @@ index -1 the beamline exit) -- a stand-in for CLARA-style
 (the same per-element step `return_trajectory=False` calls) for
 each element's own physics -- only the trajectory bookkeeping (a
 growing Python list + a final `torch.stack`) stays uncompiled.
+
+### `LinacTracker.with_settings`
+
+A copy of the tracker in which every element of each named family (names are case-insensitive;
+all occurrences) takes the given float or tensor: `k1`, `k2` for any magnet that is not an RF cavity or
+a corrector, `kick_x` for `HKICK`, `kick_y` for `VKICK`, `voltage_V` and `phase_rad` for RF.
+Unknown names raise `KeyError`; a setting that does not apply to the element's kind raises
+`ValueError`. The copy shares the original's compiled step functions and replaces only the
+per-element parameter list, so the original is unchanged.
+
+A tensor is moved to the tracker's device and dtype and stored as is, so it keeps its autograd
+history and is read at every `track` call. This is what lets one captured CUDA graph replay a
+scan: write each new value into the static tensor with `copy_` or `fill_`. For `phase_rad` the
+fiducial shift `omega_rf * t_ref_s` is not folded into the tensor (that would be evaluated once,
+at construction); it is kept in `_ElementParams.phase_shift_rad` and subtracted when the cavity
+is applied. An override replaces the value including any sampled error. `_set_reference_energy`
+keeps the build-time reference offset of a magnet whose `k1` or `k2` is a tensor, because
+recomputing it would read the tensor on the host; the offset is zero for a straight magnet. The
+bends' `csr_substeps` receive the same override.
 
 ### `LinacTracker.fiducialize`
 

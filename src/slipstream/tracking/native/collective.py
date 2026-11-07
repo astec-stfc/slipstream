@@ -47,6 +47,27 @@ def _grad_live(*values) -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=4096)
+def _scalar_on(value: float, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    """A cached 0-d constant (never modify it in place). Building one from a Python float is a host-to-device copy, which a CUDA
+    graph capture rejects; the first (warm-up) call pays it and later calls, including inside a capture, only look it up."""
+    return torch.as_tensor(value, dtype=dtype, device=device)
+
+
+def _const(value, like: torch.Tensor) -> torch.Tensor:
+    """``value`` as a 0-d tensor of ``like``'s dtype and device (a tensor is converted, a Python number is cached)."""
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype=like.dtype, device=like.device)
+    return _scalar_on(float(value), like.dtype, like.device)
+
+
+def _graph_replay_ok(*values) -> bool:
+    """Whether a manually captured forward-only CUDA graph may be replayed: not when autograd would record an operation (see
+    ``_grad_live``), and not inside an outer graph capture, where a nested ``replay`` is illegal. In both cases the caller takes its
+    ordinary PyTorch path, which an outer capture records and autograd differentiates."""
+    return not _grad_live(*values) and not torch.cuda.is_current_stream_capturing()
+
+
 def _chunk_rows_for(n: int, cols: int) -> int:
     """Row-block size for a chunked ``(rows, cols)`` buffer, capped so
     ``rows * cols <= _CHUNK_TARGET_ELEMENTS``."""
@@ -152,7 +173,7 @@ def _csr_chunked_pairwise_sum(
 
     if (
         _use_graph and compile_chunks and tau_m.is_cuda and tau_m.ndim == 1
-        and not _grad_live(tau_m, score, softening_m)  # a replayed graph records no autograd history
+        and _graph_replay_ok(tau_m, score, softening_m)  # a replayed graph records no autograd history
     ):
         graph = _get_csr_pairwise_graph(n, tau_m.dtype, tau_m.device)
         return graph.run(tau_m, score, softening_m)
@@ -315,7 +336,7 @@ def _gaussian_kde_density_and_deriv(
         return density, density_deriv
 
     has_tensor_charge = isinstance(charge_per_particle_C, torch.Tensor) and charge_per_particle_C.dim() > 0
-    if tau_m.is_cuda and not has_tensor_charge and not _grad_live(tau_m, charge_per_particle_C, bandwidth_m):
+    if tau_m.is_cuda and not has_tensor_charge and _graph_replay_ok(tau_m, charge_per_particle_C, bandwidth_m):
         graph = _get_kde_windowed_graph(n, w, tau_m.dtype, tau_m.device, compile_chunks)
         return graph.run(tau_m, charge_per_particle_C, bandwidth_m)
 
@@ -409,14 +430,14 @@ def _lsc_csr_delta_kicks(
     if softening_m is None:
         softening = 0.5 * h_m
     else:
-        softening = torch.as_tensor(softening_m, dtype=tau_m.dtype, device=tau_m.device)
+        softening = _const(softening_m, tau_m)
     density_floor = 1e-6 * density.abs().max().clamp(min=1e-300)
     score = density_deriv / torch.clamp(density, min=density_floor)
     weighted_sum = _csr_chunked_pairwise_sum(
         tau_m, score, softening, n, compile_chunks=compile_chunks,
     )
     csr_constant = 2.0 / ((3.0 * csr_rho_m * csr_rho_m) ** (1.0 / 3.0) * 4.0 * math.pi * EPS0_F_PER_M)
-    csr_length = torch.as_tensor(csr_length_m, dtype=tau_m.dtype, device=tau_m.device)
+    csr_length = _const(csr_length_m, tau_m)
     csr_kick = csr_constant * csr_length * charge_per_particle_C * weighted_sum / energy_eV
     return lsc_kick, csr_kick
 
@@ -483,7 +504,7 @@ def csr_steady_state_delta_kick(
     if softening_m is None:
         softening_m = 0.5 * h_m
     else:
-        softening_m = torch.as_tensor(softening_m, dtype=tau_m.dtype, device=tau_m.device)
+        softening_m = _const(softening_m, tau_m)
 
     density, density_deriv = _gaussian_kde_density_and_deriv(tau_m, charge_per_particle_C, h_m, compile_chunks=compile_chunks)
     # Score function (log-density derivative), floored relative to the KDE's
@@ -599,7 +620,7 @@ def csr_steady_state_delta_kick_subquadratic(
     if softening_m is None:
         softening_m = 0.5 * h_m
     else:
-        softening_m = torch.as_tensor(softening_m, dtype=tau_m.dtype, device=tau_m.device).reshape(())
+        softening_m = _const(softening_m, tau_m).reshape(())
     density, density_deriv = _gaussian_kde_density_and_deriv(
         tau_m, charge_per_particle_C, h_m, compile_chunks=tau_m.is_cuda,
     )
@@ -803,7 +824,7 @@ def lsc_delta_kick_fast(
     has_tensor_charge = isinstance(charge_per_particle_C, torch.Tensor) and charge_per_particle_C.dim() > 0
     if (
         tau_m.is_cuda and not has_tensor_charge
-        and not _grad_live(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV)
+        and _graph_replay_ok(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV)
     ):
         graph = _get_lsc_fast_graph(n, n_bins, smooth_passes, tau_m.dtype, tau_m.device, pipe_radius_b_m, radius_factor)
         e_field_per_length = graph.run(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV)
@@ -855,7 +876,7 @@ def _csr_fast_field(
     weights = torch.where(j == 0, 0.9, torch.where(j == 1, 1.1, j.clamp(min=1).pow(-1 / 3)))
     kernel = weights * dtau.pow(2 / 3)
     if softening_m is not None:
-        eps = torch.as_tensor(softening_m, dtype=tau_m.dtype, device=tau_m.device)
+        eps = _const(softening_m, tau_m)
         softened = ((j * dtau).square() + eps.square()).clamp(min=torch.finfo(tau_m.dtype).tiny).pow(-1 / 6)
         softened = softened * dtau * torch.where(j == 0, 0.5, 1.0)
         kernel = torch.where(eps > 0, softened, kernel)
@@ -956,8 +977,8 @@ def csr_drift_delta_kick_fast(
         weights = torch.ones((1, 1, width), dtype=lam.dtype, device=lam.device) / width
         lam = torch.nn.functional.conv1d(lam[None, None], weights, padding=sg_halfwidth)[0, 0]
     derivative = _grid_deriv(lam, dtau)
-    x = torch.as_tensor(z_travel_m / rho, dtype=tau_m.dtype, device=tau_m.device)
-    phi = torch.as_tensor(phi_m, dtype=tau_m.dtype, device=tau_m.device)
+    x = _const(z_travel_m / rho, tau_m)
+    phi = _const(phi_m, tau_m)
     l_c = rho * phi ** 2 * (phi + 3.0 * x) / 6.0
     l_m = rho * phi ** 3 * (phi + 4.0 * x) / (24.0 * (phi + x))
     m = torch.arange(nb, dtype=tau_m.dtype, device=tau_m.device)
@@ -1050,6 +1071,11 @@ def csr_drift_delta_kick_retarded(
     n = tau_m.shape[-1]
     if n < 2 or length_m <= 0.0 or rho_m == 0.0 or phi_m <= 0.0:
         return torch.zeros_like(tau_m)
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "csr_drift_model='retarded' reads the reference energy on the host (and passes it to its kernels as a constant), so it "
+            "cannot be captured in a CUDA graph; use 'stupakov' or 'overtaking'"
+        )
     rho = abs(rho_m)
     gamma = float(energy_eV) / mc2_eV
     idx, w, valid, _, dtau, nb = _fixed_grid(tau_m, n_bins, margin=0.1)
@@ -1123,10 +1149,10 @@ def csr_steady_state_delta_kick_fast(
     hashable_softening = softening_m is None or isinstance(softening_m, (int, float))
     transient = slippage_m is not None
     if transient:
-        slippage_m = torch.as_tensor(slippage_m, dtype=tau_m.dtype, device=tau_m.device)
+        slippage_m = _const(slippage_m, tau_m)
     if (
         tau_m.is_cuda and not vector_charge and hashable_softening
-        and not _grad_live(tau_m, charge_per_particle_C, slippage_m)
+        and _graph_replay_ok(tau_m, charge_per_particle_C, slippage_m)
     ):
         key = (n, n_bins, smooth_passes, tau_m.dtype, tau_m.device, softening_m, sg_halfwidth, transient)
         graph = _csr_fast_graph_cache.get(key)

@@ -104,7 +104,7 @@ Limits to know before relying on a gradient:
 
 - Wakes: the longitudinal `ShortRangeWake` rounds particles to integer bins and passes no
   gradient to `tau`; the transverse wake passes gradient to the offsets only. RF phase,
-  voltage and magnet strengths are Python floats, so no gradient reaches them.
+  voltage and magnet strengths are Python floats unless set as tensors with `with_settings` (below), so no gradient reaches them otherwise.
 - The grid origin and spacing of the binned kernels follow the live extremes of `tau`.
 - Float32 gradients of a binned density derivative are rough: in the test chicane
   (16384 particles, 256 bins) they differ from float64 by 8-18 % in `x`, `tau` and `delta`,
@@ -115,12 +115,44 @@ Limits to know before relying on a gradient:
 The step is launch-bound, so a fixed-shape forward and backward can be captured in one CUDA
 graph (measured 5.7 to 15 times faster than eager on a 15-element chicane with CSR). Warm up
 first on a side stream, as the PyTorch CUDA-graph documentation describes, so that the dense
-smoothing operator and cuFFT plans exist before capture, then capture `track`, the loss and
-`backward()` together and replay it with new values copied into the static input. The step
-must contain no host synchronisation and no host-to-device scalar construction; the LSC and
-CSR fast kernels meet this, the dynamic-window longitudinal wake and the CSR drift models do
-not yet. `tests/test_collective_gradients.py` holds a working example. Under deterministic
-algorithms a CSR-only replay matched eager bit for bit in float32.
+smoothing operator, cuFFT plans and cached scalar constants exist before capture, then capture
+`track`, the loss and `backward()` together and replay it with new values copied into the static
+input. The step must contain no host synchronisation and no host-to-device scalar construction.
+`tests/test_collective_gradients.py` and `tests/test_linac_scan_parameters.py` hold working
+examples. Under deterministic algorithms a CSR-only replay matched eager bit for bit in float32.
+
+Capture was checked, with and without gradients, on CUDA in float64 for: drifts, quadrupoles,
+sextupoles, correctors, bends, RF cavities without wakes (with `always_change_p0` on or off and
+with per-element `change_p0`), fast CSR (steady state, `csr_transient`, `csr_n_slices`) and
+fast LSC (including `dipole_collective_subcycle`), and `csr_drift_model="stupakov"`. A scalar
+bunch charge no longer replays the manual forward-only graphs of the fast kernels inside an
+outer capture (that failed before). Not capturable yet: the longitudinal and transverse wakes
+(their bin window is read from the data), and `csr_drift_model="retarded"`, which reads the
+reference energy on the host and raises a `RuntimeError` during capture instead of invalidating
+it. The Warp kernels were not exercised under capture.
+
+### Scan settings as tensors
+
+Quadrupole and sextupole strengths, corrector kicks and RF voltage and phase are fixed when a
+`LinacTracker` is built. `tracker.with_settings(k1={"Q1": k}, voltage_V={"L1": v},
+phase_rad={"L1": phi})` returns a copy in which the named elements (case-insensitive, every
+occurrence) take those values. Floats give the same result as rebuilding the tracker; tensors
+keep their autograd history and are read on every call. In a captured graph that means a scan
+needs one capture: create the settings as static tensors, capture, then `copy_` each new value
+into them before `graph.replay()`.
+
+```python
+k = torch.tensor(2.0, device="cuda", dtype=torch.float64)
+scan = tracker.with_settings(k1={"Q1": k})
+# ... warm up, capture `scan.track(static_beam)` + loss + backward ...
+for value in settings:
+    k.fill_(value)
+    graph.replay()
+```
+
+An override replaces the value including any sampled error. The phase is the element's phase as
+in `ElementSpec`; the tracker's fiducial shift is applied on top. The reference offset of a bend
+with a tensor `k1` or `k2` stays at its build-time value, which is zero for a straight magnet.
 
 ## Injector usage
 
