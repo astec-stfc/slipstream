@@ -21,7 +21,7 @@ Converts supported elegant lattice declarations into native `ElementSpec` physic
 
 Minimal, covering exactly the element/line syntax real CLARA/Diamond-II
 lattices use: `NAME: TYPE, PARAM=VAL,...;` element definitions
-(`DRIFT`, `KQUAD`/`QUAD`/`QUADRUPOLE`, `CSBEND`/`CSBEN`/`SBEND`, `KSEXT`/`SEXT`/`SEXTUPOLE`, `KOCT`, `MULT`, RFCA/RFCW and H/V correctors). Unknown finite-length types become drifts only in permissive mode; unknown zero-length types and unresolved tokens are dropped. These are explicit approximations, not evidence that the original element has no physics. `NAME: LINE=(...)` supports recursive line-name expansion,
+(`DRIFT`, `KQUAD`/`QUAD`/`QUADRUPOLE`, `CSBEND`/`CSBEN`/`SBEND`, `KSEXT`/`SEXT`/`SEXTUPOLE`, `KOCT`, `MULT`, RFCA/RFCW, `RFDF`/`RFTM110` and H/V correctors). Unknown finite-length types become drifts only in permissive mode; unknown zero-length types and unresolved tokens are dropped. These are explicit approximations, not evidence that the original element has no physics. `NAME: LINE=(...)` supports recursive line-name expansion,
 `&`-continuation, `!`-comments, case-insensitivity.
 
 ### `_apply_csrdrift_carry`
@@ -77,6 +77,10 @@ only -- dispatch inside `track_element` is purely parameter-driven.
 meters, roll in radians). `occurrence`: 1-based count of this
 `name` seen so far in beamline order (elegant's `ElementOccurence`
 convention) -- used for error matching, see `errors.py`.
+
+`kind="tdc"` (elegant's `RFDF` and `RFTM110`): a thin transverse deflecting cavity (see `elements._tdc_kick`) with `VOLTAGE`, `FREQUENCY`,
+`PHASE` (degrees) and `TILT` (the deflection plane: 0 is `x`, pi/2 is `y`); other attributes are reported as ignored. Elegant's own sign and phase
+conventions for these two types were not checked against elegant output.
 
 `voltage_V`/`phase_rad`/`frequency_Hz`/`change_p0` (`kind="rf"`
 only, elegant's `RFCA`): real per-cavity RF parameters, read only by

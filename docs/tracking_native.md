@@ -159,6 +159,14 @@ parameters (eager on the CPU). `ScanModel` has the `set_lattice_parameters` and
 lattice in `GPSR(beam_generator, lattice)`. See [reconstruction](modules/reconstruction.md) for
 the conventions, limits and an example.
 
+### Transverse deflecting cavity
+
+`ElementSpec(name, "tdc", length, voltage_V=..., frequency_Hz=..., phase_rad=..., tilt=...)` (or elegant's `RFDF` / `RFTM110`) is a thin
+deflecting cavity: a kick `V / (p0 c) * sin(phase + omega * tau / c)` along `tilt` (0 is `x`, pi/2 is `y`) and the Panofsky-Wenzel energy change
+that goes with it, so it streaks the bunch (`tau` onto the deflected plane) and leaves the longitudinal phase space correlated with the offset.
+Its `voltage_V` and `phase_rad` are scannable through `with_settings` and the phase follows the fiducial arrival time like an RF cavity's.
+Phase zero is the zero crossing. There is no focusing, no wake and no reference-energy change; see `elements._tdc_kick` for the model.
+
 ### Scan settings as tensors
 
 Quadrupole and sextupole strengths, corrector kicks and RF voltage and phase are fixed when a

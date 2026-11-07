@@ -414,6 +414,42 @@ def _get_compiled_rf_one_sub_kick():
     return _compiled_rf_one_sub_kick
 
 
+def _tdc_kick(
+    state6: torch.Tensor, length: float, voltage_V: float | torch.Tensor, phase_rad: float | torch.Tensor, omega_rf: float,
+    tilt: float, energy_eV: torch.Tensor, mc2_eV: torch.Tensor,
+) -> torch.Tensor:
+    """Thin transverse deflecting cavity: half drift, one kick, half drift (``length`` may be zero).
+
+    With ``a = V / (p0 c)`` and ``arg = phase_rad + omega_rf * tau / c`` the kick is ``dp = a * sin(arg)`` along the deflection direction
+    ``(cos(tilt), sin(tilt))`` and, by the Panofsky-Wenzel theorem, ``d(delta) = -a * (omega_rf / (beta0 * c)) * q * cos(arg)`` with ``q`` the
+    offset along that direction. Together they are symplectic for ``dx^dpx + dy^dpy - beta0 dtau^ddelta`` (the time and energy pair). Phase 0
+    is the zero crossing, as in elegant's ``RFDF``. No transverse focusing, no second-order terms, no wake and no reference-energy change."""
+    gamma0 = energy_eV / mc2_eV
+    P0 = (gamma0 * gamma0 - 1.0) ** 0.5
+    beta0 = P0 / gamma0
+    half = length / 2.0
+    x, px, y, py, tau, delta = state6.unbind(-1)
+
+    def drift(x, px, y, py, tau):
+        beta = _beta_of(delta, energy_eV, mc2_eV)
+        x, px, y, py, arc_length = _canonical_drift(x, px, y, py, delta, half, 0.0)
+        return x, px, y, py, tau + (arc_length / beta - half / beta0)
+
+    if half > 0.0:
+        x, px, y, py, tau = drift(x, px, y, py, tau)
+    a = voltage_V / (mc2_eV * P0)
+    arg = phase_rad + omega_rf * (tau / C_LIGHT)
+    sin_arg, cos_arg = torch.sin(arg), torch.cos(arg)
+    cos_t, sin_t = math.cos(tilt), math.sin(tilt)
+    offset = x * cos_t + y * sin_t
+    px = px + a * cos_t * sin_arg
+    py = py + a * sin_t * sin_arg
+    delta = delta - a * (omega_rf / (C_LIGHT * beta0)) * offset * cos_arg
+    if half > 0.0:
+        x, px, y, py, tau = drift(x, px, y, py, tau)
+    return torch.stack([x, px, y, py, tau, delta], dim=-1)
+
+
 def _rf_cavity_kick(
     state6: torch.Tensor, length: float, voltage_V: float, phase_rad: float, omega_rf: float,
     energy_eV: torch.Tensor, mc2_eV: torch.Tensor, change_p0: bool = False,

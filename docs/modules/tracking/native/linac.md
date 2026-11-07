@@ -320,7 +320,7 @@ growing Python list + a final `torch.stack`) stays uncompiled.
 
 A copy of the tracker in which every element of each named family (names are case-insensitive;
 all occurrences) takes the given float or tensor: `k1`, `k2` for any magnet that is not an RF cavity or
-a corrector, `kick_x` for `HKICK`, `kick_y` for `VKICK`, `voltage_V` and `phase_rad` for RF.
+a corrector, `kick_x` for `HKICK`, `kick_y` for `VKICK`, `voltage_V` and `phase_rad` for RF and for a transverse deflecting cavity (`kind="tdc"`).
 Unknown names raise `KeyError`; a setting that does not apply to the element's kind raises
 `ValueError`. The copy shares the original's compiled step functions and replaces only the
 per-element parameter list, so the original is unchanged.
