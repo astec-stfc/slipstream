@@ -129,7 +129,7 @@ bunch charge no longer replays the manual forward-only graphs of the fast kernel
 outer capture (that failed before). Not capturable yet: the longitudinal and transverse wakes
 (their bin window is read from the data), and `csr_drift_model="retarded"`, which reads the
 reference energy on the host and raises a `RuntimeError` during capture instead of invalidating
-it. The Warp kernels were not exercised under capture.
+it. Of the Warp kernels only the Stupakov `stupakov_phi` launch was exercised under capture (Warp 1.17, RTX 3050): it captured and replayed correctly; the others were not.
 
 ### Scan settings as tensors
 
