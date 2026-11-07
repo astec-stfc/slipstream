@@ -10,7 +10,7 @@ import torch
 
 from ...lattice.twiss_table import TwissTable
 from .elements import track_element
-from .lattice_import import ElementSpec
+from .lattice_import import ElementSpec, slice_count
 
 
 @functools.lru_cache(maxsize=None)
@@ -58,13 +58,13 @@ def _periodic_plane(Rblock: torch.Tensor, rcol: torch.Tensor) -> tuple[float, fl
 
 def periodic_twiss_table(
     specs: list[ElementSpec], energy_eV: float, mc2_eV: float, n_kicks: int = 16, n_kicks_bend: int = 64,
-    integration_order: int = 4,
+    integration_order: int = 4, n_kicks_quad: int | None = None, n_kicks_sext: int | None = None,
 ) -> tuple[TwissTable, float, float]:
     """Compute periodic twiss table; see the module documentation for details."""
     Rs = [
         _element_R(
             s.length, s.angle, s.k1, s.k2, s.e1, s.e2, energy_eV, mc2_eV,
-            n_kicks_bend if s.angle != 0.0 else n_kicks, integration_order,
+            slice_count(s, n_kicks, n_kicks_bend, n_kicks_quad, n_kicks_sext), integration_order,
             s.hgap, s.fint, s.edge_order, s.edge1_effects, s.edge2_effects,
         )
         for s in specs
