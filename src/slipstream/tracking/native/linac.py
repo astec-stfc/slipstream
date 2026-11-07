@@ -14,6 +14,7 @@ from ...constants import C_LIGHT, ELECTRON_MASS_EV
 from ...wakefields.shortrange import ShortRangeWake
 from ...wakefields.transverse import TransverseWake
 from .collective import (
+    _capturing,
     _lsc_csr_delta_kicks,
     csr_steady_state_delta_kick,
     csr_drift_delta_kick_fast,
@@ -137,7 +138,7 @@ def _track_csr_drift_stupakov(
     """A CSR drift in kicks of ``csr_drift_dz``: half a step of drift, then a Stupakov-model kick at the centre of every step
     (the wake is evaluated for the distribution as it stands there), whole steps in between, half a step at the end."""
     if p.csr_stupakov == "retarded":
-        if torch.cuda.is_current_stream_capturing():  # fail cleanly: a host read during capture invalidates the whole capture
+        if _capturing():  # fail cleanly: a host read during capture invalidates the whole capture
             raise RuntimeError(
                 "csr_drift_model='retarded' reads the reference energy on the host, so it cannot be captured in a CUDA graph; "
                 "use 'stupakov' or 'overtaking'"

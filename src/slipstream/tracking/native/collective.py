@@ -61,11 +61,17 @@ def _const(value, like: torch.Tensor) -> torch.Tensor:
     return _scalar_on(float(value), like.dtype, like.device)
 
 
+def _capturing() -> bool:
+    """Whether a CUDA graph capture is underway on the current stream. False on a CPU-only PyTorch build, where
+    ``torch.cuda.is_current_stream_capturing`` raises."""
+    return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
+
 def _graph_replay_ok(*values) -> bool:
     """Whether a manually captured forward-only CUDA graph may be replayed: not when autograd would record an operation (see
     ``_grad_live``), and not inside an outer graph capture, where a nested ``replay`` is illegal. In both cases the caller takes its
     ordinary PyTorch path, which an outer capture records and autograd differentiates."""
-    return not _grad_live(*values) and not torch.cuda.is_current_stream_capturing()
+    return not _grad_live(*values) and not _capturing()
 
 
 def _chunk_rows_for(n: int, cols: int) -> int:
@@ -1071,7 +1077,7 @@ def csr_drift_delta_kick_retarded(
     n = tau_m.shape[-1]
     if n < 2 or length_m <= 0.0 or rho_m == 0.0 or phi_m <= 0.0:
         return torch.zeros_like(tau_m)
-    if torch.cuda.is_current_stream_capturing():
+    if _capturing():
         raise RuntimeError(
             "csr_drift_model='retarded' reads the reference energy on the host (and passes it to its kernels as a constant), so it "
             "cannot be captured in a CUDA graph; use 'stupakov' or 'overtaking'"

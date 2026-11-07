@@ -151,6 +151,20 @@ def test_reference_energy_update_keeps_tensor_strength_offsets_and_refreshes_flo
     torch.testing.assert_close(tracker._element_params[1].offset, expected._element_params[1].offset, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("drift_model", ["overtaking", "stupakov", "retarded"])
+def test_capture_detection_is_not_called_on_a_cpu_only_torch_build(monkeypatch, drift_model):
+    """On a CPU-only wheel ``torch.cuda.is_current_stream_capturing`` raises; CPU tracking must never reach it."""
+    def unavailable():
+        raise RuntimeError("Tried to instantiate dummy base class _cuda_isCurrentStreamCapturing")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", unavailable)
+    tracker = _tracker(_drift_line(), bunch_charge_C=CHARGE_C, csr=True, lsc=True, pipe_radius_b_m=0.01,
+                       fast_collective_effects=True, csr_drift_model=drift_model)
+    out, _ = tracker.track(_beam(128))
+    assert torch.isfinite(out).all()
+
+
 def _capture(step, static):
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
