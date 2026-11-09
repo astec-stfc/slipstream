@@ -1,13 +1,14 @@
-"""Plots and the extra held-out check for a finished ``run_clara_gpsr.py`` run.
+"""Plots and the extra held-out check for a finished run of a study (shared by the studies).
 
 The extra check tracks each reconstructed S02 bunch through the *true* machine model (CSR if the measured beam had it) at the held-out
 settings, which is what an operator would see if the reconstruction were used to predict the machine. For a fit made with a wrong model (case B)
 this is the number that matters, because the fit's own prediction can agree with the data while the bunch is wrong.
 
-    python plot_results.py --bunch CLA-S02-SIM-APER-01.openpmd.hdf5 --workdir _cache --out results
+    python plot_transverse.py --bunch CLA-S02-SIM-APER-01.openpmd.hdf5 --workdir _cache --out results
 
-Use the same ``--n-particles``, ``--rf-kicks`` and ``--csr-drift-dz`` as the run. Writes ``loss.png``, ``bunch_s02.png``, ``bunch_s07.png``,
-``images.png`` and ``analysis.json`` into the results folder.
+The particle number, cavity sub-kicks and CSR kick length are read from the run's ``results.json`` (``--n-particles``, ``--rf-kicks`` and
+``--csr-drift-dz`` override them; results written before ``results.json`` held them fall back to 8192, 45 and 0.05). Writes ``loss.png``,
+``bunch_s02.png``, ``bunch_s07.png``, ``images.png`` and ``analysis.json`` into the results folder.
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from clara_model import ClaraForward, load_bunch, make_machine  # noqa: E402
-from run_clara_gpsr import CASES, HELDOUT, image_error, scan_table  # noqa: E402
+from clara_model import ClaraForward, Study, load_bunch, make_machine  # noqa: E402
+from run_clara_gpsr import CASES, image_error, scan_table  # noqa: E402
 
 LABEL = {"A": "A: CSR truth, CSR fit", "B": "B: CSR truth, no-CSR fit", "C": "C: no-CSR truth, no-CSR fit", "D": "D: no-CSR truth, CSR fit"}
 COLOUR = {"truth": "k", "A": "tab:blue", "B": "tab:red", "C": "tab:green", "D": "tab:orange"}
@@ -85,26 +86,30 @@ def phase_figure(bunches: dict, path: Path, title: str, max_points: int = 4000, 
     plt.close(fig)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(study: Study, doc: str | None = None):
+    ap = argparse.ArgumentParser(description=doc or __doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bunch", required=True)
     ap.add_argument("--workdir", default="_cache")
     ap.add_argument("--out", default="results")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--dtype", default="float64", choices=["float32", "float64"])
-    ap.add_argument("--n-particles", type=int, default=8192)
-    ap.add_argument("--rf-kicks", type=int, default=45)
-    ap.add_argument("--csr-drift-dz", type=float, default=0.05)
+    ap.add_argument("--n-particles", type=int)
+    ap.add_argument("--rf-kicks", type=int)
+    ap.add_argument("--csr-drift-dz", type=float)
     args = ap.parse_args()
     warnings.filterwarnings("ignore")
-    dtype, device, out = getattr(torch, args.dtype), args.device, Path(args.out)
+    out = Path(args.out)
     results = json.loads((out / "results.json").read_text())
+    used = {"n_particles": 8192, "rf_kicks": 45, "csr_drift_dz": 0.05, "dtype": "float64", **results.get("args", {})}
+    for k in ("n_particles", "rf_kicks", "csr_drift_dz"):
+        used[k] = getattr(args, k) if getattr(args, k) is not None else used[k]
+    dtype, device = getattr(torch, used["dtype"]), args.device
     cases = [c for c in CASES if c in results]
 
-    machine = make_machine(args.bunch, args.workdir, device, dtype, n_reference=4096, rf_kicks=args.rf_kicks, csr_drift_dz=args.csr_drift_dz)
-    truth_beam, _, _ = load_bunch(args.bunch, args.n_particles, seed=11, dtype=dtype)
+    machine = make_machine(args.bunch, args.workdir, study, device, dtype, n_reference=4096, rf_kicks=used["rf_kicks"],
+                           csr_drift_dz=used["csr_drift_dz"])
+    truth_beam, _, _ = load_bunch(args.bunch, used["n_particles"], seed=11, dtype=dtype)
     truth_beam = truth_beam.to(device)
-    val_table = scan_table(HELDOUT, device, dtype)
+    val_table = scan_table(study.heldout, study.tdc_voltage_V, device, dtype)
     models = {csr: ClaraForward(machine, csr) for csr in (False, True)}
     for model in models.values():
         model.set_lattice_parameters(val_table)
@@ -139,9 +144,11 @@ def main():
                  overlay=("truth CSR", "truth no CSR") if both else None, ref="truth no CSR" if "truth no CSR" in s07 else "truth CSR")
 
     # held-out images with the TDC on and off at one setting
-    h = min(2, len(HELDOUT) - 1)  # HELDOUT[2] = (2, 4.5)
+    h = min(2, len(study.heldout) - 1)  # the third held-out setting
     row_off, row_on = 2 * h, 2 * h + 1
-    half = machine.screen.shape[0] * machine.screen.pixel_size / 2 * 1e3  # mm
+    ny, nx = machine.screen.shape
+    pu, pv = (machine.screen.pixel_size,) * 2 if isinstance(machine.screen.pixel_size, (int, float)) else machine.screen.pixel_size
+    half_x, half_y = nx * pu / 2 * 1e3, ny * pv / 2 * 1e3  # mm
     cols = ["measured"] + cases
     fig, axes = plt.subplots(2, len(cols), figsize=(2.4 * len(cols), 5), squeeze=False)
     for r, row in enumerate((row_off, row_on)):
@@ -149,11 +156,11 @@ def main():
             ax = axes[r, k]
             img = val_truth[CASES[cases[0]][0]][row] if name == "measured" else analysis[name]["predicted"][row]
             img = img.cpu().numpy() if hasattr(img, "cpu") else img
-            ax.imshow(img, origin="lower", extent=(-half, half, -half, half), cmap="viridis")
+            ax.imshow(img, origin="lower", extent=(-half_x, half_x, -half_y, half_y), cmap="viridis", aspect="auto")
             ax.set_title(name if r == 0 else "", fontsize=9)
             ax.set_xticks([])
             ax.set_yticks([])
-        axes[r, 0].set_ylabel(f"TDC {'on' if row == row_on else 'off'}\nk1 = {HELDOUT[h]}")
+        axes[r, 0].set_ylabel(f"TDC {'on' if row == row_on else 'off'}\nk1 = {study.heldout[h]}")
     fig.suptitle("Held-out screen images (x horizontal, y vertical)\nreconstructions tracked through the true machine", fontsize=10)
     fig.tight_layout()
     fig.savefig(out / "images.png", dpi=130)
@@ -165,6 +172,3 @@ def main():
     for c in cases:
         print(f"  {LABEL[c]:32s} fit's own model {results[c]['image_error_heldout']:.3f}   true machine {summary[c]['image_error_heldout_true_machine']:.3f}")
 
-
-if __name__ == "__main__":
-    main()

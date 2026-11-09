@@ -1,10 +1,11 @@
-"""CLARA S02-S07 forward model for the GPSR example: LAURA lattice, SIMBA S02 bunch, tracker, scan and screen.
+"""CLARA S02 to screen forward model for the GPSR examples: LAURA lattice, SIMBA S02 bunch, tracker, scan and screen.
 
-Needs the optional packages LAURA and ``laura-lattices`` (the CLARA lattice) and a SIMBA openPMD bunch at the entrance of S02
-(``CLA-S02-SIM-APER-01.openpmd.hdf5``). Nothing of the machine is stored in this repository.
+Shared by the transverse and longitudinal studies, which differ in the screen they image and the part of the line they repeat for each
+scan row (see ``Line`` and ``Study``). Needs the optional packages LAURA and ``laura-lattices`` (the CLARA lattice) and a SIMBA openPMD bunch
+at the entrance of S02 (``CLA-S02-SIM-APER-01.openpmd.hdf5``). Nothing of the machine is stored in this repository.
 
 The line is split at the entrance of S07: everything upstream (S02 to L04, with the VBC on) is tracked once per setting-independent pass,
-and only S07 up to the screen ``CLA-S07-DIA-SCR-04`` is repeated for each row of the scan table.
+and only S07 (and the SP3 spectrometer, if the study uses it) up to the screen is repeated for each row of the scan table.
 """
 
 from __future__ import annotations
@@ -27,14 +28,44 @@ from slipstream.tracking.native.linac import resolve_wakes
 
 SECTIONS = ["S02", "L02", "S03", "L03", "S04", "L4H", "S05", "VBC", "S06", "L04", "S07"]
 VBC_ANGLE_RAD = 0.1254  # reproduces the SIMBA bunch length after the VBC (64.7 um rms) without CSR
-TDC_TILT_RAD = math.pi / 2  # the LAURA export carries no deflection plane; this example streaks vertically
-SCREEN_NAME = "CLA-S07-DIA-SCR-04"
-SCAN_QUADS = ("CLA-S07-MAG-QUAD-08", "CLA-S07-MAG-QUAD-09")
+TDC_TILT_RAD = math.pi / 2  # the LAURA export carries no deflection plane; the examples streak vertically
 TDC_NAME = "CLA-S07-DIA-TDC-01"
 
 
-def build_specs(workdir: str | Path, vbc_angle_rad: float = VBC_ANGLE_RAD, rf_kicks: int | None = None, csr_drift_dz: float | None = None):
-    """``(upstream, scan)`` element lists from LAURA's elegant export: S02 to L04, and S07 up to and including the screen.
+@dataclass(frozen=True)
+class Line:
+    """The part of CLARA repeated for each scan row: S07 from its start up to ``s07_last``, then (if ``branch`` is given) a spectrometer
+    section up to ``screen``. ``dipole`` of the branch gets ``dipole_angle_rad`` (LAURA exports the angle from the magnet current, which
+    the lattice does not hold); a drift of the surveyed length joins ``s07_last`` to the dipole."""
+
+    screen: str
+    s07_last: str
+    branch: str | None = None
+    dipole: str | None = None
+    dipole_angle_rad: float = 0.0
+    quads_off: tuple[str, ...] = ()  # quadrupoles whose strength is set to zero
+
+
+@dataclass(frozen=True)
+class Study:
+    """One reconstruction study: the line and screen, the quadrupoles scanned and the settings (pairs of ``k1``, 1/m^2) of the scan and of
+    the held-out check, the TDC voltage of the 'on' rows and the screen."""
+
+    name: str
+    line: Line
+    scan_quads: tuple[str, str]
+    quad_pairs: tuple[tuple[float, float], ...]
+    heldout: tuple[tuple[float, float], ...]
+    tdc_voltage_V: float = 3.0e6
+    pixels: int = 96
+    pixel_size_m: float | tuple[float, float] = 3e-5  # one size, or (horizontal, vertical)
+    psf_sigma_px: float = 1.0
+
+
+def build_specs(workdir: str | Path, line: Line, vbc_angle_rad: float = VBC_ANGLE_RAD, rf_kicks: int | None = None,
+                csr_drift_dz: float | None = None):
+    """``(upstream, scan)`` element lists from LAURA's elegant export: S02 to L04, and ``line`` (S07, and the branch if any) up to and
+    including the screen.
 
     LAURA writes its wake tables into the working directory, so this runs inside ``workdir``. Dipole radiation is switched off, the
     elegant edge model 3 is mapped to the supported first-order edge (1), the TDC deflects vertically and ``rf_kicks`` (if given) replaces
@@ -49,22 +80,36 @@ def build_specs(workdir: str | Path, vbc_angle_rad: float = VBC_ANGLE_RAD, rf_ki
     cwd = os.getcwd()
     os.chdir(workdir)
     try:
-        lattice = LAURA(lattice=clara, layout={"default_layout": "X", "layouts": {"X": SECTIONS}})
+        sections = SECTIONS + ([line.branch] if line.branch else [])
+        lattice = LAURA(lattice=clara, layout={"default_layout": "X", "layouts": {"X": sections}})
         vbc = lattice.sections["VBC"]
         for i, sign in zip((1, 2, 3, 4), (1, -1, -1, 1)):
             vbc.elements[f"CLA-VBC-MAG-DIP-0{i}"].magnetic.angle = sign * vbc_angle_rad
+        feed = ""
+        if line.branch:
+            dipole = lattice.sections[line.branch].elements[line.dipole]
+            dipole.magnetic.angle = line.dipole_angle_rad
+            last = lattice.sections["S07"].elements[line.s07_last].physical
+            gap = (dipole.physical.middle.z - dipole.magnetic.length / 2) - (last.middle.z + last.length / 2)
+            feed = f"{line.branch}_feed: drift, l = {gap:.6f}\n"
         text = ""
-        for name in SECTIONS:
+        for name in sections:
             text += SectionLatticeTranslator.from_section(lattice.sections[name]).to_elegant() + "\n"
-        s07_line = re.search(r"^S07: LINE = \((.*?)\)\s*$", text.replace("&\n", ""), re.MULTILINE | re.DOTALL).group(1)
-        tokens = [t.strip() for t in s07_line.split(",")]
-        tokens = tokens[: tokens.index(SCREEN_NAME) + 1]
-        text += f"UP: LINE=({','.join(SECTIONS[:-1])},{tokens[0]})\nSCAN: LINE=({','.join(tokens)})\n"
-        lte = workdir / "clara_s02_s07.lte"
+        text += feed
+
+        def tokens(section, last):
+            body = re.search(rf"^{section}: LINE = \((.*?)\)\s*$", text.replace("&\n", ""), re.MULTILINE | re.DOTALL).group(1)
+            names = [t.strip() for t in body.split(",")]
+            return names[: names.index(last) + 1]
+
+        s07 = tokens("S07", line.s07_last)
+        scan = s07 + ([f"{line.branch}_feed"] + tokens(line.branch, line.screen) if line.branch else [])
+        text += f"UP: LINE=({','.join(SECTIONS[:-1])},{s07[0]})\nSCAN: LINE=({','.join(scan)})\n"
+        lte = workdir / "clara_lattice.lte"
         lte.write_text(text)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            up, scan = (resolve_wakes(parse_elegant_lattice(lte, root), workdir) for root in ("UP", "SCAN"))
+            up, down = (resolve_wakes(parse_elegant_lattice(lte, root), workdir) for root in ("UP", "SCAN"))
     finally:
         os.chdir(cwd)
 
@@ -73,13 +118,15 @@ def build_specs(workdir: str | Path, vbc_angle_rad: float = VBC_ANGLE_RAD, rf_ki
             return replace(spec, synch_rad=False, isr=False, edge1_effects=1, edge2_effects=1)
         if spec.kind == "tdc":
             return replace(spec, tilt=TDC_TILT_RAD)
+        if spec.kind == "quad" and spec.name in line.quads_off:
+            return replace(spec, k1=0.0)
         if spec.kind == "rf" and rf_kicks:
             return replace(spec, n_kicks=rf_kicks)
         if spec.kind == "drift" and csr_drift_dz and spec.csr_drift_rho_m is not None:
             return replace(spec, csr_drift_dz=csr_drift_dz)
         return spec
 
-    return [adjust(s) for s in up], [adjust(s) for s in scan]
+    return [adjust(s) for s in up], [adjust(s) for s in down]
 
 
 def load_bunch(path: str | Path, n: int | None = None, seed: int = 0, dtype=torch.float64):
@@ -101,8 +148,9 @@ def load_bunch(path: str | Path, n: int | None = None, seed: int = 0, dtype=torc
 
 @dataclass
 class Machine:
-    """Everything the fit and the truth share: lattice, S02 energy and charge, fiducial arrival time, TDC phase and screen."""
+    """Everything the fit and the truth share: study, lattice, S02 energy and charge, fiducial arrival time, TDC phase and screen."""
 
+    study: Study
     up_specs: list
     scan_specs: list
     energy_eV: float
@@ -126,12 +174,11 @@ class Machine:
         return up, down
 
 
-def make_machine(bunch_path, workdir, device: str, dtype=torch.float64, n_reference: int = 4096, rf_kicks: int | None = None,
-                 pixels: int = 96, pixel_size_m: float = 3e-5, psf_sigma_px: float = 1.0, vbc_angle_rad: float = VBC_ANGLE_RAD,
-                 csr_drift_dz: float | None = None):
+def make_machine(bunch_path, workdir, study: Study, device: str, dtype=torch.float64, n_reference: int = 4096,
+                 rf_kicks: int | None = None, vbc_angle_rad: float = VBC_ANGLE_RAD, csr_drift_dz: float | None = None):
     """Lattice, fiducial reference and screen for a bunch file. The fiducial time (where the RF phases are referred to), the wake window
     and the TDC zero crossing are fixed once from ``n_reference`` particles of the true bunch, as an operator would set them."""
-    up_specs, scan_specs = build_specs(workdir, vbc_angle_rad, rf_kicks, csr_drift_dz)
+    up_specs, scan_specs = build_specs(workdir, study.line, vbc_angle_rad, rf_kicks, csr_drift_dz)
     ref, energy, charge = load_bunch(bunch_path, n_reference, seed=1, dtype=dtype)
     ref = ref.to(device)
     kw = dict(device=device, dtype=dtype, compile=False, always_change_p0=False)
@@ -141,26 +188,28 @@ def make_machine(bunch_path, workdir, device: str, dtype=torch.float64, n_refere
     tau_s = ref[:, 4] / C_LIGHT
     span = float(tau_s.max() - tau_s.min())
     window = (float(tau_s.min()) - span, float(tau_s.max()) + span)
-    machine = Machine(up_specs, scan_specs, energy, charge, fiducial, window, 0.0, 0.0, None, device, dtype)
+    machine = Machine(study, up_specs, scan_specs, energy, charge, fiducial, window, 0.0, 0.0, None, device, dtype)
     up, _ = machine.trackers(csr=False)
     out, e_out = up.track(ref)
     machine.s07_energy_eV = float(e_out)
     omega = 2.0 * math.pi * next(s.frequency_Hz for s in scan_specs if s.kind == "tdc")
     machine.tdc_phase_rad = -omega * float(out[:, 4].mean()) / C_LIGHT  # zero crossing at the centre of the bunch
-    machine.screen = Screen(shape=(pixels, pixels), pixel_size=pixel_size_m, psf_sigma_px=psf_sigma_px, axes=(0, 2))
+    machine.screen = Screen(shape=(study.pixels, study.pixels), pixel_size=study.pixel_size_m, psf_sigma_px=study.psf_sigma_px,
+                            axes=(0, 2))
     return machine
 
 
 class ClaraForward(torch.nn.Module):
-    """GPSR lattice for the whole line: S02 bunch to images on SCR-04 at each row of ``(k1 Q08, k1 Q09, V_TDC)``.
+    """GPSR lattice for the whole line: S02 bunch to images on the study's screen at each row of ``(k1 quad 1, k1 quad 2, V_TDC)``.
 
-    The upstream part (with or without CSR, as ``csr`` says) is tracked once, whatever the number of rows; the S07 part is a `ScanModel`."""
+    The upstream part (with or without CSR, as ``csr`` says) is tracked once, whatever the number of rows; the rest is a `ScanModel`."""
 
     def __init__(self, machine: Machine, csr: bool):
         super().__init__()
         self.machine = machine
         self.up, down = machine.trackers(csr)
-        self.scan = ScanModel(down, machine.screen, [(SCAN_QUADS[0], "k1"), (SCAN_QUADS[1], "k1"), (TDC_NAME, "voltage_V")])
+        quads = machine.study.scan_quads
+        self.scan = ScanModel(down, machine.screen, [(quads[0], "k1"), (quads[1], "k1"), (TDC_NAME, "voltage_V")])
 
     def set_lattice_parameters(self, x: torch.Tensor) -> None:
         self.scan.set_lattice_parameters(x)

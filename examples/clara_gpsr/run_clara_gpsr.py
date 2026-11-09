@@ -1,4 +1,4 @@
-"""GPSR reconstruction of the CLARA S02 bunch from SCR-04 images, with and without CSR in the model.
+"""GPSR reconstruction of the CLARA S02 bunch from screen images, with and without CSR in the model (shared by the studies).
 
 Four cases share one machine model (see clara_model.py) and one scan of S07 quadrupoles and the TDC:
 
@@ -10,8 +10,7 @@ Four cases share one machine model (see clara_model.py) and one scan of S07 quad
 The truth is a real (simulated) non-Gaussian SIMBA bunch at the entrance of S02. The fit is a GPSR generator, a neural network that maps
 fixed random samples to particles, trained with Adam on the image loss; each step is one CUDA graph on a GPU.
 
-    python run_clara_gpsr.py --bunch CLA-S02-SIM-APER-01.openpmd.hdf5 --workdir _cache --out results
-    python run_clara_gpsr.py --bunch ... --smoke        # a CPU check of the whole chain in a minute or two
+The studies (``transverse/run_transverse.py``, ``longitudinal/run_longitudinal.py``) define the line, screen and scan and call ``main``.
 """
 
 from __future__ import annotations
@@ -26,21 +25,18 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from clara_model import ClaraForward, load_bunch, make_machine
+from clara_model import ClaraForward, Study, load_bunch, make_machine
 from slipstream import ELECTRON_MASS_EV, GraphedStep
 from slipstream.reconstruction import from_cheetah
 
 CASES = {"A": (True, True), "B": (True, False), "C": (False, False), "D": (False, True)}  # (truth has CSR, fit has CSR)
-TDC_VOLTAGE_V = 3.0e6
-QUADS = [(a, b) for a in (-4.0, 0.0, 4.0, 8.0) for b in (-2.0, 2.6, 6.0)]  # (k1 Q08, k1 Q09) of the scan, 1/m^2
-HELDOUT = [(-5.0, 4.0), (-2.0, 0.0), (2.0, 4.5), (6.0, 1.0), (7.0, 5.0)]  # settings the fit never sees
 # Cheetah coordinate scales of the generator output: x, px, y, py, tau (m), (E - E0) / (p0 c)
 OUTPUT_SCALE = [2e-3, 1e-4, 2e-3, 1e-4, 1e-3, 1e-2]
 
 
-def scan_table(quad_pairs, device, dtype):
-    """Rows of (k1 Q08, k1 Q09, TDC voltage): every quadrupole pair without and with the TDC."""
-    rows = [[a, b, v] for a, b in quad_pairs for v in (0.0, TDC_VOLTAGE_V)]
+def scan_table(quad_pairs, tdc_voltage_V, device, dtype):
+    """Rows of (k1 quad 1, k1 quad 2, TDC voltage): every quadrupole pair without and with the TDC."""
+    rows = [[a, b, v] for a, b in quad_pairs for v in (0.0, tdc_voltage_V)]
     return torch.tensor(rows, dtype=dtype, device=device)
 
 
@@ -109,10 +105,7 @@ def run_case(name, machine, args, table, val_table, truth_images, val_truth, dev
         recon = from_cheetah(sample(generator), machine.energy_eV, ELECTRON_MASS_EV).to(dtype)
         forward.set_lattice_parameters(table)
         (fit_images,) = forward.track_and_observe(recon)
-        # held-out settings, predicted by the model the fit used and by the truth model on the reconstructed bunch
-        full = ClaraForward(machine, True)
-        full.set_lattice_parameters(val_table)
-        (val_full,) = full.track_and_observe(recon)
+        # held-out settings, predicted by the model the fit used (plot_results.py also tracks the reconstruction through the truth model)
         forward.set_lattice_parameters(val_table)
         (val_fit,) = forward.track_and_observe(recon)
         s07, _ = forward.up.track(recon)
@@ -126,8 +119,8 @@ def run_case(name, machine, args, table, val_table, truth_images, val_truth, dev
     return result
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(study: Study, doc: str | None = None):
+    ap = argparse.ArgumentParser(description=doc or __doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bunch", required=True, help="SIMBA openPMD bunch at the entrance of S02")
     ap.add_argument("--workdir", default="_cache", help="where LAURA writes the lattice and wake tables")
     ap.add_argument("--out", default="results")
@@ -153,15 +146,16 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    machine = make_machine(args.bunch, args.workdir, device, dtype, n_reference=4096, rf_kicks=args.rf_kicks,
+    machine = make_machine(args.bunch, args.workdir, study, device, dtype, n_reference=4096, rf_kicks=args.rf_kicks,
                            csr_drift_dz=args.csr_drift_dz)
     truth_beam, _, charge = load_bunch(args.bunch, args.n_particles, seed=11, dtype=dtype)
     full_truth, _, _ = load_bunch(args.bunch, None, seed=0, dtype=dtype)
     truth_beam = truth_beam.to(device)
-    print(f"machine ready: S02 {machine.energy_eV / 1e6:.2f} MeV, S07 {machine.s07_energy_eV / 1e6:.2f} MeV, {charge * 1e12:.0f} pC, "
-          f"device {device}, {args.n_particles} particles", flush=True)
+    print(f"{study.name}: S02 {machine.energy_eV / 1e6:.2f} MeV, S07 {machine.s07_energy_eV / 1e6:.2f} MeV, {charge * 1e12:.0f} pC, "
+          f"screen {study.line.screen}, device {device}, {args.n_particles} particles", flush=True)
 
-    table, val_table = scan_table(QUADS, device, dtype), scan_table(HELDOUT, device, dtype)
+    table = scan_table(study.quad_pairs, study.tdc_voltage_V, device, dtype)
+    val_table = scan_table(study.heldout, study.tdc_voltage_V, device, dtype)
     if args.smoke:
         table, val_table = table[:6], val_table[:2]
 
@@ -179,7 +173,9 @@ def main():
             (val_truth[csr],) = model.track_and_observe(truth_beam)
     print("measured images:", {("CSR" if k else "no CSR"): tuple(v.shape) for k, v in truth_images.items()}, flush=True)
 
-    results = {"truth_S02": beam_metrics(full_truth, machine.energy_eV)}
+    keys = ("n_particles", "iterations", "lr", "clip", "noise", "rf_kicks", "csr_drift_dz", "seed", "dtype")
+    results = {"study": study.name, "args": {k: getattr(args, k.replace("-", "_")) for k in keys},
+               "truth_S02": beam_metrics(full_truth, machine.energy_eV)}
     with torch.no_grad():
         for csr in sorted({CASES[c][0] for c in args.cases}):
             s07_truth, _ = ClaraForward(machine, csr).up.track(truth_beam)
@@ -208,7 +204,3 @@ def print_table(results):
     print("\nImages (relative RMS difference to the measured / held-out truth images)")
     for label, key in [("train img err", "image_error_train"), ("held-out err", "image_error_heldout")]:
         print(f"{label:16s}" + " " * 11 + "".join(f"{results[n][key]:11.3f}" for n in names))
-
-
-if __name__ == "__main__":
-    main()
