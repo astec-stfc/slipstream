@@ -51,6 +51,8 @@ Inside GPSR, hand a `ScanModel` to `GPSR(beam_generator, lattice)` in place of a
 
 To change the scan, `copy_` into the static table and call `step()` again: the graph reads it at replay. Set `x.requires_grad_(True)` and pass it among the parameters to fit scan or calibration constants. `GraphedStep` runs eagerly when the parameters are on the CPU, so the same code runs everywhere.
 
+A complete study, with CSR, a transverse deflecting cavity and a comparison of fits with and without CSR in the model, is in [`examples/clara_gpsr`](../../examples/clara_gpsr/README.md).
+
 ### API reference
 
 ```python
