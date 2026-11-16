@@ -193,6 +193,23 @@ def _csr_chunked_pairwise_sum(
     return weighted_sum
 
 
+def _capture_cuda_graph(body, device: torch.device):
+    """Warm ``body`` up on a side stream on ``device`` (torch.cuda.graph's documented requirement;
+    also where a first torch.compile trace happens), then capture it. Returns ``(graph, output)``."""
+    warmup_stream = torch.cuda.Stream(device=device)
+    warmup_stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            body()
+    torch.cuda.current_stream(device).wait_stream(warmup_stream)
+    torch.cuda.synchronize(device)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = body()
+    return graph, out
+
+
 class _CSRPairwiseGraph:
     """CUDA graph for the exact CSR chunk loop at one fixed particle count."""
 
@@ -207,17 +224,7 @@ class _CSRPairwiseGraph:
                 _use_graph=False, _use_warp=False,
             )
 
-        warmup_stream = torch.cuda.Stream(device=device)
-        warmup_stream.wait_stream(torch.cuda.current_stream(device))
-        with torch.cuda.stream(warmup_stream):
-            for _ in range(3):
-                body()
-        torch.cuda.current_stream(device).wait_stream(warmup_stream)
-        torch.cuda.synchronize(device)
-
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph):
-            self._weighted_sum = body()
+        self._graph, self._weighted_sum = _capture_cuda_graph(body, device)
 
     def run(
         self, tau_m: torch.Tensor, score: torch.Tensor, softening_m: torch.Tensor,
@@ -288,19 +295,7 @@ class _KDEWindowedGraph:
         def body():
             return _kde_windowed_scalar_charge(self._tau, self._charge, self._bandwidth, n, w, compile_chunks)
 
-        # Warm up on a side stream first (torch.cuda.graph's documented
-        # requirement); also where a first torch.compile trace happens.
-        warmup_stream = torch.cuda.Stream()
-        warmup_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(warmup_stream):
-            for _ in range(3):
-                body()
-        torch.cuda.current_stream().wait_stream(warmup_stream)
-        torch.cuda.synchronize()
-
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph):
-            self._density, self._density_deriv = body()
+        self._graph, (self._density, self._density_deriv) = _capture_cuda_graph(body, device)
 
     def run(
         self, tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, bandwidth_m: torch.Tensor,
@@ -768,17 +763,7 @@ class _LSCFastGraph:
             dlambda_dtau = _gather_linear(dlambda_dtau_grid, bin_idx, interp_w, valid)
             return (_Z0_OHM / (4.0 * math.pi * (self._energy / self._mc2) ** 2)) * form_factor * C_LIGHT * dlambda_dtau
 
-        warmup_stream = torch.cuda.Stream()
-        warmup_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(warmup_stream):
-            for _ in range(3):
-                body()
-        torch.cuda.current_stream().wait_stream(warmup_stream)
-        torch.cuda.synchronize()
-
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph):
-            self._e_field_per_length = body()
+        self._graph, self._e_field_per_length = _capture_cuda_graph(body, device)
 
     def run(
         self, tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float,
@@ -914,16 +899,7 @@ class _CSRFastGraph:
         def body():
             return _csr_fast_field(self._tau, self._charge, n_bins, smooth_passes, sg_halfwidth, softening_m, self._slip)
 
-        stream = torch.cuda.Stream(device=device)
-        stream.wait_stream(torch.cuda.current_stream(device))
-        with torch.cuda.stream(stream):
-            for _ in range(3):
-                body()
-        torch.cuda.current_stream(device).wait_stream(stream)
-        torch.cuda.synchronize(device)
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph):
-            self._field = body()
+        self._graph, self._field = _capture_cuda_graph(body, device)
 
     def run(self, tau_m, charge_per_particle_C, slippage_m=None):
         self._tau.copy_(tau_m)
