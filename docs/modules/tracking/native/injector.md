@@ -359,10 +359,13 @@ then far from the cathode (and in a rotated frame the mirror plane would be wron
 
 Quantise a 3D cell size onto the geometric ladder anchored at
 `current` (the previously chosen size, `None` on the first fit,
-where the ladder anchors at the ideal itself). Growth snaps UP to the
-next rung -- the box must keep covering the bunch -- shrink moves down
-only when comfortably clear of the rung below (one full step), the same
-hysteresis discipline as `_quantize_bucket_hysteresis`: a value
+where the ladder anchors at the ideal itself). Rungs are a factor
+`2**(1/16)` (about 4.4 %) apart. Growth snaps UP to the next covering
+rung -- the box must keep covering the bunch. `current` is kept while the
+ideal size is no more than two rungs below it (ideal / current greater
+than `2**(-1/8)`, about 0.917); shrink moves down only past that, onto the
+nearest rung that still covers the ideal. This is the same hysteresis
+discipline as `_quantize_bucket_hysteresis`: a value
 hovering at a boundary must not rebuild the Green's function every
 recompute. Cell sizes are `SpaceCharge3D` constructor arguments, so
 every rung change is a fresh solver (cached-`G_k` amortisation, see

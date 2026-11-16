@@ -9,8 +9,8 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
-from ... import ibs as ibs_module
 from ...constants import C_LIGHT, E_CHARGE_C, R_E_M
+from ...ibs import IBSGrowthRates, element_averaged_growth_rates
 from ...lattice.lattice import Lattice
 from ...lattice.optics import TransverseOptics
 from ...lattice.ramp import RampProfile, scaled_lattice, scaled_optics
@@ -409,7 +409,7 @@ class NativeTracker:
         self.ibs_particle_radius_m = ibs_particle_radius_m
         self._n_bunch = bunch_current_A * params.T0_s / E_CHARGE_C
         self._ibs_twiss_table = None
-        self._ibs_rates: ibs_module.IBSGrowthRates | None = None
+        self._ibs_rates: IBSGrowthRates | None = None
         if self.ibs:
             self._ibs_twiss_table, _, _ = periodic_twiss_table(specs, params.E0_eV, self.mc2_eV)
             self._tau_z_ibs_eff = torch.tensor(params.tau_z_s, dtype=dtype, device=self.device)
@@ -432,10 +432,10 @@ class NativeTracker:
             epsx_m=epsx_m, epsy_m=epsy_m, coulomb_log_value=self.ibs_coulomb_log,
         )
         if self.ibs_model == "bane":
-            self._ibs_rates = ibs_module.element_averaged_growth_rates(table, model="bane", **common)
+            self._ibs_rates = element_averaged_growth_rates(table, model="bane", **common)
         else:
             beta_rel = math.sqrt(1.0 - 1.0 / gamma**2)
-            self._ibs_rates = ibs_module.element_averaged_growth_rates(
+            self._ibs_rates = element_averaged_growth_rates(
                 table, model="bjorken-mtingwa", beta_rel=beta_rel,
                 particle_radius_m=self.ibs_particle_radius_m, **common,
             )

@@ -46,13 +46,12 @@ build/
 .aider*
 /.skills/
 /skills/
-AGENTS.md
-CLAUDE.md
 GEMINI.md
 .vscode/
 .idea/
 .vs/
 *.code-workspace
+graphify-out/
 
 # Local environment values and credentials; placeholder templates may be shared.
 .env
