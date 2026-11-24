@@ -187,6 +187,37 @@ Copy this into the pull request description.
 - [ ] AI assistance disclosed (tool, and which parts), if substantial
 ```
 
+## Releasing
+
+Releases are published to PyPI as `slipstream-accel` by
+`.github/workflows/publish.yml` using
+[trusted publishing](https://docs.pypi.org/trusted-publishers/), so no API
+token is stored. PyPI filenames are permanent: a version that has been uploaded
+can never be uploaded again, even after deletion.
+
+Version 1.1.0 was uploaded by hand, which created the PyPI project. Later
+releases use the workflow.
+
+One-time setup, by a maintainer of the PyPI project:
+
+1. On pypi.org, open the `slipstream-accel` project, then **Manage → Publishing**,
+   and add a GitHub trusted publisher: owner `astec-stfc`, repository
+   `slipstream`, workflow `publish.yml`, environment `pypi`.
+2. On GitHub, create the environment `pypi` under **Settings → Environments**.
+   Optionally add yourself as a required reviewer so each upload needs approval.
+
+For each release:
+
+1. Set `version` in `pyproject.toml` and merge the change to `main`.
+2. Publish a GitHub release whose tag is `v<version>` (for example `v1.1.1`).
+   The workflow refuses to publish if the tag and `pyproject.toml` disagree.
+3. To publish the current `main` without a new release, run **Actions →
+   Publish to PyPI → Run workflow** on `main`. This fails if that version is
+   already on PyPI, so bump `version` first.
+
+After the upload, check that `pip install slipstream-accel==<version>` works in
+a clean environment.
+
 ## Licence and conduct
 
 Slipstream is released under the [Apache License 2.0](LICENSE). By submitting a
