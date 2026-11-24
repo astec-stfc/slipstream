@@ -195,10 +195,13 @@ Releases are published to PyPI as `slipstream-accel` by
 token is stored. PyPI filenames are permanent: a version that has been uploaded
 can never be uploaded again, even after deletion.
 
-One-time setup, by a maintainer with a PyPI account:
+Version 1.1.0 was uploaded by hand, which created the PyPI project. Later
+releases use the workflow.
 
-1. On pypi.org, open **Your account → Publishing** and add a *pending
-   publisher* for project `slipstream-accel`: owner `astec-stfc`, repository
+One-time setup, by a maintainer of the PyPI project:
+
+1. On pypi.org, open the `slipstream-accel` project, then **Manage → Publishing**,
+   and add a GitHub trusted publisher: owner `astec-stfc`, repository
    `slipstream`, workflow `publish.yml`, environment `pypi`.
 2. On GitHub, create the environment `pypi` under **Settings → Environments**.
    Optionally add yourself as a required reviewer so each upload needs approval.
@@ -209,11 +212,11 @@ For each release:
 2. Publish a GitHub release whose tag is `v<version>` (for example `v1.1.1`).
    The workflow refuses to publish if the tag and `pyproject.toml` disagree.
 3. To publish the current `main` without a new release, run **Actions →
-   Publish to PyPI → Run workflow** on `main`.
+   Publish to PyPI → Run workflow** on `main`. This fails if that version is
+   already on PyPI, so bump `version` first.
 
-The first upload creates the PyPI project and turns the pending publisher into
-a normal one. Afterwards, check that `pip install slipstream-accel` works in a
-clean environment.
+After the upload, check that `pip install slipstream-accel==<version>` works in
+a clean environment.
 
 ## Licence and conduct
 
