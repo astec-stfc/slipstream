@@ -65,11 +65,13 @@ change is not obvious from the diff.
 
 ## Checks before you push
 
-CI runs these on Python 3.10, 3.12 and 3.13. Run them locally first:
+Every push runs the fast physics tests and the linter. Pull requests and manual
+runs also run the full suite on Python 3.10, 3.12 and 3.13. Run them locally first:
 
 ```bash
-python -m pytest                 # full test suite
-ruff check src tests             # lint
+python -m pytest -m "physics and not slow"   # fast physics tests, while developing
+python -m pytest                             # full test suite, before you push
+ruff check src tests                         # lint
 ```
 
 Optionally confirm the package still builds:
@@ -110,6 +112,12 @@ A pull request is merged only when CI is green.
   needs a test that exercises it.
 - Tests live in `tests/` as `test_*.py` and use `pytest`. Keep them fast and
   deterministic: seed random numbers and avoid network access.
+- Every test file has a tier, set in `tests/conftest.py`: `physics` (numbers
+  checked against closed forms or references), `workflow` (a specific use such
+  as LOCO or an example study) or `unit` (one function or interface). Add a new
+  file to `TIERS` there. Mark tests that take more than a few seconds with
+  `@pytest.mark.slow`. While developing, run the fast physics set:
+  `python -m pytest -m "physics and not slow"` (about a minute).
 - Tests that need CUDA must skip cleanly without it, as in
   `tests/test_collective_gradients.py`:
   `pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")`.

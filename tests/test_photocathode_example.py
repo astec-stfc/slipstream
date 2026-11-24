@@ -176,6 +176,7 @@ def test_scan_from_transmission_averages_over_the_laser_pulse(example):
     assert narrow == pytest.approx([100.0])  # never narrower than a bin
 
 
+@pytest.mark.slow
 def test_transmission_function_of_the_gun_is_zero_before_extraction_and_one_until_fall_back(example):
     pytest.importorskip("laura.laura")
     if example["CLARA"] is None:
@@ -223,6 +224,7 @@ def test_build_machine_applies_the_flatness_and_the_solenoid_placement_and_steer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA hardware required")
+@pytest.mark.slow
 def test_steering_centres_the_beam_on_the_bpm_and_screen_at_the_reference_phase_only(example, tmp_path):
     pytest.importorskip("laura.laura")
     if example["CLARA"] is None:

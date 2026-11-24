@@ -37,6 +37,12 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "physics: fast checks of the code's physics against closed forms and references (see tests/conftest.py)",
+    "workflow: a specific use of the code, such as LOCO, an example study or the beamline CLI",
+    "unit: one function or interface, such as a file format, importer or API",
+    "slow: takes more than a few seconds",
+]
 
 [tool.ruff]
 line-length = 120

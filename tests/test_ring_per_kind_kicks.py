@@ -42,6 +42,7 @@ def test_float64_reference_and_strength_copies_keep_the_split():
     assert [p.n_kicks for p in r.with_strengths(k1={"QF": k}).params] == counts
 
 
+@pytest.mark.slow
 def test_single_sextupole_kick_with_many_quad_kicks_is_accurate():
     fodo = [s for s in CELL if s.kind != "bend"]
     fodo[3] = ElementSpec("S", "sext", 0.1, k2=30.0)

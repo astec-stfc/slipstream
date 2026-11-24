@@ -48,6 +48,7 @@ def test_emission_steps_zero_keeps_dt_s_throughout(monkeypatch):
     assert (dt == 1e-12).all()
 
 
+@pytest.mark.slow
 def test_a_step_already_finer_than_the_window_is_kept(monkeypatch):
     inj = machine(monkeypatch, dt_adaptive=False, emission_steps=100)
     inj.dt_s = 1e-14
