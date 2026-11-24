@@ -45,10 +45,10 @@ optimised with gradients.
 Requires Python 3.10 or newer. The default install can run on CPU; no GPU,
 compiler, elegant or ASTRA executable is needed for a first run.
 
-The package is not yet on PyPI. Install it from GitHub:
+Install the released package from PyPI:
 
 ```bash
-python -m pip install "git+https://github.com/astec-stfc/slipstream.git"
+python -m pip install slipstream-accel
 ```
 
 From a checkout, install the package for local development with:
@@ -65,7 +65,7 @@ Optional features are installed as extras. For example, SDDS support and the
 Matplotlib figures for [ring outputs](docs/ring_outputs.md):
 
 ```bash
-python -m pip install -e ".[sdds,plot]"
+python -m pip install "slipstream-accel[sdds,plot]"
 ```
 
 ## Quick start
@@ -142,7 +142,7 @@ Slipstream falls back to its PyTorch implementation:
 python -m pip install \
   --index-url https://download.pytorch.org/whl/cu132 \
   --extra-index-url https://pypi.org/simple \
-  -e ".[cuda]"
+  "slipstream-accel[cuda]"
 ```
 
 `warp-lang` accelerates supported CUDA paths; it is not required for CPU
