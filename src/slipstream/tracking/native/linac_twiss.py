@@ -93,6 +93,14 @@ def _rf_forward_and_R(
     return R, energy_eV_new
 
 
+def _propagate_plane(beta: float, alpha: float, R: torch.Tensor) -> tuple[float, float]:
+    """``optics._propagate_twiss`` for a map that may change the geometric emittance: acceleration scales it by
+    ``det R = p0 / p1``, and Twiss parameters are defined against the emittance after the element."""
+    det = (R[0, 0] * R[1, 1] - R[0, 1] * R[1, 0]).item()
+    beta1, alpha1 = _propagate_twiss(beta, alpha, R)
+    return beta1 / det, alpha1 / det
+
+
 def linac_twiss_table(
     specs: list[ElementSpec], energy_eV: float, mc2_eV: float,
     beta_x0: float, alpha_x0: float, beta_y0: float, alpha_y0: float,
@@ -132,8 +140,11 @@ def linac_twiss_table(
             break
 
         spec = specs[i]
+        p_ratio = 1.0
         if spec.kind == "rf":
+            e_before = e_t
             R, e_t = _rf_forward_and_R(spec, e_t, mc2_t)
+            p_ratio = (torch.sqrt(e_t**2 - mc2_t**2) / torch.sqrt(e_before**2 - mc2_t**2)).item()
         else:
             nk = n_kicks_bend if spec.angle != 0.0 else n_kicks
             R = _element_R(
@@ -141,10 +152,11 @@ def linac_twiss_table(
                 e_t.item(), mc2_eV, nk, integration_order,
                 spec.hgap, spec.fint, spec.edge_order, spec.edge1_effects, spec.edge2_effects,
             )
-        bx, ax = _propagate_twiss(bx, ax, R[0:2, 0:2])
-        by, ay = _propagate_twiss(by, ay, R[2:4, 2:4])
-        dx = R[0:2, 0:2] @ dx + R[0:2, 5]
-        dy = R[2:4, 2:4] @ dy + R[2:4, 5]
+        bx, ax = _propagate_plane(bx, ax, R[0:2, 0:2])
+        by, ay = _propagate_plane(by, ay, R[2:4, 2:4])
+        # delta is relative to the local reference momentum, which an RF section raises by ``p_ratio``
+        dx = (R[0:2, 0:2] @ dx + R[0:2, 5]) * p_ratio
+        dy = (R[2:4, 2:4] @ dy + R[2:4, 5]) * p_ratio
         s += spec.length
 
     return LinacTwissTable(

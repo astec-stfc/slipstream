@@ -65,11 +65,13 @@ change is not obvious from the diff.
 
 ## Checks before you push
 
-CI runs these on Python 3.10, 3.12 and 3.13. Run them locally first:
+Every push runs the fast physics tests and the linter. Pull requests and manual
+runs also run the full suite on Python 3.10, 3.12 and 3.13. Run them locally first:
 
 ```bash
-python -m pytest                 # full test suite
-ruff check src tests             # lint
+python -m pytest -m "physics and not slow"   # fast physics tests, while developing
+python -m pytest                             # full test suite, before you push
+ruff check src tests                         # lint
 ```
 
 Optionally confirm the package still builds:
@@ -110,6 +112,12 @@ A pull request is merged only when CI is green.
   needs a test that exercises it.
 - Tests live in `tests/` as `test_*.py` and use `pytest`. Keep them fast and
   deterministic: seed random numbers and avoid network access.
+- Every test file has a tier, set in `tests/conftest.py`: `physics` (numbers
+  checked against closed forms or references), `workflow` (a specific use such
+  as LOCO or an example study) or `unit` (one function or interface). Add a new
+  file to `TIERS` there. Mark tests that take more than a few seconds with
+  `@pytest.mark.slow`. While developing, run the fast physics set:
+  `python -m pytest -m "physics and not slow"` (about a minute).
 - Tests that need CUDA must skip cleanly without it, as in
   `tests/test_collective_gradients.py`:
   `pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")`.
@@ -186,6 +194,37 @@ Copy this into the pull request description.
 - [ ] No generated results, secrets, caches or agent-local files committed
 - [ ] AI assistance disclosed (tool, and which parts), if substantial
 ```
+
+## Releasing
+
+Releases are published to PyPI as `slipstream-accel` by
+`.github/workflows/publish.yml` using
+[trusted publishing](https://docs.pypi.org/trusted-publishers/), so no API
+token is stored. PyPI filenames are permanent: a version that has been uploaded
+can never be uploaded again, even after deletion.
+
+Version 1.1.0 was uploaded by hand, which created the PyPI project. Later
+releases use the workflow.
+
+One-time setup, by a maintainer of the PyPI project:
+
+1. On pypi.org, open the `slipstream-accel` project, then **Manage → Publishing**,
+   and add a GitHub trusted publisher: owner `astec-stfc`, repository
+   `slipstream`, workflow `publish.yml`, environment `pypi`.
+2. On GitHub, create the environment `pypi` under **Settings → Environments**.
+   Optionally add yourself as a required reviewer so each upload needs approval.
+
+For each release:
+
+1. Set `version` in `pyproject.toml` and merge the change to `main`.
+2. Publish a GitHub release whose tag is `v<version>` (for example `v1.1.1`).
+   The workflow refuses to publish if the tag and `pyproject.toml` disagree.
+3. To publish the current `main` without a new release, run **Actions →
+   Publish to PyPI → Run workflow** on `main`. This fails if that version is
+   already on PyPI, so bump `version` first.
+
+After the upload, check that `pip install slipstream-accel==<version>` works in
+a clean environment.
 
 ## Licence and conduct
 

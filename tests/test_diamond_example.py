@@ -1,6 +1,10 @@
-"""Smoke run of the Diamond superperiod DA example on a tiny grid."""
+"""Smoke run of the Diamond superperiod DA example on a tiny grid.
+
+Slow (~70 s: full-ring autograd Jacobians), so skipped unless SLIPSTREAM_SLOW_TESTS=1.
+"""
 import json
 import math
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -10,6 +14,7 @@ import pytest
 EXAMPLE = Path(__file__).resolve().parents[1] / 'examples/diamond/nonlinear_optimisation.py'
 
 
+@pytest.mark.skipif(not os.environ.get('SLIPSTREAM_SLOW_TESTS'), reason='slow (~70 s); set SLIPSTREAM_SLOW_TESTS=1')
 @pytest.mark.skipif(not EXAMPLE.with_name('diamond.lte').is_file(), reason='Diamond lattice file not present')
 def test_diamond_example_superperiod_workflow(monkeypatch, tmp_path, capsys):
     example = runpy.run_path(str(EXAMPLE))

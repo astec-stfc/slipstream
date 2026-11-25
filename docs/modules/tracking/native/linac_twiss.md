@@ -9,6 +9,7 @@ Propagates nonperiodic linear Twiss/dispersion or extracts ensemble statistics f
 ### Limits and conventions
 
 - RF output canonical-to-slope Jacobians include the changed momentum scale.
+- Twiss parameters are defined against the geometric emittance after each element: `linac_twiss_table` divides beta and alpha by `det R` (`p0 / p1` across an RF section) and rescales dispersion and its slope by `p1 / p0`, so the table agrees row for row with `twiss_from_trajectory`.
 - Do not differentiate ensemble-mean reference recentering in a single-particle optics matrix.
 
 ### `Model and numerical conventions`
