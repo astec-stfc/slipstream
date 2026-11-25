@@ -8,6 +8,7 @@
 !/examples/**/*.in
 !/examples/**/*.yaml
 !/examples/**/*.yml
+!/examples/diamond2booster/MagRamp*.sdds
 
 # Python environments, caches, tests and builds.
 __pycache__/
