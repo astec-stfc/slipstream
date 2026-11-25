@@ -97,6 +97,7 @@ def test_octupole_tracking_and_symplectic_jacobian():
     torch.testing.assert_close(jac.T @ J @ jac, J, atol=1e-12, rtol=1e-12)
 
 
+@pytest.mark.slow
 def test_coupled_normal_modes_and_tracked_tunes():
     r = fodo(skew=.2)
     with pytest.raises(ValueError, match="coupled"):
@@ -161,6 +162,7 @@ def test_chromaticity_gradient_and_strength_ensemble():
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.slow
 def test_da_rectangular_geometry_and_linear_frequency_map():
     drift = RingMap([ElementSpec("D", "drift", 1)], 3e9, device="cpu")
     zero, one = torch.tensor(0., dtype=torch.float64), torch.tensor(1., dtype=torch.float64)

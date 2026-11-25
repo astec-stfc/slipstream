@@ -318,6 +318,7 @@ def test_orm_create_graph_gives_nonzero_k1_derivative(ring):
 
 # --- Phase 4: minimal noise-free K1 recovery ------------------------------
 
+@pytest.mark.slow
 def test_minimal_k1_loco_fit_recovers_injected_error(specs):
     """Fit two QF K1 errors to a noise-free synthetic ORM built from a
     'truth' ring with those same two errors injected -- Phase 4's own
@@ -446,6 +447,7 @@ def test_gains_only_synthetic_recovery(ring):
     assert x[n_bpm:] == pytest.approx(true_gy.numpy(), rel=1e-6)
 
 
+@pytest.mark.slow
 def test_k1_and_gains_identifiable_combination(specs):
     """K1 error(s) and BPM gain error(s) fit jointly, noise-free --
     Phase 5's own 'identifiable combination' gate. Corrector gains stay
@@ -566,6 +568,7 @@ def test_double_single_rejects_nonzero_misalignment_override(specs):
     ds_ring.with_strengths(dx={qf_name: 0.0}, tilt={qf_name: 0.0})  # zero override: a no-op, must not raise
 
 
+@pytest.mark.slow
 def test_coupled_tilt_and_k1_synthetic_recovery_with_rank_audit(specs):
     """Inject one quad roll (a real skew source) and one *different*
     quad's K1 error, fit both jointly from a noise-free coupled ORM --

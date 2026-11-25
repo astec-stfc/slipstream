@@ -14,6 +14,7 @@ from slipstream.analysis import nonlinear as nl
 from slipstream.tracking.native import ring_warp
 
 
+@pytest.mark.slow
 def test_mls_example_geometry_and_matched_optics():
     example = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'examples/nonlinear_optimisation.py'))
     specs = example['mls_specs']()

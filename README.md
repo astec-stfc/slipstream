@@ -1,15 +1,51 @@
 # Slipstream
 
+[![CI](https://github.com/astec-stfc/slipstream/actions/workflows/ci.yml/badge.svg)](https://github.com/astec-stfc/slipstream/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Native accelerator beam-dynamics and tracking tools built on PyTorch.
 
-Slipstream provides native ring, linac, and injector tracking. It reads
+Slipstream tracks particles through rings, linacs and photoinjectors,
+including the collective effects that matter for bright beams. It reads
 elegant `.lte` lattice files and ASTRA input/distribution files directly; it
-does not launch elegant or ASTRA.
+does not launch elegant or ASTRA. It runs on CPU, uses CUDA when available,
+and its trackers are differentiable, so beam parameters can be fitted or
+optimised with gradients.
+
+## What it does
+
+- **Rings.** `NativeTracker` integrates per-element transport every turn,
+  with RF, radiation damping and excitation, wakes, intrabeam scattering,
+  energy ramps and static errors. Frozen-energy analysis covers closed orbits,
+  chromaticity, tune footprints, amplitude detuning, dynamic aperture and
+  frequency maps. See [nonlinear dynamics](docs/nonlinear_dynamics.md) and
+  [RF-on ring studies](docs/ring6d.md).
+- **Linacs and beamlines.** `LinacTracker` follows one pass element by element
+  with inline RF, structure wakes, longitudinal space charge, coherent
+  synchrotron radiation (CSR), local bend radiation for electrons and a
+  transverse deflecting cavity. `BeamlineStudy` runs a complete study from a
+  YAML file or the command line.
+- **Injectors.** `Injector` follows ASTRA-style cathode emission through
+  cavities, solenoids, magnets and apertures, with cylindrical or 3D space
+  charge, cathode images, structure-wake kicks and optional binary-collision
+  intrabeam scattering. An optional `Photocathode` derives its emission from
+  laser energy, quantum efficiency (with the Schottky effect) and the
+  space-charge-limited surface field.
+- **Gradients.** Linac passes (including fast CSR and longitudinal space
+  charge), injector tracking (with checkpointing to bound memory) and ring
+  optics are differentiable. A differentiable screen and a CUDA-graph step
+  support gradient-based beam reconstruction; see
+  [`slipstream.reconstruction`](docs/modules/reconstruction.md).
+- **Inputs and outputs.** elegant `.lte`, ASTRA decks and distributions,
+  YAML machine files and HDF5 particle files, with optional SDDS and LAURA
+  support. See [file formats](docs/formats.md).
 
 ## Installation
 
 Requires Python 3.10 or newer. The default install can run on CPU; no GPU,
-compiler, elegant or ASTRA executable is needed for a first run:
+compiler, elegant or ASTRA executable is needed for a first run.
+
+Install the released package from PyPI:
 
 ```bash
 python -m pip install slipstream-accel
@@ -25,10 +61,11 @@ python -m pip install -e .
 and pytest. See [getting started](docs/getting_started.md) for virtual
 environments and common installation problems.
 
-Optional SDDS support is available with:
+Optional features are installed as extras. For example, SDDS support and the
+Matplotlib figures for [ring outputs](docs/ring_outputs.md):
 
 ```bash
-python -m pip install "slipstream-accel[sdds]"
+python -m pip install "slipstream-accel[sdds,plot]"
 ```
 
 ## Quick start
@@ -77,10 +114,18 @@ other switches. The [examples index](docs/examples/README.md) lists runnable
 starting points. The [documentation index](docs/README.md) links
 physics explanations, usage guides and the reference for every module.
 
-For frozen-energy ring maps, normal modes, loss locations, and spectral
-analysis, see [`docs/nonlinear_dynamics.md`](docs/nonlinear_dynamics.md).
-RF-on dynamic aperture, frequency maps, and sampled momentum acceptance are
-documented in [`docs/ring6d.md`](docs/ring6d.md).
+## Documentation map
+
+| I want to... | Start here |
+| --- | --- |
+| Install and run a first study | [getting started](docs/getting_started.md) |
+| Track a ring, linac or injector | [native tracking](docs/tracking_native.md) |
+| Choose CSR and other model switches | [model settings](docs/model_settings.md) |
+| Study ring nonlinear dynamics | [nonlinear dynamics](docs/nonlinear_dynamics.md), [RF-on ring studies](docs/ring6d.md) |
+| Produce ring tables and plots | [ring outputs](docs/ring_outputs.md) |
+| Fit or optimise with gradients | [beam reconstruction](docs/tracking_native.md#beam-reconstruction-with-a-differentiable-screen), [nonlinear optimisation](docs/nonlinear_optimisation.md) |
+| Add injector intrabeam scattering | [local binary collisions](docs/modules/tracking/native/injector_ibs.md) |
+| Check a convention or formula | [native physics reference](docs/native_reference.md) |
 
 ## Compilation and CUDA
 
@@ -100,22 +145,26 @@ python -m pip install \
   "slipstream-accel[cuda]"
 ```
 
-## Scope
+`warp-lang` accelerates supported CUDA paths; it is not required for CPU
+execution.
 
-For opt-in photocathode/injector intrabeam scattering, see
-[local binary collisions](docs/modules/tracking/native/injector_ibs.md).
-`InjectorIBSSettings` configures the collision cells, angular model, cutoff
-and seed independently of storage-ring IBS growth-rate models.
+## Status and roadmap
 
-- `NativeTracker` models ring transport and turn-by-turn effects.
-- `LinacTracker` models one-pass element-by-element transport.
-- `Injector` models ASTRA-style gun, cavity, solenoid, space-charge, and
-  aperture transport. An optional `Photocathode` derives its emission from
-  laser energy, quantum efficiency (with the Schottky effect) and the
-  space-charge-limited surface field.
-- `warp-lang` accelerates supported CUDA paths; it is not required for CPU
-  execution.
+Slipstream is at version 1.1. Known gaps, planned physics, validation work
+and performance items are tracked as
+[GitHub issues](https://github.com/astec-stfc/slipstream/issues). Items
+labelled `deferred` have no committed schedule and wait for a concrete use
+case; comment on one if you have it. Each physics model records the reference
+it was checked against in its [module page](docs/modules/README.md); a model
+described there as validated has been compared with an analytic limit or a
+reference code under the stated conditions only.
 
-Ring reference tables and plots are described in
-[`docs/ring_outputs.md`](docs/ring_outputs.md). Install the optional
-`slipstream-accel[plot]` extra to render the figures.
+## Contributing
+
+Bug reports, physics requests, documentation and code are welcome, including
+work written with AI assistance. Read [CONTRIBUTING.md](CONTRIBUTING.md) for
+the workflow, checks and code standards before opening a pull request.
+
+## Licence
+
+Slipstream is released under the [Apache License 2.0](LICENSE).
