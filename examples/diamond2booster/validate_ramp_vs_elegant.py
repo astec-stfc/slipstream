@@ -11,7 +11,7 @@ central energy, the energy and time centroids and the rms energy spread, bunch l
     python examples/diamond2booster/validate_ramp_vs_elegant.py --balanced-phase        # the same, RF phase V sin(phase) = U0 + dE/turn
     python examples/diamond2booster/validate_ramp_vs_elegant.py --start-ms 0 --duration-ms 100   # the whole ramp, ~183 000 turns
     python examples/diamond2booster/validate_ramp_vs_elegant.py --ramp examples/diamond2booster/MagRamp150.sdds
-    python examples/diamond2booster/validate_ramp_vs_elegant.py --integration-order 6     # sixth-order bends in both codes
+    python examples/diamond2booster/validate_ramp_vs_elegant.py --integration-order 4 --n-kicks-quad 1   # elegant's defaults
 
 ``--tag`` names a run of slipstream (several can be kept and shown together with ``--overlay``), so that two versions of the
 code can be compared with the same elegant result: run the script once per version.  elegant is run once and cached in
@@ -20,14 +20,18 @@ code can be compared with the same elegant result: run the script once per versi
 
 In the default window, 50 to 60 ms of the 100 MeV/c ramp (1.8 to 2.3 GeV), the radiation loss grows as E^4 from 66 to
 185 keV per turn, the RF voltage from 0.2 to 0.39 MV, and the ramp takes about 28 keV per turn.  The first tens of ms are
-nearly adiabatic and quiet.  A window of 10 ms is 18 300 turns, about an hour in slipstream on one core (290 elements and
-78 bends tracked in 4 kicks of fourth order) and a quarter of an hour in elegant.
+nearly adiabatic and quiet.  A window of 10 ms is 18 300 turns, a few hours in slipstream on one core (every magnet
+tracked in 4 slices of sixth order) and under an hour in elegant.
+
+Both codes get the same magnet integration (``--integration-order``, ``--n-kicks-bend``, ``--n-kicks-quad``).  elegant's
+default for KQUAD, one fourth-order slice, moves the tracked tunes of this lattice from 0.41 / 0.38 to 0.35 / 0.24.
 
 Three behaviours of elegant that the comparison has to respect (``write_ramp``, ``measure_time_excess`` and
 ``elegant_ramp_input``):
 
 * elegant's RF phase is measured from a nominal arrival time (the sum of the revolution times C / (beta c)), not from the
-  particle that is tracked, and its bend BD takes 2.4 ps per turn longer than C / (beta c) (0.028 mm of extra path each).
+  particle that is tracked, and with its default integration (order 4, 4 slices) its bend BD takes 2.4 ps per turn longer
+  than C / (beta c) (0.028 mm of extra path each); at the script's default (order 6) the excess is negligible.
   In elegant that is a frequency error of 4.4e-6, which moves the synchronous particle to an energy offset of
   2.4 ps / (alpha_c T0) = -8e-4.  slipstream measures the phase from the reference particle, an RF locked to the revolution,
   so the slip is measured (on the bare ring) and taken off elegant's phase column.  elegant ignores the frequency column.
@@ -63,7 +67,7 @@ HERE = Path(__file__).resolve().parent
 LATTICE = HERE / "lattice" / "booster.lte"
 OUTPUT = HERE / "output"
 PREFIX = ""  # file name prefix of the helper files of one run (set in main), so that runs can go in parallel
-BENDS = ""  # elegant commands that set the integration of the bends (set in main)
+INTEGRATION = ""  # elegant commands that set the integration of the magnets (set in main)
 ELEGANT_HOME = Path(os.environ.get("ELEGANT_HOME", r"C:\Program Files\APS\Elegant x64"))
 
 V_MIN_V, V_MAX_V, PHASE_DEG = 0.2e6, 2.0e6, 180.0  # V_MAX_V at the top of the ramp
@@ -155,8 +159,8 @@ def alter(name: str, item: str, value) -> str:
 
 
 def run_setup(beamline: str, p_central: float, extra: str = "") -> str:
-    """The head of every elegant input: lattice, beamline, momentum and the integration of the bends (``BENDS``)."""
-    return f'&run_setup lattice = "../lattice/booster.lte", use_beamline = "{beamline}", p_central = {p_central!r}{extra} &end\n{BENDS}'
+    """The head of every elegant input: lattice, beamline, momentum and the integration of the magnets (``INTEGRATION``)."""
+    return f'&run_setup lattice = "../lattice/booster.lte", use_beamline = "{beamline}", p_central = {p_central!r}{extra} &end\n{INTEGRATION}'
 
 
 def ramp_waveforms(ramp_file: str) -> str:
@@ -222,17 +226,18 @@ def load_elegant_bunch(path: Path) -> torch.Tensor:
     return torch.stack([torch.tensor(col["x"]), px, torch.tensor(col["y"]), py, torch.tensor(col["t"] * C_LIGHT), delta], dim=-1)
 
 
-def track_native(lattice, optics, ramp, bunch, n_passes, interval, seed, n_kicks_bend, integration_order) -> dict:
+def track_native(lattice, optics, ramp, bunch, n_passes, interval, seed, n_kicks_bend, n_kicks_quad, integration_order) -> dict:
     """NativeTracker over the whole ramp, recording the same statistics as the elegant watch point every ``interval`` turns."""
     specs = parse_elegant_lattice(LATTICE, root_name="boost")
     torch.set_num_threads(1)  # a few hundred small tensor operations per turn: threads only add overhead
-    tracker = NativeTracker(specs, lattice, optics=optics, ramp=ramp, device="cpu", dtype=torch.float64, n_kicks_bend=n_kicks_bend,
-                            integration_order=integration_order, generator=torch.Generator().manual_seed(seed))
+    tracker = NativeTracker(specs, lattice, optics=optics, ramp=ramp, device="cpu", dtype=torch.float64, n_kicks=n_kicks_quad,
+                            n_kicks_bend=n_kicks_bend, integration_order=integration_order, generator=torch.Generator().manual_seed(seed))
     state, rows = bunch.clone(), []
     start = time.time()
     for turn in range(0, n_passes, interval):
-        state, result = tracker.track(state, min(interval, n_passes - turn), sample_every=interval)
-        rows.append((turn + interval, result.E0_eV[-1], *statistics(state)))
+        done = min(interval, n_passes - turn)
+        state, result = tracker.track(state, done, sample_every=interval)
+        rows.append((turn + done, result.E0_eV[-1], *statistics(state)))
     print(f"  native: {n_passes} turns, {state.shape[0]} particles in {time.time() - start:.0f} s")
     return as_table(rows)
 
@@ -312,6 +317,8 @@ def report(ele: dict, variants: dict[str, dict], title: str, png: Path) -> None:
           "\nand size are relative differences):")
     print(f"{'':>18s} {'centroid delta':>15s} {'centroid t [ps]':>16s} {'rms delta':>10s} {'rms t':>8s} {'rms x':>8s}")
     for name, table in variants.items():
+        inside = table["Pass"] <= ele["Pass"][-1]  # elegant's last record can come before slipstream's last turn
+        table = {key: value[inside] for key, value in table.items()}
         d = {key: np.interp(table["Pass"], ele["Pass"], ele[key]) for key in ("Cdelta", "Ct", "Sdelta", "St", "Sx")}
         rms = lambda x: float(np.sqrt(np.mean(np.asarray(x) ** 2)))
         print(f"{('slipstream ' + name).strip():>18s} {rms(table['Cdelta'] - d['Cdelta']):15.2e} {rms(table['Ct'] - d['Ct']) * 1e12:16.1f} "
@@ -326,9 +333,12 @@ def main() -> None:
     parser.add_argument("--duration-ms", type=float, default=10.0, help="length of the window (the whole ramp: 100 from 0)")
     parser.add_argument("--balanced-phase", action="store_true",
                         help="RF phase table with V sin(phase) = U0 + dE/turn (a quiet bunch), not the machine's fixed 180 degrees")
-    parser.add_argument("--n-kicks-bend", type=int, default=4, help="kicks per bend, both codes (native: 1 gives NaN)")
-    parser.add_argument("--integration-order", type=int, default=4, choices=(4, 6),
-                        help="order of the bend integration in both codes (native: of every magnet)")
+    parser.add_argument("--n-kicks-bend", type=int, default=4,
+                        help="slices per bend, both codes (elegant N_SLICES, native n_kicks_bend; 1 loses the beam)")
+    parser.add_argument("--n-kicks-quad", type=int, default=4,
+                        help="slices per quadrupole and sextupole, both codes (elegant's own default is 1)")
+    parser.add_argument("--integration-order", type=int, default=6, choices=(4, 6),
+                        help="order of the magnet integration in both codes")
     parser.add_argument("--particles", type=int, default=500)
     parser.add_argument("--interval", type=int, default=200, help="turns between recorded points")
     parser.add_argument("--cores", type=int, default=1, help="elegant: MPI ranks for Pelegant (1: serial elegant)")
@@ -342,12 +352,14 @@ def main() -> None:
     OUTPUT.mkdir(exist_ok=True)
 
     tag = (f"{args.ramp.stem}_{args.start_ms:g}+{args.duration_ms:g}ms_{args.particles}p{'_bal' if args.balanced_phase else ''}"
-           f"_o{args.integration_order}k{args.n_kicks_bend}")
+           f"_o{args.integration_order}k{args.n_kicks_bend}q{args.n_kicks_quad}")
     ramp_path = OUTPUT / f"ramp_{tag}{args.tag}.sdds"
-    global PREFIX, BENDS
+    global PREFIX, INTEGRATION
     PREFIX = f"{tag}{args.tag}_"
-    BENDS = "".join(f'&alter_elements name = "*", type = CSBEND, item = {item}, value = {value} &end\n'
-                    for item, value in (("INTEGRATION_ORDER", args.integration_order), ("N_KICKS", args.n_kicks_bend)))
+    INTEGRATION = "".join(
+        f'&alter_elements name = "*", type = {kind}, item = {item}, value = {value} &end\n'
+        for kind, slices in (("CSBEND", args.n_kicks_bend), ("KQUAD", args.n_kicks_quad), ("KSEXT", args.n_kicks_quad))
+        for item, value in (("INTEGRATION_ORDER", args.integration_order), ("N_SLICES", slices)))
     window = (args.ramp, args.start_ms * 1e-3, args.duration_ms * 1e-3)
     info = write_ramp(ramp_path, *window)
     lattice, optics, par = injection_optics(info["p0"], info["f_rf_Hz"], ramp_path.name)
@@ -372,13 +384,14 @@ def main() -> None:
     if not args.report_only:
         bunch = load_elegant_bunch(bunch_file)
         nat = track_native(lattice, optics, RampProfile.from_sdds_file(ramp_path), bunch, n_passes, args.interval, args.seed, args.n_kicks_bend,
-                           args.integration_order)
+                           args.n_kicks_quad, args.integration_order)
         np.savez(OUTPUT / f"slipstream_{tag}{args.tag}.npz", **nat)
     ele = elegant_table(watch, excess_s)  # after the tracking, so that an elegant run still in progress can be waited for
     print(f"elegant transmission {ele['Transmission'].min():.4f} - {ele['Transmission'].max():.4f}")
     variants = {t: dict(np.load(OUTPUT / f"slipstream_{tag}{t}.npz")) for t in [*args.overlay, args.tag]}
     report(ele, variants, f"Diamond-II booster {args.ramp.stem}, {args.start_ms:g} to {args.start_ms + args.duration_ms:g} ms, "
-           f"{args.particles} particles, order {args.integration_order} bends", OUTPUT / f"compare_{tag}.png")
+           f"{args.particles} particles, order {args.integration_order}, {args.n_kicks_bend}/{args.n_kicks_quad} bend/quad slices",
+           OUTPUT / f"compare_{tag}.png")
 
 
 if __name__ == "__main__":
