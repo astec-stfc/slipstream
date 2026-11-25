@@ -23,8 +23,8 @@ TIERS = {
         csr_transient_drift distributions double_single generator_ellipse ibs injector_crest
         injector_emission_step injector_ibs injector_ibs_warp injector_screen injector_wake linac_setup
         linac_twiss magnet_fields multilayer_impedance native_bend_radiation native_drift_reference
-        native_errors native_fields native_gun photocathode ramp rfcw_wake_scaling ring_nonlinear ring_outputs
-        ring_per_kind_kicks ring_phase3 ring_physics sector_bend_ode space_charge_3d tdc wake_windows
+        native_errors native_fields native_gun photocathode ramp rfcw_wake_scaling ring_ibs_damping ring_nonlinear
+        ring_outputs ring_per_kind_kicks ring_phase3 ring_physics sector_bend_ode space_charge_3d tdc wake_windows
         wakefields_longrange wakefields_shortrange warp_collective_kernels
     """,
     "workflow": """

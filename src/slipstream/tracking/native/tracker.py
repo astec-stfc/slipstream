@@ -244,6 +244,8 @@ def _rf_and_damping(
     transverse_wake_x: TransverseWake | None = None, transverse_wake_y: TransverseWake | None = None,
     charge_per_particle_C: torch.Tensor | float = 0.0,
     skip_rf_kick: bool = False,
+    tau_z_noise_s: torch.Tensor | None = None,
+    tau_x_noise_s: torch.Tensor | None = None, tau_y_noise_s: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute rf and damping; see the module documentation for details."""
     tau_s = particles6[..., 4] / C_LIGHT
@@ -256,6 +258,7 @@ def _rf_and_damping(
         delta_kicked = delta_kicked - wake.voltage_at(tau_s, charge_per_particle_C) / E0_for_wake
     delta = damping_excitation(
         delta_kicked, params, tau_z_eff_s=tau_z_eff_s, sigma_delta0_eff=sigma_delta0_eff, noise=noise_delta,
+        tau_z_noise_s=tau_z_noise_s,
     )
     if optics is None:
         return torch.cat([particles6[..., :5], delta.unsqueeze(-1)], dim=-1)
@@ -268,11 +271,11 @@ def _rf_and_damping(
 
     px = transverse_damping_excitation(
         px_kicked, optics.tau_x_s, optics.epsx_m, optics.beta_x_m, optics.alpha_x, params.T0_s,
-        tau_eff_s=tau_x_eff_s, eps_eff_m=epsx_eff_m, noise=noise_xp,
+        tau_eff_s=tau_x_eff_s, eps_eff_m=epsx_eff_m, noise=noise_xp, tau_noise_s=tau_x_noise_s,
     )
     py = transverse_damping_excitation(
         py_kicked, optics.tau_y_s, optics.epsy_m, optics.beta_y_m, optics.alpha_y, params.T0_s,
-        tau_eff_s=tau_y_eff_s, eps_eff_m=epsy_eff_m, noise=noise_yp,
+        tau_eff_s=tau_y_eff_s, eps_eff_m=epsy_eff_m, noise=noise_yp, tau_noise_s=tau_y_noise_s,
     )
     return torch.cat([
         particles6[..., 0:1], px.unsqueeze(-1), particles6[..., 2:3], py.unsqueeze(-1),
@@ -294,6 +297,8 @@ def _step(
     transverse_wake_x: TransverseWake | None = None, transverse_wake_y: TransverseWake | None = None,
     charge_per_particle_C: torch.Tensor | float = 0.0,
     skip_rf_kick: bool = False,
+    tau_z_noise_s: torch.Tensor | None = None,
+    tau_x_noise_s: torch.Tensor | None = None, tau_y_noise_s: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute step; see the module documentation for details."""
     particles6, energy_eV = _apply_elements(particles6, params, energy_eV, mc2_eV)
@@ -306,6 +311,7 @@ def _step(
         epsx_eff_m=epsx_eff_m, epsy_eff_m=epsy_eff_m,
         wake=wake, transverse_wake_x=transverse_wake_x, transverse_wake_y=transverse_wake_y,
         charge_per_particle_C=charge_per_particle_C, skip_rf_kick=skip_rf_kick,
+        tau_z_noise_s=tau_z_noise_s, tau_x_noise_s=tau_x_noise_s, tau_y_noise_s=tau_y_noise_s,
     )
     return particles6, energy_eV
 
@@ -526,9 +532,9 @@ class NativeTracker:
         return state
 
     def _init_ramp_overrides(self, dtype: torch.dtype, device: torch.device) -> None:
-        names = ["Vrf_eff_V", "omega_rf_eff", "phi_s_eff", "E0_eff_eV", "tau_z_eff_s", "sigma_delta0_eff"]
+        names = ["Vrf_eff_V", "omega_rf_eff", "phi_s_eff", "E0_eff_eV", "tau_z_eff_s", "sigma_delta0_eff", "tau_z_noise_s"]
         if self.optics is not None:
-            names += ["tau_x_eff_s", "tau_y_eff_s", "epsx_eff_m", "epsy_eff_m"]
+            names += ["tau_x_eff_s", "tau_y_eff_s", "epsx_eff_m", "epsy_eff_m", "tau_x_noise_s", "tau_y_noise_s"]
         self._ramp_overrides = {name: torch.zeros((), dtype=dtype, device=device) for name in names}
 
     def _track_ramped(
@@ -569,12 +575,15 @@ class NativeTracker:
             ov["E0_eff_eV"].fill_(state.E0_eV)
             ov["tau_z_eff_s"].fill_(scaled.tau_z_s)
             ov["sigma_delta0_eff"].fill_(scaled.sigma_delta0)
+            ov["tau_z_noise_s"].fill_(scaled.tau_z_s)  # quantum excitation follows radiation only, never IBS-modified tau
             if self.optics is not None:
                 scaled_opt = scaled_optics(self.optics, ratio)
                 ov["tau_x_eff_s"].fill_(scaled_opt.tau_x_s)
                 ov["tau_y_eff_s"].fill_(scaled_opt.tau_y_s)
                 ov["epsx_eff_m"].fill_(scaled_opt.epsx_m)
                 ov["epsy_eff_m"].fill_(scaled_opt.epsy_m)
+                ov["tau_x_noise_s"].fill_(scaled_opt.tau_x_s)
+                ov["tau_y_noise_s"].fill_(scaled_opt.tau_y_s)
 
             if self.ibs:
                 if self._elapsed_turns % self.ibs_recompute_every == 0:
@@ -597,6 +606,7 @@ class NativeTracker:
                 wake=self.wake, transverse_wake_x=self.transverse_wake_x, transverse_wake_y=self.transverse_wake_y,
                 charge_per_particle_C=self._charge_per_particle_C,
                 skip_rf_kick=(self.rf == "per_element"),
+                tau_z_noise_s=ov["tau_z_noise_s"], tau_x_noise_s=ov.get("tau_x_noise_s"), tau_y_noise_s=ov.get("tau_y_noise_s"),
             )
 
             if self._elapsed_turns % sample_every == 0 or self._elapsed_turns == n_turns - 1:
