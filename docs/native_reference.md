@@ -94,6 +94,11 @@ uses inline cavities and has no ring-average radiation or IBS.
 
 The ring RF helper returns fractional energy increment
 `(Vrf/E0)*(sin(phi_s+omega_rf*tau_s)-sin(phi_s))`, with `tau_s=tau/c`.
+In a ramp the phase is the table's, not a balance of the loss: the kick is
+`(Vrf*sin(phase+omega_rf*tau_s)-U0)/E0`, with `U0` the energy loss per turn at
+the instantaneous energy (it scales as `E^4`), and the reference energy rises by the ramp
+(`delta` and the angles are rescaled to the new reference each turn). A table that holds
+the synchronous particle in place has `Vrf*sin(phase) = U0 + dE/turn`.
 The lumped tracker adds this directly to momentum delta, an ultrarelativistic
 small-kick approximation; it does not perform an exact low-beta conversion.
 Per-cavity RF instead adds the local energy gain to particle gamma and

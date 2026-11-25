@@ -19,13 +19,20 @@ def rf_kick(
     omega_rf: torch.Tensor | float | None = None,
     phi_s: torch.Tensor | float | None = None,
     E0_eV: torch.Tensor | float | None = None,
+    U0_eV: torch.Tensor | float | None = None,
 ) -> torch.Tensor:
-    """Return the fractional-energy kick from the main RF cavity."""
+    """Return the fractional-energy kick from the main RF cavity.
+
+    The kick is ``(V sin(phi + omega tau) - U0) / E0``.  With ``U0_eV`` omitted the radiation loss is ``V sin(phi_s)``, which
+    is how a fixed-energy ring balances it (``phi_s`` is derived from ``U0``).  A ramp's phase is a table value, not that
+    balance, so ramped tracking passes the energy loss per turn ``U0_eV`` itself."""
     Vrf_V = params.Vrf_V if Vrf_V is None else Vrf_V
     omega_rf = params.omega_rf if omega_rf is None else omega_rf
     phi_s = params.phi_s if phi_s is None else phi_s
     E0_eV = params.E0_eV if E0_eV is None else E0_eV
     phase = phi_s + omega_rf * tau
+    if U0_eV is not None:
+        return (Vrf_V * torch.sin(phase) - U0_eV) / E0_eV
     sin_phi_s = torch.sin(phi_s) if torch.is_tensor(phi_s) else math.sin(phi_s)
     return (Vrf_V / E0_eV) * (torch.sin(phase) - sin_phi_s)
 

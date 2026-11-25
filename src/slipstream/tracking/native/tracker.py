@@ -246,6 +246,7 @@ def _rf_and_damping(
     skip_rf_kick: bool = False,
     tau_z_noise_s: torch.Tensor | None = None,
     tau_x_noise_s: torch.Tensor | None = None, tau_y_noise_s: torch.Tensor | None = None,
+    U0_eff_eV: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute rf and damping; see the module documentation for details."""
     tau_s = particles6[..., 4] / C_LIGHT
@@ -253,7 +254,7 @@ def _rf_and_damping(
     if skip_rf_kick:
         delta_kicked = particles6[..., 5]
     else:
-        delta_kicked = particles6[..., 5] + rf_kick(tau_s, params, Vrf_eff_V, omega_rf_eff, phi_s_eff, E0_eff_eV)
+        delta_kicked = particles6[..., 5] + rf_kick(tau_s, params, Vrf_eff_V, omega_rf_eff, phi_s_eff, E0_eff_eV, U0_eff_eV)
     if wake is not None:
         delta_kicked = delta_kicked - wake.voltage_at(tau_s, charge_per_particle_C) / E0_for_wake
     delta = damping_excitation(
@@ -299,6 +300,7 @@ def _step(
     skip_rf_kick: bool = False,
     tau_z_noise_s: torch.Tensor | None = None,
     tau_x_noise_s: torch.Tensor | None = None, tau_y_noise_s: torch.Tensor | None = None,
+    U0_eff_eV: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute step; see the module documentation for details."""
     particles6, energy_eV = _apply_elements(particles6, params, energy_eV, mc2_eV)
@@ -311,7 +313,7 @@ def _step(
         epsx_eff_m=epsx_eff_m, epsy_eff_m=epsy_eff_m,
         wake=wake, transverse_wake_x=transverse_wake_x, transverse_wake_y=transverse_wake_y,
         charge_per_particle_C=charge_per_particle_C, skip_rf_kick=skip_rf_kick,
-        tau_z_noise_s=tau_z_noise_s, tau_x_noise_s=tau_x_noise_s, tau_y_noise_s=tau_y_noise_s,
+        tau_z_noise_s=tau_z_noise_s, tau_x_noise_s=tau_x_noise_s, tau_y_noise_s=tau_y_noise_s, U0_eff_eV=U0_eff_eV,
     )
     return particles6, energy_eV
 
@@ -532,7 +534,7 @@ class NativeTracker:
         return state
 
     def _init_ramp_overrides(self, dtype: torch.dtype, device: torch.device) -> None:
-        names = ["Vrf_eff_V", "omega_rf_eff", "phi_s_eff", "E0_eff_eV", "tau_z_eff_s", "sigma_delta0_eff", "tau_z_noise_s"]
+        names = ["Vrf_eff_V", "omega_rf_eff", "phi_s_eff", "E0_eff_eV", "tau_z_eff_s", "sigma_delta0_eff", "tau_z_noise_s", "U0_eff_eV"]
         if self.optics is not None:
             names += ["tau_x_eff_s", "tau_y_eff_s", "epsx_eff_m", "epsy_eff_m", "tau_x_noise_s", "tau_y_noise_s"]
         self._ramp_overrides = {name: torch.zeros((), dtype=dtype, device=device) for name in names}
@@ -576,6 +578,7 @@ class NativeTracker:
             ov["tau_z_eff_s"].fill_(scaled.tau_z_s)
             ov["sigma_delta0_eff"].fill_(scaled.sigma_delta0)
             ov["tau_z_noise_s"].fill_(scaled.tau_z_s)  # quantum excitation follows radiation only, never IBS-modified tau
+            ov["U0_eff_eV"].fill_(scaled.U0_eV)  # the RF replaces this loss; the ramp's phase is a table value, not its balance
             if self.optics is not None:
                 scaled_opt = scaled_optics(self.optics, ratio)
                 ov["tau_x_eff_s"].fill_(scaled_opt.tau_x_s)
@@ -607,6 +610,7 @@ class NativeTracker:
                 charge_per_particle_C=self._charge_per_particle_C,
                 skip_rf_kick=(self.rf == "per_element"),
                 tau_z_noise_s=ov["tau_z_noise_s"], tau_x_noise_s=ov.get("tau_x_noise_s"), tau_y_noise_s=ov.get("tau_y_noise_s"),
+                U0_eff_eV=ov["U0_eff_eV"],
             )
 
             if self._elapsed_turns % sample_every == 0 or self._elapsed_turns == n_turns - 1:
