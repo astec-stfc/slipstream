@@ -9,6 +9,10 @@ Implements local long-wavelength 1D LSC and steady-state 1D CSR momentum kicks. 
 ### Limits and conventions
 
 - LSC is a local model rather than elegant's full nonlocal LSCDRIFT implementation.
+- Without `pipe_radius_b_m` the LSC geometry factor is 1, which is not the free-space limit (the pipe formula with
+  `b = a`). For a Gaussian bunch on a straight drift the free-space on-axis kick is larger by about
+  `2 ln(gamma sigma_tau / a)`: 7 to 15 times in tests with `gamma sigma_tau / a` from 22 to 880
+  ([issue 54](https://github.com/astec-stfc/slipstream/issues/54)).
 - Pairwise CSR contains no entrance transient, shielding or drift propagation. The fixed-grid path adds an entrance transient
   (`slippage_m`), a closed-form drift model (`csr_drift_delta_kick_fast`) and a retarded-field drift kernel
   (`csr_drift_delta_kick_retarded`); shielding by a conducting pipe is not modelled (the shielding parameter
@@ -208,8 +212,9 @@ docs/tracking_native.md for the model choice, the frequency-domain
 cross-check and why a live-elegant comparison only agrees to order of
 magnitude, not tight rtol.
 
-Sign/normalization convention (`delta -= V(tau)/energy_eV`) matches
-`ShortRangeWake.voltage_at`'s. `compile_chunks` (default off,
+Sign convention: `E_z` is positive toward the head (decreasing `tau`) and
+`delta += E_z(tau) * length_m / energy_eV`, so the head gains energy and the
+tail loses it. `compile_chunks` (default off,
 forwarded to `_gaussian_kde_density_and_deriv`) trades some speed for
 memory at large N
 
