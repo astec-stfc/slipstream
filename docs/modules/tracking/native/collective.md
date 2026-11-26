@@ -261,6 +261,8 @@ The kernel is Plummer softened, defaulting to half the Silverman KDE
 bandwidth. The finite nearest-neighbor KDE window can bias sharp
 profiles; this estimator is not an exact continuum reference.
 No entrance transient, shielding, or drift propagation is included here.
+Its density smoothing leaves errors of several per cent on a Gaussian
+bunch: see [steady state against quadrature](#steady-state-csr-against-quadrature).
 
 ### `lsc_delta_kick_fast`
 
@@ -346,6 +348,42 @@ within 1%; the steady kernel alone is 18% off at half that angle). Below about t
 `LinacTracker(csr_transient=True)` sets it for every slice of every CSR dipole (fast kernels only), at the slice centre angle: the wake rises
 steeply over the first slippage length, and evaluating it at the end of each slice overestimates the loss of an 8-slice VBC dipole by 8%
 (0.991 of the retarded-field ideal with the centre rule against 1.077 with the end rule; elegant's own slicing is 1.087 at 8 slices and 1.010 at 64).
+
+### Steady-state CSR against quadrature
+
+One bend (`rho` = 4 m, 0.2 m, 190 MeV), 100 pC, a pencil beam with a
+Gaussian line density of 20 um rms length, placed at its quantiles so
+that there is no shot noise. The reference is the unshielded 1D
+steady-state wake by adaptive quadrature, with no grid or density
+estimate. Shape errors are rms, relative to the largest exact kick,
+within three rms lengths; the mean loss is relative to the closed form.
+
+| Estimator | Particles | rms shape | Mean loss |
+| --- | --- | --- | --- |
+| Grid, 64 bins | 200 000 | 1.7 % | -1.4 % |
+| Grid, 256 bins | 200 000 | 0.13 % | -0.10 % |
+| elegant, 100 bins | 200 000 | 3.0 % | +1.5 % |
+| elegant, 400 bins | 200 000 | 0.73 % | +0.50 % |
+| elegant, 1600 bins | 200 000 | 0.18 % | +0.14 % |
+| Pairwise (default) | 3000 | 7.3 % | -4.9 % |
+| Pairwise (default) | 30 000 | 4.8 % | -2.1 % |
+
+- The pairwise kernel (`fast_collective_effects=False`) is limited by
+  Silverman's bandwidth and its default softening of half that bandwidth.
+  At that softening it is the only estimator here with wrong signs away
+  from the zero crossings (0.8 % and 0.2 % of those particles). With
+  `softening_m=1e-12` (`csr_softening_m` on the tracker) the signs are
+  right and the rms shape error is 3.3 % and 1.3 %, while the mean stays
+  4.4 % and 1.8 % low.
+- elegant 2026.3.0 (`CSRCSBEND`, `STEADY_STATE=1`, `SG_HALFWIDTH=1`,
+  8 slices) converges at first order in the bin width. Its kick matches the
+  reference taken about 0.45 bins further toward the tail.
+- With a random bunch, shot noise adds to these errors and favours fewer
+  bins.
+
+`tests/test_csr_steady_reference.py` checks sign, shape and mean separately,
+and compares with elegant when it is installed. Entrance transients and
+drifts are not part of this comparison.
 
 ### `csr_drift_delta_kick_fast`, `csr_drift_delta_kick_retarded`
 
