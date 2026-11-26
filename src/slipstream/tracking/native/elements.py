@@ -58,35 +58,41 @@ def _canonical_drift(
     x: torch.Tensor, px: torch.Tensor, y: torch.Tensor, py: torch.Tensor, delta: torch.Tensor,
     ds: float, h: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return canonical drift coordinates and true 3D path length for fixed curvature."""
+    """Return canonical drift coordinates and the path excess (true 3D path length minus ``ds``) for fixed curvature."""
+    opd = 1 + delta
+    pt2 = torch.addcmul(px * px, py, py)
+    pz = torch.sqrt(opd * opd - pt2)
     if h == 0.0:
-        pz = torch.sqrt((1 + delta) ** 2 - px * px - py * py)
-        x_new = x + ds * px / pz
-        y_new = y + ds * py / pz
-        arc_length = ds * (1 + delta) / pz
-        return x_new, px, y_new, py, arc_length
+        slope = ds / pz
+        excess = slope * pt2 / (pz + opd)  # ds * opd / pz - ds
+        return torch.addcmul(x, slope, px), px, torch.addcmul(y, slope, py), py, excess
 
     c, s = math.cos(ds * h), math.sin(ds * h)
     c2, s2 = math.cos(ds * h / 2.0), math.sin(ds * h / 2.0)
-    pz = torch.sqrt((1 + delta) ** 2 - px * px - py * py)
+    ps = px * s
     px_new = px * c + pz * s  # f*sin(theta)
-    pz_theta = pz * c - px * s  # f*cos(theta)
+    pz_theta = pz * c - ps  # f*cos(theta)
     rho0 = 1.0 / h
     # tan(theta) - tan(phi) = sin(ds*h) / (cos(theta)*cos(phi)) -- ds*h a
     # fixed Python float (exact), not a subtraction of two near-equal values.
-    factor = (rho0 + x) * s / pz_theta
+    reach = rho0 + x
+    factor = reach * s / pz_theta
     y_new = y + py * factor
     g_minus_1 = 2.0 * s2 * (px * c2 + pz * s2) / pz_theta
-    x_new = x + (rho0 + x) * g_minus_1
-    arc_length = factor * (1 + delta)  # physical path length, not the momentum-normalized factor
-    return x_new, px_new, y_new, py, arc_length
+    x_new = x + reach * g_minus_1
+    # The physical path length is factor * opd (not the momentum-normalized factor). Its excess over ds is formed from
+    # gap = opd - pz_theta, written without a difference of nearly equal numbers.
+    gap = torch.add(pt2 / (pz + opd), pz, alpha=2.0 * s2 * s2) + ps
+    excess = torch.addcmul(x * s + (s - ds * h) * rho0, factor, gap)
+    return x_new, px_new, y_new, py, excess
 
 
 def _exact_dipole_drift(
     x: torch.Tensor, px: torch.Tensor, y: torch.Tensor, py: torch.Tensor, delta: torch.Tensor,
     ds: float, h: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return cancellation-resistant coordinate increments for an exact sector dipole."""
+    """Return cancellation-resistant coordinate increments and the path excess (path length minus ``ds``) for an exact sector
+    dipole."""
     c, s = math.cos(ds * h), math.sin(ds * h)
     rho = 1.0 / h
     opd2 = (1 + delta) ** 2
@@ -100,8 +106,9 @@ def _exact_dipole_drift(
     w_new = (dd - px_new * px_new - py * py) / (pz_new + 1)
     dx = x * cm1 + rho * (w_new - w * c + px * s)
     # angle turned about the particle's own centre: phi + asin(px/ptt) - asin(px_new/ptt)
-    alpha = ds * h + torch.asin((px * pz_new - px_new * pz) / (opd2 - py * py))
-    return dx, dpx, py * rho * alpha, (1 + delta) * rho * alpha
+    turn = torch.asin((px * pz_new - px_new * pz) / (opd2 - py * py))
+    alpha = ds * h + turn
+    return dx, dpx, py * rho * alpha, ds * delta + (1 + delta) * rho * turn  # (1 + delta) * rho * alpha - ds
 
 
 def _multipole_kick(
@@ -168,11 +175,9 @@ def _corrector_kick(
         yp = yp + dv
         x = x + xp0 * length
 
-    beta0 = (energy_eV * energy_eV - mc2_eV * mc2_eV) ** 0.5 / energy_eV
-    beta = _beta_of(delta, energy_eV, mc2_eV)
     pz_slope = torch.sqrt(1 + xp0 * xp0 + yp0 * yp0)  # 1/cos(entrance angle), for a slope-space arc length
-    arc_length = length * pz_slope
-    tau = tau + (arc_length / beta - length / beta0)
+    excess = length * (xp0 * xp0 + yp0 * yp0) / (pz_slope + 1)  # length * pz_slope - length
+    tau = tau + _delay(excess, length, delta, energy_eV, mc2_eV)
     px, py = _canonical_from_slopes(xp, yp, delta)
     return torch.stack([x, px, y, py, tau, delta], dim=-1)
 
@@ -264,6 +269,20 @@ def _beta_of(delta: torch.Tensor, energy_eV: float | torch.Tensor, mc2_eV: float
     return p / E
 
 
+def _delay(
+    excess: torch.Tensor, ds: float, delta: torch.Tensor, energy_eV: float | torch.Tensor, mc2_eV: float | torch.Tensor,
+) -> torch.Tensor:
+    """Change of ``tau`` over a path of length ``ds + excess``: ``(ds + excess) / beta - ds / beta0``, with ``beta0`` at the
+    reference energy ``energy_eV`` and ``beta`` at momentum ``(1 + delta)`` times the reference. Written as
+    ``excess / beta + ds * (1/beta - 1/beta0)`` with neither term a difference of nearly equal numbers, which float32 would lose."""
+    u0 = mc2_eV / (energy_eV * energy_eV - mc2_eV * mc2_eV) ** 0.5  # m c / p0
+    opd = 1 + delta
+    u2 = (u0 / opd) ** 2
+    inv_beta = (1 + u2) ** 0.5
+    lag = u2 * delta * (opd + 1) / (inv_beta + (1 + u0 * u0) ** 0.5)  # 1/beta0 - 1/beta
+    return excess * inv_beta - ds * lag
+
+
 def _match_energy_to_centroid(
     state6: torch.Tensor, energy_eV: torch.Tensor, mc2_eV: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -303,11 +322,8 @@ def _rf_one_sub_kick(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute rf one sub kick; see the module documentation for details."""
     def _drift_half(x, px, y, py, tau, delta, e_eV):
-        beta_ref = (e_eV * e_eV - mc2_eV * mc2_eV) ** 0.5 / e_eV
-        beta = _beta_of(delta, e_eV, mc2_eV)
-        x, px, y, py, arc_length = _canonical_drift(x, px, y, py, delta, half, 0.0)
-        tau = tau + (arc_length / beta - half / beta_ref)
-        return x, px, y, py, tau
+        x, px, y, py, excess = _canonical_drift(x, px, y, py, delta, half, 0.0)
+        return x, px, y, py, tau + _delay(excess, half, delta, e_eV, mc2_eV)
 
     is_srs = body_focus_model == "srs"
 
@@ -431,9 +447,8 @@ def _tdc_kick(
     x, px, y, py, tau, delta = state6.unbind(-1)
 
     def drift(x, px, y, py, tau):
-        beta = _beta_of(delta, energy_eV, mc2_eV)
-        x, px, y, py, arc_length = _canonical_drift(x, px, y, py, delta, half, 0.0)
-        return x, px, y, py, tau + (arc_length / beta - half / beta0)
+        x, px, y, py, excess = _canonical_drift(x, px, y, py, delta, half, 0.0)
+        return x, px, y, py, tau + _delay(excess, half, delta, energy_eV, mc2_eV)
 
     if half > 0.0:
         x, px, y, py, tau = drift(x, px, y, py, tau)
@@ -516,8 +531,6 @@ def track_element(
         return state6
     x, px, y, py, tau, delta = state6.unbind(-1)
     h = angle / length if angle != 0.0 else 0.0
-    beta0 = (energy_eV * energy_eV - mc2_eV * mc2_eV) ** 0.5 / energy_eV
-    beta = _beta_of(delta, energy_eV, mc2_eV)  # delta is constant through an element (no energy loss modeled here)
     drift_frac, kick_frac_table = {
         4: (_DRIFT_FRAC4, _KICK_FRAC4), 6: (_DRIFT_FRAC6, _KICK_FRAC6), 8: (_DRIFT_FRAC8, _KICK_FRAC8),
     }[integration_order]
@@ -542,25 +555,28 @@ def track_element(
             (length / n_kicks * df, length / n_kicks * kf) for _ in range(n_kicks)
             for df, kf in zip(drift_frac, kick_frac_table)
         ]
+        excess = 0.0
         for dl, kl in steps:
-            ix, ipx, iy, arc_length = _exact_dipole_drift(x, px, y, py, delta, dl, h)
+            ix, ipx, iy, step_excess = _exact_dipole_drift(x, px, y, py, delta, dl, h)
             x, y, px = x + ix, y + iy, px + ipx
-            tau = tau + (arc_length / beta - dl / beta0)
+            excess = excess + step_excess
             if kl != 0.0:
                 dpx, dpy = _multipole_kick_increments(x, y, k1, k2, kl, h, dipole=not exact_dipole, k3=k3, multipoles=multipoles, skew_multipoles=skew_multipoles)
                 px, py = px + dpx, py + dpy
     elif no_multipole and h == 0.0:
         # Pure drift -- exact at any slice count, so skip the kick loop.
-        x, px, y, py, arc_length = _canonical_drift(x, px, y, py, delta, length, h)
-        tau = tau + (arc_length / beta - length / beta0)
+        x, px, y, py, excess = _canonical_drift(x, px, y, py, delta, length, h)
     else:
         ds = length / n_kicks
+        excess = 0.0
         for _ in range(n_kicks):
             for df, kf in zip(drift_frac, kick_frac_table):
-                x, px, y, py, arc_length = _canonical_drift(x, px, y, py, delta, ds * df, h)
-                tau = tau + (arc_length / beta - ds * df / beta0)
+                x, px, y, py, step_excess = _canonical_drift(x, px, y, py, delta, ds * df, h)
+                excess = excess + step_excess
                 if kf != 0.0:
                     px, py = _multipole_kick(x, px, y, py, k1, k2, ds * kf, h, k3=k3, multipoles=multipoles, skew_multipoles=skew_multipoles)
+    # delta is constant through a magnet (no energy loss modeled here) and the steps add up to ``length``
+    tau = tau + _delay(excess, length, delta, energy_eV, mc2_eV)
 
     if h != 0.0 and edge2_effects:
         x, px, y, py = _edge_kick(x, px, y, py, delta, h, e2, hgap, fint, edge_order, 1, k1)

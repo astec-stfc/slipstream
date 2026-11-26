@@ -22,7 +22,7 @@ Each scan setting tracks the whole bunch, so the collective forces act at the tr
 
 - One screen, at the end of the line, and an `(n, 6)` bunch per call (no batched beams); axes are two of the six state columns, with no rotation of the image.
 - The image has the dtype of the tracker (float64 by default); GPSR's targets are float32, so cast where they meet.
-- Float32 gradients through CSR are rough (see [native tracking](../tracking_native.md)); choose particle count, bins and smoothing for gradient stability.
+- In a test chicane, float32 gradients through CSR stayed within 1 % of float64 with 128 CSR bins for 16384 to 131072 particles, and needed 64 bins for 4096 (see [native tracking](../tracking_native.md#gradients-through-a-linac-pass)).
 - Checked against GPSR 0.3.0 and Cheetah 0.8.4 on the CPU only (an optional test, skipped when they are not installed).
 - `GraphedStep` inherits the capture limits of `LinacTracker` (no `csr_drift_model="retarded"`, wakes need `with_wake_windows`).
 

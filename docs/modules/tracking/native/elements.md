@@ -67,13 +67,14 @@ naive `3*len(drift_frac)` raw fragments into
 
 ### `_canonical_drift`
 
-Return `(x,px,y,py,arc_length)` after a canonical drift over fixed reference length `ds` and curvature `h`. In a straight drift, `pz=sqrt((1+delta)**2-px**2-py**2)`, `x+=ds*px/pz`, `y+=ds*py/pz`, and `arc_length=ds*(1+delta)/pz`. In a sector bend, preserve the cancellation-resistant sine/cosine identities. Its auxiliary factor gives `arc_length=factor*(1+delta)`: using factor alone changes time of flight.
+Return `(x,px,y,py,excess)` after a canonical drift over fixed reference length `ds` and curvature `h`, where `excess` is the physical path length minus `ds`. In a straight drift, `pz=sqrt((1+delta)**2-px**2-py**2)`, `x+=ds*px/pz`, `y+=ds*py/pz`, and `excess=ds*(px**2+py**2)/(pz*(pz+1+delta))`. In a sector bend, preserve the cancellation-resistant sine/cosine identities. Its auxiliary factor gives the path length `factor*(1+delta)` (using factor alone changes time of flight), and the excess is formed as `factor*gap + x*sin(ds*h) + (sin(ds*h)-ds*h)/h` with `gap = 1+delta-pz_theta` written as a sum of small terms, never as `factor*(1+delta) - ds`: see [`_delay`](#_delay).
 
 ### `_exact_dipole_drift`
 
 Exact map of a pure sector dipole whose field matches the reference
 curvature `h` (Forest's exact sector bend, as in PTC/Bmad), over
-reference length `ds` -- the `exact_dipole=True` alternative to
+reference length `ds`, returning the coordinate changes and the path
+length minus `ds` (see [`_delay`](#_delay)) -- the `exact_dipole=True` alternative to
 `_canonical_drift` + the dipole part of `_multipole_kick`. Same
 Hamiltonian, different splitting (the kicks then carry only K1/K2).
 
@@ -85,6 +86,25 @@ on-momentum particle is an exact fixed point. With elegant's splitting
 `px` instead swings by ~`h*ds` every sub-step (0.014 rad on
 br14_simple vs a 1e-4 betatron signal) and float32 rounding of that
 swing dominated the tracking noise
+
+### `_delay`
+
+Change of `tau` over a path of length `ds + excess`:
+`excess/beta + ds*(1/beta - 1/beta0)`, equal to `(ds+excess)/beta - ds/beta0`.
+The second form subtracts two nearly equal lengths. Float32 then loses the
+change of `tau` in a drift or quadrupole altogether, with errors up to
+3e-8 m per element ([issue 59](https://github.com/astec-stfc/slipstream/issues/59)).
+Here `excess` comes from the drift maps without such a difference, and the
+velocity slip is `1/beta - 1/beta0 = -u^2 delta (2+delta) / (1/beta + 1/beta0)`
+with `u = mc / (p0 (1+delta))`. Magnets sum the excess over their steps and
+add the delay once. The drift and quadrupole, bend, exact-dipole, corrector,
+RF half-drift and deflecting-cavity paths all use it.
+
+At 150 MeV the float32 error of the change of `tau` is below 3e-12 m rms
+for the straight elements tested and below 5e-11 m for bends and RF
+(`tests/test_float32_transport.py`); storing `tau` itself in float32 costs
+about 8e-13 m for a 30 um bunch. Float64 results changed only at round-off
+(at most 4e-16 m in `tau` per element and 2e-15 m through the test chicane).
 
 ### `_multipole_kick_increments`
 
@@ -444,11 +464,11 @@ order-4-derived order-6 for the same n_kicks (verified empirically).
 
 ### `_canonical_drift`
 
-Return `(x,px,y,py,arc_length)` after a canonical drift over fixed reference length `ds` and curvature `h`. In a straight drift, `pz=sqrt((1+delta)**2-px**2-py**2)`, `x+=ds*px/pz`, `y+=ds*py/pz`, and `arc_length=ds*(1+delta)/pz`. In a sector bend, preserve the cancellation-resistant sine/cosine identities. Its auxiliary factor gives `arc_length=factor*(1+delta)`: using factor alone changes time of flight.
+Return `(x,px,y,py,excess)` after a canonical drift over fixed reference length `ds` and curvature `h`, where `excess` is the physical path length minus `ds`. In a straight drift, `pz=sqrt((1+delta)**2-px**2-py**2)`, `x+=ds*px/pz`, `y+=ds*py/pz`, and `excess=ds*(px**2+py**2)/(pz*(pz+1+delta))`. In a sector bend, preserve the cancellation-resistant sine/cosine identities. Its auxiliary factor gives the path length `factor*(1+delta)` (using factor alone changes time of flight), and the excess is formed as `factor*gap + x*sin(ds*h) + (sin(ds*h)-ds*h)/h` with `gap = 1+delta-pz_theta` written as a sum of small terms, never as `factor*(1+delta) - ds`: see [`_delay`](#_delay).
 
 ### `_canonical_drift`
 
-Return `(x,px,y,py,arc_length)` after a canonical drift over fixed reference length `ds` and curvature `h`. In a straight drift, `pz=sqrt((1+delta)**2-px**2-py**2)`, `x+=ds*px/pz`, `y+=ds*py/pz`, and `arc_length=ds*(1+delta)/pz`. In a sector bend, preserve the cancellation-resistant sine/cosine identities. Its auxiliary factor gives `arc_length=factor*(1+delta)`: using factor alone changes time of flight.
+Return `(x,px,y,py,excess)` after a canonical drift over fixed reference length `ds` and curvature `h`, where `excess` is the physical path length minus `ds`. In a straight drift, `pz=sqrt((1+delta)**2-px**2-py**2)`, `x+=ds*px/pz`, `y+=ds*py/pz`, and `excess=ds*(px**2+py**2)/(pz*(pz+1+delta))`. In a sector bend, preserve the cancellation-resistant sine/cosine identities. Its auxiliary factor gives the path length `factor*(1+delta)` (using factor alone changes time of flight), and the excess is formed as `factor*gap + x*sin(ds*h) + (sin(ds*h)-ds*h)/h` with `gap = 1+delta-pz_theta` written as a sum of small terms, never as `factor*(1+delta) - ds`: see [`_delay`](#_delay).
 
 ### `_corrector_kick`
 
