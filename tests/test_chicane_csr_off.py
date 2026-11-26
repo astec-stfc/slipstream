@@ -91,7 +91,8 @@ def _elegant_exe() -> Path | None:
     return exe if exe.exists() else None
 
 
-def _elegant(exe: Path, work: Path, particles: np.ndarray, lsc_bins: int, deck=_lattice) -> np.ndarray:
+def _elegant(exe: Path, work: Path, particles: np.ndarray, lsc_bins: int, deck=_lattice, change_p0: int = 1) -> np.ndarray:
+    """Track ``particles`` (at ``ENERGY_EV``) through the beamline ``CHICANE`` of the lattice that ``deck`` writes."""
     work.mkdir()
     deck(work / "chicane.lte", lsc_bins)
     p = torch.tensor(particles, dtype=torch.float64)
@@ -109,7 +110,7 @@ def _elegant(exe: Path, work: Path, particles: np.ndarray, lsc_bins: int, deck=_
         file.setParameterValue("pCentral", P0)
         file.save(str(work / "in.sdds"))
     (work / "run.ele").write_text(
-        f'&run_setup lattice="chicane.lte", use_beamline=CHICANE, p_central={P0!r}, always_change_p0=1,'
+        f'&run_setup lattice="chicane.lte", use_beamline=CHICANE, p_central={P0!r}, always_change_p0={change_p0},'
         ' default_order=3, output="out.sdds" &end\n&run_control n_steps=1 &end\n'
         '&sdds_beam input="in.sdds", input_type="elegant" &end\n&track &end\n'
     )

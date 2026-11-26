@@ -53,7 +53,7 @@ independent bend and downstream-drift choices, not one global CSR model:
 
 | Bend model | `fast_collective_effects` | `csr_transient` | Notes |
 | --- | --- | --- | --- |
-| Pairwise steady state | `false` (default) | `false` (default) | KDE/pairwise calculation; quadratic work in particle count |
+| Pairwise steady state | `false` (default) | `false` (default) | KDE/pairwise calculation; quadratic work in particle count; several per cent smoothing error ([comparison](modules/tracking/native/collective.md#steady-state-csr-against-quadrature)) |
 | Binned steady state | `true` | `false` | Fixed-bin convolution; uses bend `BINS` and `SG_HALFWIDTH` |
 | Binned entrance transient | `true` | `true` | Wake evaluated at accumulated bend angle; `N_SLICES` resolves its evolution |
 
