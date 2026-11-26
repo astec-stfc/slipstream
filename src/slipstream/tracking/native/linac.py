@@ -1,5 +1,5 @@
 """Tracks one canonical single pass through ordered elements, with inline RF and optional structure
-wakes, local LSC and CSR. See docs/modules/tracking/native/linac.md."""
+wakes, LSC and CSR. See docs/modules/tracking/native/linac.md."""
 from __future__ import annotations
 
 import functools
@@ -54,10 +54,11 @@ def _apply_collective_kick(
     pipe_radius_b_m: float | None, lsc_radius_factor: float,
     csr_softening_m: float | None, compile_collective_chunks: bool = False,
     fast_collective_effects: bool = False, csr_bins: int = 256, csr_sg_halfwidth: int = 1,
-    csr_slippage_m: float | None = None,
+    csr_slippage_m: float | None = None, lsc_grid: tuple = (),
 ) -> torch.Tensor:
     """Compute apply collective kick; see the module documentation for details."""
     delta = particles6[..., 5]
+    grid = dict(lsc_grid)  # empty: each LSC kernel's own defaults
     eff_length_m = csr_length_m
     if csr and csr_rho_m != 0.0 and csr_drift_start_m is not None:
         sigma_z_m = particles6[..., 4].std()
@@ -68,7 +69,7 @@ def _apply_collective_kick(
         lsc_kick, csr_kick = _lsc_csr_delta_kicks(
             particles6[..., 4], charge_per_particle_C, particles6[..., 0], particles6[..., 2],
             energy_eV, mc2_eV, length_m, csr_rho_m, eff_length_m,
-            pipe_radius_b_m, lsc_radius_factor, csr_softening_m, compile_collective_chunks,
+            pipe_radius_b_m, lsc_radius_factor, csr_softening_m, compile_collective_chunks, **grid,
         )
         delta = delta + lsc_kick + csr_kick
         return torch.cat([particles6[..., :5], delta.unsqueeze(-1)], dim=-1)
@@ -77,13 +78,13 @@ def _apply_collective_kick(
         if fast_collective_effects:
             lsc_kick = lsc_delta_kick_fast(
                 particles6[..., 4], charge_per_particle_C, particles6[..., 0], particles6[..., 2],
-                energy_eV, mc2_eV, length_m, pipe_radius_b_m=pipe_radius_b_m, radius_factor=lsc_radius_factor,
+                energy_eV, mc2_eV, length_m, pipe_radius_b_m=pipe_radius_b_m, radius_factor=lsc_radius_factor, **grid,
             )
         else:
             lsc_kick = lsc_delta_kick(
                 particles6[..., 4], charge_per_particle_C, particles6[..., 0], particles6[..., 2],
                 energy_eV, mc2_eV, length_m, pipe_radius_b_m=pipe_radius_b_m, radius_factor=lsc_radius_factor,
-                compile_chunks=compile_collective_chunks,
+                compile_chunks=compile_collective_chunks, **grid,
             )
         delta = delta + lsc_kick
     if csr and csr_rho_m != 0.0:
@@ -125,7 +126,7 @@ def _maybe_collective_kick(
         particles6, energy_eV, mc2_eV, charge_per_particle_C, p.length,
         lsc, csr_active, csr_rho_m, csr_length_m, csr_drift_start_m,
         pipe_radius_b_m, lsc_radius_factor, csr_softening_m,
-        compile_collective_chunks, fast_collective_effects, p.csr_bins, p.csr_sg_halfwidth, csr_slippage_m,
+        compile_collective_chunks, fast_collective_effects, p.csr_bins, p.csr_sg_halfwidth, csr_slippage_m, p.lsc_grid,
     )
 
 
@@ -208,7 +209,7 @@ def _track_dipole_subcycled(
             particles6, energy_eV, mc2_eV, charge_per_particle_C, sub_length,
             lsc, csr_active, csr_rho_m, sub_length, None,
             pipe_radius_b_m, lsc_radius_factor, csr_softening_m,
-            compile_collective_chunks, fast_collective_effects, p.csr_bins, p.csr_sg_halfwidth,
+            compile_collective_chunks, fast_collective_effects, p.csr_bins, p.csr_sg_halfwidth, lsc_grid=p.lsc_grid,
         )
     return particles6 - p.offset
 
@@ -324,7 +325,17 @@ class LinacTracker:
         csr_transient: bool = False,
         csr_drift_model: str = "overtaking",
         generator: torch.Generator | None = None,
+        lsc_bins: int | None = None,
+        lsc_smooth_passes: int | None = None,
     ):
+        for name, value, minimum in (("lsc_bins", lsc_bins, 2), ("lsc_smooth_passes", lsc_smooth_passes, 0)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < minimum):
+                raise ValueError(f"{name} must be None or an integer of at least {minimum}")
+        lsc_grid = tuple((key, value) for key, value in (("n_bins", lsc_bins), ("smooth_passes", lsc_smooth_passes))
+                         if value is not None)
+        if lsc and lsc_grid and pipe_radius_b_m is not None and not fast_collective_effects:
+            raise ValueError("lsc_bins and lsc_smooth_passes with pipe_radius_b_m need fast_collective_effects=True "
+                             "(the pairwise pipe formula has no grid)")
         radiating = any(s.synch_rad or s.isr for s in specs)
         if radiating:
             if (compile or always_change_p0 or mc2_eV != ELECTRON_MASS_EV
@@ -366,6 +377,8 @@ class LinacTracker:
             change_p0_override=False if always_change_p0 else None,
             allow_local_radiation=True,
         )
+        if lsc_grid:
+            self._element_params = [p._replace(lsc_grid=lsc_grid) for p in self._element_params]
         if effective_specs and effective_specs[0].match_p0_at_entrance:
             self._element_params[0] = self._element_params[0]._replace(match_p0_at_entrance=True)
         for i, spec in enumerate(effective_specs):

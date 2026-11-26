@@ -95,6 +95,8 @@ def test_default_seed_and_reference_roundtrip(tmp_path):
     ({"tracker": {"device": "mps"}}, "device"),
     ({"tracker": {"integration_order": 2}}, "4, 6 or 8"),
     ({"reference": {"made_up": 2}}, "Unknown reference"),
+    ({"tracker": {"lsc_bins": 1}}, "tracker.lsc_bins is outside"),
+    ({"tracker": {"lsc_smooth_passes": -1}}, "tracker.lsc_smooth_passes is outside"),
     ({"bunch": {"source": "astra", "path": "deck.in", "injector": {"mesh": "beam"}}}, "adaptive or fixed"),
     ({"bunch": {"source": "astra", "path": "deck.in", "injector": {"mystery": 1}}}, "Unknown bunch.injector"),
 ])
@@ -282,6 +284,12 @@ def test_invalid_overrides_fail_before_tracking(tmp_path, overrides, match):
     path, _ = config(tmp_path)
     with pytest.raises(ValueError, match=match):
         BeamlineStudy.from_yaml(path, overrides=overrides)
+
+
+def test_lsc_grid_options_accept_null_and_zero_passes(tmp_path):
+    path, _ = config(tmp_path, tracker={"device": "cpu", "lsc": True, "lsc_bins": None, "lsc_smooth_passes": 0})
+    study = BeamlineStudy.from_yaml(path, overrides={"tracker.lsc_bins": 128})
+    assert dict(study._tracker._element_params[0].lsc_grid) == {"n_bins": 128, "smooth_passes": 0}
 
 
 def test_nested_overrides_create_optional_mapping(tmp_path):

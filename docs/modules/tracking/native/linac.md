@@ -4,14 +4,15 @@
 
 ## Physics
 
-Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, local LSC and CSR. By default the reference momentum follows the bunch centroid after elements. Ring equilibrium damping, excitation and IBS are not applied.
+Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, LSC and CSR. By default the reference momentum follows the bunch centroid after elements. Ring equilibrium damping, excitation and IBS are not applied.
 
 Opt-in [local dipole radiation](radiation.md) adds classical loss and Gaussian
 ISR for aligned pure dipoles with a fixed reference (`always_change_p0=False`).
 
 ### Limits and conventions
 
-- CSR requires CSR-enabled specs; `lsc=True` acts in finite-length elements.
+- CSR requires CSR-enabled specs; `lsc=True` acts in finite-length elements, once per element at its exit, in free space
+  unless `pipe_radius_b_m` is given ([model](collective.md#lsc_delta_kick)).
 - Fast collective grids and preceding-bend drift-tail approximations require convergence checks.
 - Misaligned bends retain a lumped exit collective kick instead of subcycling.
 - Changing a source reference energy must refresh energy-dependent bend offsets.
@@ -208,7 +209,7 @@ Construct `LinacTracker(specs, energy_eV, ..., bunch_charge_C=...)` and call `tr
 def resolve_wakes(specs: list[ElementSpec], base_dir: str | Path='.') -> list[ElementSpec]: ...
 class LinacTracker:
     ...
-    def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, n_kicks: int=1, n_kicks_bend: int=4, integration_order: int=4, compile: bool=False, compile_mode: str | None=None, always_change_p0: bool=True, errors: list[SampledError] | None=None, fiducial: FiducialReference | None=None, bunch_charge_C: float=0.0, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, lsc_radius_factor: float=1.7, csr_softening_m: float | None=None, compile_collective_chunks: bool | None=None, fast_collective_effects: bool=False, dipole_collective_subcycle: bool=False, csr_transient: bool=False, csr_drift_model: str='overtaking', generator: torch.Generator | None=None): ...
+    def __init__(self, specs: list[ElementSpec], energy_eV: float, mc2_eV: float=ELECTRON_MASS_EV, device: str | torch.device | None=None, dtype: torch.dtype=torch.float64, n_kicks: int=1, n_kicks_bend: int=4, integration_order: int=4, compile: bool=False, compile_mode: str | None=None, always_change_p0: bool=True, errors: list[SampledError] | None=None, fiducial: FiducialReference | None=None, bunch_charge_C: float=0.0, lsc: bool=False, csr: bool=False, pipe_radius_b_m: float | None=None, lsc_radius_factor: float=1.7, csr_softening_m: float | None=None, compile_collective_chunks: bool | None=None, fast_collective_effects: bool=False, dipole_collective_subcycle: bool=False, csr_transient: bool=False, csr_drift_model: str='overtaking', generator: torch.Generator | None=None, lsc_bins: int | None=None, lsc_smooth_passes: int | None=None): ...
     def track(self, particles6: torch.Tensor, return_trajectory: bool=False, reference_energy_eV: torch.Tensor | None=None) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def fiducialize(self, particles0: torch.Tensor) -> FiducialReference: ...
     def with_settings(self, k1: dict | None=None, k2: dict | None=None, kick_x: dict | None=None, kick_y: dict | None=None, voltage_V: dict | None=None, phase_rad: dict | None=None) -> LinacTracker: ...
@@ -300,6 +301,16 @@ applies to every element with nonzero length, matching real elegant's
 `pipe_radius_b_m`/`lsc_radius_factor`/`csr_softening_m` mirror
 `collective.lsc_delta_kick`/`collective.csr_steady_state_delta_kick`'s
 own parameters.
+
+`lsc_bins` (integer of at least 2) and `lsc_smooth_passes` (integer of at least 0) set the grid of the LSC model and
+its binomial `(1,2,1)/4` density smoothing. `None` (default) keeps each kernel's own: 2048 bins, with 512 passes for
+`fast_collective_effects=True` and a Gaussian of Silverman's bandwidth for `False`. An integer `lsc_smooth_passes`
+replaces either smoothing. Both apply to free space with either setting and to the pipe formula with
+`fast_collective_effects=True`; with `pipe_radius_b_m` and `False` there is no grid and construction raises
+`ValueError`. The smoothing limits the resolution, so vary these and the particle number to check convergence. The
+rms width of `p` passes is `sqrt(p / 2)` bins and the bins span the live bunch, so doubling `lsc_bins` at fixed passes
+halves the width in metres. See the [error table](collective.md#lsc_delta_kick_fast). The CSR grid is set separately
+(`ElementSpec.csr_bins`).
 
 `compile_collective_chunks` (default `None`) enables the compiled
 exact LSC/CSR chunk bodies on CUDA even when outer transport compilation

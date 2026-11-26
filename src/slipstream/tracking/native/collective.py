@@ -1,4 +1,4 @@
-"""Implements local long-wavelength 1D LSC and steady-state 1D CSR momentum kicks. See
+"""Implements 1D longitudinal space charge (free space, or the long-wavelength pipe formula) and 1D CSR momentum kicks. See
 docs/modules/tracking/native/collective.md."""
 from __future__ import annotations
 
@@ -395,6 +395,8 @@ def _lsc_csr_delta_kicks(
     radius_factor: float,
     softening_m: float | torch.Tensor | None,
     compile_chunks: bool,
+    n_bins: int | None = None,
+    smooth_passes: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute exact LSC and CSR together, sharing one KDE evaluation."""
     n = tau_m.shape[-1]
@@ -416,17 +418,16 @@ def _lsc_csr_delta_kicks(
         tau_m, charge_per_particle_C, h_m, compile_chunks=compile_chunks,
     )
 
-    sigma_x, sigma_y = x_m.std(), y_m.std()
-    a_m = torch.clamp(radius_factor * 0.5 * (sigma_x + sigma_y), min=tiny)
     if pipe_radius_b_m is None:
-        form_factor = torch.ones((), dtype=tau_m.dtype, device=tau_m.device)
+        lsc_kick = lsc_delta_kick(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV, lsc_length_m,
+                                  radius_factor=radius_factor, n_bins=n_bins, smooth_passes=smooth_passes)
     else:
-        b_over_a = pipe_radius_b_m / a_m
-        form_factor = 1.0 + 2.0 * torch.log(b_over_a)
-    e_field_per_length = (
-        _Z0_OHM / (4.0 * math.pi * (energy_eV / mc2_eV) ** 2)
-    ) * form_factor * C_LIGHT * density_deriv
-    lsc_kick = e_field_per_length * lsc_length_m / energy_eV  # E_z toward the head: the head gains energy
+        a_m = torch.clamp(radius_factor * 0.5 * (x_m.std() + y_m.std()), min=tiny)
+        form_factor = 1.0 + 2.0 * torch.log(pipe_radius_b_m / a_m)
+        e_field_per_length = (
+            _Z0_OHM / (4.0 * math.pi * (energy_eV / mc2_eV) ** 2)
+        ) * form_factor * C_LIGHT * density_deriv
+        lsc_kick = e_field_per_length * lsc_length_m / energy_eV  # E_z toward the head: the head gains energy
 
     if softening_m is None:
         softening = 0.5 * h_m
@@ -454,21 +455,32 @@ def lsc_delta_kick(
     pipe_radius_b_m: float | None = None,
     radius_factor: float = 1.7,
     compile_chunks: bool = False,
+    n_bins: int | None = None,
+    smooth_passes: int | None = None,
 ) -> torch.Tensor:
     """Compute lsc delta kick; see the module documentation for details."""
+    if pipe_radius_b_m is not None and (n_bins is not None or smooth_passes is not None):
+        raise ValueError("n_bins and smooth_passes are for the free-space kernel: the pipe formula here has no grid")
     n = tau_m.shape[-1]
     if n < 2 or length_m <= 0.0:
         return torch.zeros_like(tau_m)
+    if pipe_radius_b_m is None:  # free space: the same Gaussian-kernel density, with the exact field (a convolution on a grid)
+        if tau_m.ndim > 1:  # a batch of bunches: one grid each
+            charge = torch.as_tensor(charge_per_particle_C, dtype=tau_m.dtype, device=tau_m.device).broadcast_to(tau_m.shape)
+            return torch.stack([
+                lsc_delta_kick(t, q, x, y, energy_eV, mc2_eV, length_m, radius_factor=radius_factor, n_bins=n_bins,
+                               smooth_passes=smooth_passes)
+                for t, q, x, y in zip(tau_m, charge, x_m, y_m)
+            ])
+        grid = {} if n_bins is None else {"n_bins": n_bins}
+        return lsc_delta_kick_fast(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV, length_m,
+                                   radius_factor=radius_factor, smooth_passes=smooth_passes, **grid)
     # Clamped, not branched: torch.compile graph-breaks on a Python `if`
     # over a live tensor value.
     tiny = torch.finfo(tau_m.dtype).tiny ** 0.5
     sigma_x, sigma_y = x_m.std(), y_m.std()
     a_m = torch.clamp(radius_factor * 0.5 * (sigma_x + sigma_y), min=tiny)
-    if pipe_radius_b_m is None:
-        form_factor = torch.ones((), dtype=tau_m.dtype, device=tau_m.device)
-    else:
-        b_over_a = pipe_radius_b_m / a_m
-        form_factor = 1.0 + 2.0 * torch.log(b_over_a)
+    form_factor = 1.0 + 2.0 * torch.log(pipe_radius_b_m / a_m)
 
     h_m = torch.clamp(silverman_bandwidth_m(tau_m), min=tiny)
     _, dlambda_dtau = _gaussian_kde_density_and_deriv(tau_m, charge_per_particle_C, h_m, compile_chunks=compile_chunks)
@@ -690,7 +702,8 @@ _DENSE_SMOOTH_MIN_PASSES = 8
 _DENSE_SMOOTH_MAX_BINS = 4096
 
 
-@functools.lru_cache(maxsize=8)
+# Never evicted (here and for the two caches below): a CUDA graph holds the address of each tensor it read at capture.
+@functools.lru_cache(maxsize=None)
 def _dense_smoother(n: int, passes: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     """``T**passes`` for the zero-padded ``(1,2,1)/4`` smoother ``T``, built in float64 on first use. ``T`` is a Dirichlet tridiagonal
     Toeplitz matrix with eigenvectors ``sin(pi j k / (n + 1))`` and eigenvalues ``cos(pi k / (2 (n + 1)))**2``. Build it outside a
@@ -732,11 +745,78 @@ def _gather_linear(field: torch.Tensor, bin_idx: torch.Tensor, interp_w: torch.T
     return torch.where(valid, gathered, torch.zeros_like(gathered))
 
 
+@functools.lru_cache(maxsize=None)
+def _binomial_transfer(size: int, passes: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    """Fourier transfer function of ``passes`` ``(1,2,1)/4`` smoothing passes on a periodic grid of ``size`` bins. Never modify it."""
+    k = torch.arange(size // 2 + 1, dtype=torch.float64, device=device)
+    return (torch.cos(k * (math.pi / size)) ** (2 * passes)).to(dtype)
+
+
+@functools.lru_cache(maxsize=None)
+def _free_space_constants(nb: int, dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Bin offsets ``-nb .. nb`` (float64) and the squared wavenumbers (rad^2 per bin^2) of the ``2 nb`` transform. Never modify
+    them."""
+    offsets = torch.arange(-nb, nb + 1, dtype=torch.float64, device=device)
+    k_squared = (torch.arange(nb + 1, dtype=dtype, device=device) * (math.pi / nb)) ** 2
+    return offsets, k_squared
+
+
+def _free_space_lsc_field(
+    lam: torch.Tensor, dtau: torch.Tensor, radius_m: torch.Tensor, gamma: torch.Tensor,
+    smooth_passes: int | None, bandwidth_m: torch.Tensor | None,
+) -> torch.Tensor:
+    """On-axis longitudinal field (V/m, positive toward the head) on the grid of the line density ``lam``: a uniform cylinder of
+    radius ``radius_m`` in free space, with the density linear between bin centres. The density is smoothed by ``smooth_passes``
+    binomial passes or, when that is ``None``, by a Gaussian of rms ``bandwidth_m``; smoothing and the field are one FFT
+    convolution."""
+    nb = lam.shape[-1]
+    size = 2 * nb  # holds every bin offset -nb+1..nb-1 without wrap-around
+    offsets, k_squared = _free_space_constants(nb, lam.dtype, lam.device)
+    # A charged disk's field (sign(v) - v / sqrt(v^2 + a^2)) / (2 pi eps0 a^2) integrates twice in closed form. In beam radii,
+    # t = v / a with v the rest-frame distance, twice that second integral is asinh(t) + t exp(-|asinh(t)|); its second
+    # difference over the bin offsets is the field of one triangular (CIC-shaped) source bin. Float64: the differences cancel.
+    spacing = gamma * dtau  # bin width in the rest frame
+    t = offsets * (spacing / radius_m).to(torch.float64)
+    angle = torch.asinh(t)
+    kernel = torch.diff(angle + t * torch.exp(-angle.abs()), n=2).to(lam.dtype)  # element j: bin offset j - nb + 1
+    spectrum = torch.fft.rfft(lam, n=size) * torch.fft.rfft(kernel, n=size)
+    if smooth_passes is None:
+        spectrum = spectrum * torch.exp(-0.5 * k_squared * (bandwidth_m / dtau) ** 2)
+    else:
+        spectrum = spectrum * _binomial_transfer(size, smooth_passes, lam.dtype, lam.device)
+    field = torch.fft.irfft(spectrum, n=size)[nb - 1:2 * nb - 1]
+    # 1 / (4 pi eps0 spacing) from the kernel, and the rest-frame line density is lam / gamma.
+    return field / (4.0 * math.pi * EPS0_F_PER_M * spacing * gamma)
+
+
+def _lsc_fast_field(
+    tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, x_m: torch.Tensor, y_m: torch.Tensor,
+    energy_eV: torch.Tensor, mc2_eV: torch.Tensor, pipe_radius_b_m: float | None, radius_factor: float,
+    n_bins: int, smooth_passes: int | None,
+) -> torch.Tensor:
+    """``E_z`` (V/m, toward the head) of the fixed-grid LSC model at every particle: the free-space field without a pipe
+    radius, the long-wavelength pipe formula with one."""
+    tiny = torch.finfo(tau_m.dtype).tiny ** 0.5
+    sigma_x, sigma_y = x_m.std(), y_m.std()
+    a_m = torch.clamp(radius_factor * 0.5 * (sigma_x + sigma_y), min=tiny)
+    bin_idx, interp_w, valid, _, dtau, nb = _fixed_grid(tau_m, n_bins)
+    lam = _bin_line_density(charge_per_particle_C, bin_idx, interp_w, valid, nb, dtau)
+    gamma = energy_eV / mc2_eV
+    if pipe_radius_b_m is None:
+        bandwidth_m = None if smooth_passes is not None else torch.clamp(silverman_bandwidth_m(tau_m), min=tiny)
+        field = _free_space_lsc_field(lam, dtau, a_m, gamma, smooth_passes, bandwidth_m)
+        return _gather_linear(field, bin_idx, interp_w, valid)
+    # pipe_radius_b_m / a_m divides a Python float: building a device tensor here would break graph capture.
+    form_factor = 1.0 + 2.0 * torch.log(pipe_radius_b_m / a_m)
+    dlambda_dtau = _gather_linear(_grid_deriv(_smooth_bins(lam, smooth_passes), dtau), bin_idx, interp_w, valid)
+    return (_Z0_OHM / (4.0 * math.pi * gamma ** 2)) * form_factor * C_LIGHT * dlambda_dtau
+
+
 class _LSCFastGraph:
-    """Compute LSCFastGraph; see the module documentation for details."""
+    """CUDA graph of ``_lsc_fast_field`` for one fixed set of sizes and model settings."""
 
     def __init__(
-        self, n: int, n_bins: int, smooth_passes: int, dtype: torch.dtype, device: torch.device,
+        self, n: int, n_bins: int, smooth_passes: int | None, dtype: torch.dtype, device: torch.device,
         pipe_radius_b_m: float | None, radius_factor: float,
     ):
         self._tau = torch.zeros(n, dtype=dtype, device=device)
@@ -747,20 +827,8 @@ class _LSCFastGraph:
         self._mc2 = torch.ones((), dtype=dtype, device=device)
 
         def body() -> torch.Tensor:
-            tiny = torch.finfo(dtype).tiny ** 0.5
-            sigma_x, sigma_y = self._x.std(), self._y.std()
-            a_m = torch.clamp(radius_factor * 0.5 * (sigma_x + sigma_y), min=tiny)
-            if pipe_radius_b_m is None:
-                form_factor = torch.ones((), dtype=dtype, device=device)
-            else:
-                b_over_a = pipe_radius_b_m / a_m  # a Python float: building a device tensor here would break graph capture
-                form_factor = 1.0 + 2.0 * torch.log(b_over_a)
-            bin_idx, interp_w, valid, _, dtau, nb = _fixed_grid(self._tau, n_bins)
-            lam = _bin_line_density(self._charge, bin_idx, interp_w, valid, nb, dtau)
-            lam = _smooth_bins(lam, smooth_passes)
-            dlambda_dtau_grid = _grid_deriv(lam, dtau)
-            dlambda_dtau = _gather_linear(dlambda_dtau_grid, bin_idx, interp_w, valid)
-            return (_Z0_OHM / (4.0 * math.pi * (self._energy / self._mc2) ** 2)) * form_factor * C_LIGHT * dlambda_dtau
+            return _lsc_fast_field(self._tau, self._charge, self._x, self._y, self._energy, self._mc2, pipe_radius_b_m,
+                                   radius_factor, n_bins, smooth_passes)
 
         self._graph, self._e_field_per_length = _capture_cuda_graph(body, device)
 
@@ -782,7 +850,7 @@ _lsc_fast_graph_cache: dict[tuple, "_LSCFastGraph"] = {}
 
 
 def _get_lsc_fast_graph(
-    n: int, n_bins: int, smooth_passes: int, dtype: torch.dtype, device: torch.device,
+    n: int, n_bins: int, smooth_passes: int | None, dtype: torch.dtype, device: torch.device,
     pipe_radius_b_m: float | None, radius_factor: float,
 ) -> "_LSCFastGraph":
     key = (n, n_bins, smooth_passes, dtype, device, pipe_radius_b_m, radius_factor)
@@ -805,9 +873,11 @@ def lsc_delta_kick_fast(
     pipe_radius_b_m: float | None = None,
     radius_factor: float = 1.7,
     n_bins: int = 2048,
-    smooth_passes: int = 512,
+    smooth_passes: int | None = 512,
 ) -> torch.Tensor:
     """Compute lsc delta kick fast; see the module documentation for details."""
+    if smooth_passes is None and pipe_radius_b_m is not None:
+        raise ValueError("smooth_passes=None (Silverman bandwidth) is for the free-space kernel: pipe_radius_b_m must be None")
     n = tau_m.shape[-1]
     if n < 2 or length_m <= 0.0:
         return torch.zeros_like(tau_m)
@@ -819,21 +889,8 @@ def lsc_delta_kick_fast(
         graph = _get_lsc_fast_graph(n, n_bins, smooth_passes, tau_m.dtype, tau_m.device, pipe_radius_b_m, radius_factor)
         e_field_per_length = graph.run(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV)
     else:
-        tiny = torch.finfo(tau_m.dtype).tiny ** 0.5
-        sigma_x, sigma_y = x_m.std(), y_m.std()
-        a_m = torch.clamp(radius_factor * 0.5 * (sigma_x + sigma_y), min=tiny)
-        if pipe_radius_b_m is None:
-            form_factor = torch.ones((), dtype=tau_m.dtype, device=tau_m.device)
-        else:
-            b_over_a = pipe_radius_b_m / a_m
-            form_factor = 1.0 + 2.0 * torch.log(b_over_a)
-
-        bin_idx, interp_w, valid, _, dtau, n_bins = _fixed_grid(tau_m, n_bins)
-        lam = _bin_line_density(charge_per_particle_C, bin_idx, interp_w, valid, n_bins, dtau)
-        lam = _smooth_bins(lam, smooth_passes)
-        dlambda_dtau_grid = _grid_deriv(lam, dtau)
-        dlambda_dtau = _gather_linear(dlambda_dtau_grid, bin_idx, interp_w, valid)
-        e_field_per_length = (_Z0_OHM / (4.0 * math.pi * (energy_eV / mc2_eV) ** 2)) * form_factor * C_LIGHT * dlambda_dtau
+        e_field_per_length = _lsc_fast_field(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV, pipe_radius_b_m,
+                                             radius_factor, n_bins, smooth_passes)
 
     return e_field_per_length * length_m / energy_eV  # E_z toward the head: the head gains energy
 

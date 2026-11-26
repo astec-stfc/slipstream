@@ -85,6 +85,8 @@ class _ElementParams(NamedTuple):
     edge2_effects: int = 1
     csr_bins: int = 256
     csr_sg_halfwidth: int = 1
+    lsc_grid: tuple = ()
+    """``LinacTracker`` overrides of the LSC kernel's ``n_bins`` / ``smooth_passes``, as ``(name, value)`` pairs."""
     csr_substeps: tuple = ()
     csr_drift_phi_m: float = 0.0
     csr_drift_dz: float = 0.01

@@ -86,6 +86,7 @@ directory; pass `wake_base_dir="."` to use the caller's working directory.
 | `pipe_radius_b_m`, `csr_softening_m` | positive number or null |
 | `lsc_radius_factor` | positive number |
 | `n_kicks`, `n_kicks_bend`, `n_slices` | positive integers; `n_slices` controls output slice diagnostics |
+| `lsc_bins`, `lsc_smooth_passes` | null (default) or integers of at least 2 and 0 ([LSC grid](modules/tracking/native/linac.md#linactracker)) |
 | `integration_order` | 4, 6, or 8 |
 
 CUDA and compilation require the corresponding hardware/toolchain described
