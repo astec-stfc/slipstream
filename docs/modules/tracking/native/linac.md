@@ -4,14 +4,15 @@
 
 ## Physics
 
-Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, local LSC and CSR. By default the reference momentum follows the bunch centroid after elements. Ring equilibrium damping, excitation and IBS are not applied.
+Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, LSC and CSR. By default the reference momentum follows the bunch centroid after elements. Ring equilibrium damping, excitation and IBS are not applied.
 
 Opt-in [local dipole radiation](radiation.md) adds classical loss and Gaussian
 ISR for aligned pure dipoles with a fixed reference (`always_change_p0=False`).
 
 ### Limits and conventions
 
-- CSR requires CSR-enabled specs; `lsc=True` acts in finite-length elements.
+- CSR requires CSR-enabled specs; `lsc=True` acts in finite-length elements, once per element at its exit, in free space
+  unless `pipe_radius_b_m` is given ([model](collective.md#lsc_delta_kick)).
 - Fast collective grids and preceding-bend drift-tail approximations require convergence checks.
 - Misaligned bends retain a lumped exit collective kick instead of subcycling.
 - Changing a source reference energy must refresh energy-dependent bend offsets.

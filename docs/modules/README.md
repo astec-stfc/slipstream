@@ -64,7 +64,7 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 - [injector_wake](tracking/native/injector_wake.md): Localized monopole wake kicks for the injector (ASTRA `&WAKE`, per-cell tables), with their closed-form checks.
 
 - [astra_io](tracking/native/astra_io.md): Converts ASTRA distribution rows from their reference-relative z/pz/time convention to absolute particle values.
-- [collective](tracking/native/collective.md): Implements local long-wavelength 1D LSC and steady-state 1D CSR momentum kicks.
+- [collective](tracking/native/collective.md): Implements 1D longitudinal space charge and steady-state 1D CSR momentum kicks.
 - [double_single](tracking/native/double_single.md): Represents selected frozen-energy ring coordinates as float32 high/low pairs for increased precision.
 - [elements](tracking/native/elements.md): Integrates canonical (x,px,y,py,tau,delta) transport using symplectic splitting, sector-bend drifts, normal/skew multipole and corrector/edge kicks, and RF cavities with supported focusing and optional structure wakes.
 - [errors](tracking/native/errors.md): Samples one static error per matched element instance.
@@ -76,7 +76,7 @@ API stubs describe definitions; runnable task examples are in the [main guides](
 - [laura_fields](tracking/native/laura_fields.md): Loads LAURA on-axis field profiles and wake tables into existing native field/wake classes.
 - [laura_import](tracking/native/laura_import.md): Maps LAURA section records into the native element specification used for linac transport.
 - [laura_injector](tracking/native/laura_injector.md): Constructs field-map injector elements from chained LAURA sections.
-- [linac](tracking/native/linac.md): Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, local LSC and CSR.
+- [linac](tracking/native/linac.md): Tracks one canonical single pass through ordered elements, with inline RF and optional structure wakes, LSC and CSR.
 - [radiation](tracking/native/radiation.md): Opt-in classical dipole loss and Gaussian ISR in fixed-reference single-pass electron tracking.
 - [linac_setup](tracking/native/linac_setup.md): Crest calibration maximizes reference-particle energy gain through the upstream line and selected cavity using a phase scan and parabolic refinement.
 - [linac_twiss](tracking/native/linac_twiss.md): Propagates nonperiodic linear Twiss/dispersion or extracts ensemble statistics from tracked trajectories.

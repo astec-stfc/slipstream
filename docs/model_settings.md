@@ -94,7 +94,7 @@ subcycling and reference-energy behavior.
 
 | Task | Setting | Scope and dependencies |
 | --- | --- | --- |
-| Enable linac LSC | `lsc=True`, nonzero `bunch_charge_C` | `LinacTracker`/`BeamlineStudy`; finite-length elements; `pipe_radius_b_m` optionally bounds its transverse scale |
+| Enable linac LSC | `lsc=True`, nonzero `bunch_charge_C` | `LinacTracker`/`BeamlineStudy`; finite-length elements; free space unless `pipe_radius_b_m` selects the long-wavelength pipe formula |
 | Keep the linac reference fixed | `always_change_p0=False` | Otherwise the reference follows the bunch centroid; RF specs may separately carry `change_p0` |
 | Change ring RF placement | `rf="lumped"` or `"per_element"` | `NativeTracker`; per-element RF follows RFCA positions |
 | Change ring IBS | `ibs=True`, `ibs_model="bane"` or `"bjorken-mtingwa"` | Requires `optics`; Bjorken–Mtingwa also requires explicit `ibs_coulomb_log` |

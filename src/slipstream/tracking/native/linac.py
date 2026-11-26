@@ -1,5 +1,5 @@
 """Tracks one canonical single pass through ordered elements, with inline RF and optional structure
-wakes, local LSC and CSR. See docs/modules/tracking/native/linac.md."""
+wakes, LSC and CSR. See docs/modules/tracking/native/linac.md."""
 from __future__ import annotations
 
 import functools

@@ -58,15 +58,16 @@ def test_fast_csr_scalar_charge_gradient_matches_finite_difference(device, slipp
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_fast_lsc_scalar_charge_gradient_matches_finite_difference(device):
+@pytest.mark.parametrize(("pipe_radius_b_m", "smooth_passes"), [(0.01, 64), (None, 64), (None, None)])
+def test_fast_lsc_scalar_charge_gradient_matches_finite_difference(device, pipe_radius_b_m, smooth_passes):
     tau, x, y = _bunch(2048, device)
     energy = torch.tensor(ENERGY_EV, dtype=torch.float64, device=device)
     mc2 = torch.tensor(MC2_EV, dtype=torch.float64, device=device)
     weights = _weights(tau.numel(), device)
 
     def loss(t):
-        kick = lsc_delta_kick_fast(t, CHARGE_C / t.numel(), x, y, energy, mc2, 1.0, pipe_radius_b_m=0.01,
-                                   n_bins=256, smooth_passes=64)
+        kick = lsc_delta_kick_fast(t, CHARGE_C / t.numel(), x, y, energy, mc2, 1.0, pipe_radius_b_m=pipe_radius_b_m,
+                                   n_bins=256, smooth_passes=smooth_passes)
         return (kick * weights).sum() * 1e6
 
     assert loss(tau.clone().requires_grad_(True)).requires_grad
@@ -158,10 +159,11 @@ for _i, _angle in enumerate((0.08, -0.08, -0.08, 0.08)):
     _LINE += [ElementSpec(f"B{_i}", "bend", 0.2, angle=_angle, csr=True), ElementSpec(f"DB{_i}", "drift", 0.4)]
 
 
-def _tracker(device, dtype=torch.float64, lsc=False):
+def _tracker(device, dtype=torch.float64, lsc=False, pipe_radius_b_m=0.01):
     return LinacTracker(
         _LINE, ENERGY_EV, device=device, dtype=dtype, always_change_p0=False, bunch_charge_C=CHARGE_C, csr=True, lsc=lsc,
-        pipe_radius_b_m=0.01 if lsc else None, fast_collective_effects=True, compile=False, compile_collective_chunks=False,
+        pipe_radius_b_m=pipe_radius_b_m if lsc else None, fast_collective_effects=True, compile=False,
+        compile_collective_chunks=False,
     )
 
 
@@ -222,8 +224,25 @@ def _screen(p, bins=32):
 
 
 @needs_cuda
-def test_whole_iteration_cuda_graph_replays_the_eager_forward_and_backward():
-    tracker = _tracker("cuda", lsc=True)
+@pytest.mark.parametrize("smooth_passes", [512, None])
+def test_free_space_lsc_graph_replay_equals_the_live_path(smooth_passes):
+    n = 1537  # an unusual size so the graph key is new
+    tau, x, y = _bunch(n, "cuda")
+    energy = torch.tensor(ENERGY_EV, dtype=torch.float64, device="cuda")
+    mc2 = torch.tensor(MC2_EV, dtype=torch.float64, device="cuda")
+    for scale in (1.0, 1.3):  # the second call replays the captured graph on new data
+        args = (scale * tau, CHARGE_C / n, x, y, energy, mc2, 1.0)
+        with torch.no_grad():
+            replayed = lsc_delta_kick_fast(*args, smooth_passes=smooth_passes)
+        live = lsc_delta_kick_fast(args[0].clone().requires_grad_(True), *args[1:], smooth_passes=smooth_passes)
+        assert live.requires_grad and not replayed.requires_grad
+        torch.testing.assert_close(live.detach(), replayed, rtol=0, atol=1e-10 * float(replayed.abs().max()))
+
+
+@needs_cuda
+@pytest.mark.parametrize("pipe_radius_b_m", [0.01, None])
+def test_whole_iteration_cuda_graph_replays_the_eager_forward_and_backward(pipe_radius_b_m):
+    tracker = _tracker("cuda", lsc=True, pipe_radius_b_m=pipe_radius_b_m)
     beam = _beam(1024, "cuda")
 
     def step(x):

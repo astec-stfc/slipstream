@@ -1,8 +1,8 @@
 """Longitudinal space-charge (LSC) and steady-state CSR energy kicks of a Gaussian bunch against their closed forms.
 
-LSC: ``E_z = Z0 c (1 + 2 ln(b/a)) / (4 pi gamma^2) * d(lambda)/d(tau)``, the on-axis field of a long bunch in a round pipe,
-positive toward the head (decreasing ``tau``): the head gains energy and the tail loses it. The sign is also checked against
-the free-space field of a uniform cylinder, integrated directly.
+LSC with a pipe radius: ``E_z = Z0 c (1 + 2 ln(b/a)) / (4 pi gamma^2) * d(lambda)/d(tau)``, the on-axis field of a long
+bunch in a round pipe, positive toward the head (decreasing ``tau``): the head gains energy and the tail loses it.
+LSC without one: the free-space on-axis field of a uniform cylinder, integrated directly.
 CSR: the steady-state mean loss ``K Q / (4 pi eps0) rho^(-2/3) sigma^(-4/3)``, ``K = 2^(8/3) Gamma(5/6) / (8 sqrt(pi) 3^(1/3))``.
 The kernel-density versions smooth the line density with a Silverman bandwidth, so they agree to a few percent; the fixed-grid
 versions to a fraction of a percent. The block-multipole CSR sum is an approximation of the exact pairwise one.
@@ -69,27 +69,40 @@ def test_lsc_kick_scales_with_charge_length_and_inverse_energy_squared_and_the_p
     stiff = lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, 2 * ENERGY, MC2, LENGTH_M, pipe_radius_b_m=PIPE_RADIUS_M)
     torch.testing.assert_close(stiff, base / 8, rtol=1e-12, atol=0)  # kick = E_z L / E and E_z ~ 1/gamma^2
     a_m = 1.7 * 0.5 * (X.std() + Y.std()).item()
-    bare = lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M)  # no pipe: form factor one
-    torch.testing.assert_close(base, bare * (1 + 2 * math.log(PIPE_RADIUS_M / a_m)), rtol=1e-12, atol=0)
+    unit = lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M, pipe_radius_b_m=a_m)  # b = a: form factor one
+    torch.testing.assert_close(base, unit * (1 + 2 * math.log(PIPE_RADIUS_M / a_m)), rtol=1e-12, atol=0)
 
 
-def free_space_energy_gain_eV(tau_m, radius_m):
-    """On-axis energy gain per electron over ``LENGTH_M`` from a uniform cylinder of radius ``radius_m`` with a Gaussian
-    line density, as a sum of charged-disk fields in the rest frame (no long-wavelength or impedance approximation)."""
-    gamma = ENERGY_EV / MC2_EV
-    sigma = gamma * SIGMA_M
+def free_space_kick(tau_m, radius_m, sigma_m=SIGMA_M, energy_eV=ENERGY_EV):
+    """``delta`` kick over ``LENGTH_M`` on the axis of a uniform cylinder of radius ``radius_m`` with a Gaussian line density, as
+    a sum of charged-disk fields in the rest frame (no long-wavelength or impedance approximation, no grid)."""
+    gamma = energy_eV / MC2_EV
+    sigma = gamma * sigma_m
 
     def density(z):
         return CHARGE_C / (math.sqrt(2 * math.pi) * sigma) * math.exp(-0.5 * (z / sigma) ** 2)
 
-    z = -gamma * tau_m  # toward the head
+    def at(tau):
+        z = -gamma * tau  # toward the head
 
-    def integrand(w):  # u = radius sinh(w) removes the near-cancellation of the disk integral
-        return math.exp(-w) * (density(z - radius_m * math.sinh(w)) - density(z + radius_m * math.sinh(w)))
+        def integrand(w):  # u = radius sinh(w) removes the near-cancellation of the disk integral
+            return math.exp(-w) * (density(z - radius_m * math.sinh(w)) - density(z + radius_m * math.sinh(w)))
 
-    top = math.asinh(20 * sigma / radius_m)
-    value = quad(integrand, 0.0, top, limit=200, points=[math.asinh(max(abs(z), radius_m) / radius_m)])[0]
-    return value / (2 * math.pi * EPS0_F_PER_M * radius_m) * LENGTH_M
+        top = math.asinh(20 * sigma / radius_m)
+        value = quad(integrand, 0.0, top, limit=200, points=[math.asinh(max(abs(z), radius_m) / radius_m)])[0]
+        return value / (2 * math.pi * EPS0_F_PER_M * radius_m) * LENGTH_M / energy_eV
+
+    return np.array([at(tau) for tau in tau_m])
+
+
+def against_free_space(tau, got, radius_m, sigma_m=SIGMA_M, energy_eV=ENERGY_EV):
+    """Largest difference between a kick (per particle) and the Coulomb integral within 1.5 sigma, relative to its peak."""
+    probes = np.array([-1.5, -1.0, -0.5, 0.5, 1.0, 1.5]) * sigma_m
+    order = torch.argsort(tau)
+    values = np.interp(probes, tau[order].numpy(), got[order].numpy())
+    expected = free_space_kick(probes, radius_m, sigma_m, energy_eV)
+    assert expected[0] > 0 > expected[-1]  # the reference itself: the head (negative tau) gains, the tail loses
+    return np.abs(values - expected).max() / np.abs(expected).max()
 
 
 def through_tracker(fast, csr):
@@ -102,22 +115,55 @@ def through_tracker(fast, csr):
     return on - LinacTracker([spec], lsc=False, csr=csr, **kw).track(bunch)[0][:, 5]
 
 
-@pytest.mark.parametrize("kick", [
-    lambda: lsc_delta_kick(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M),
-    lambda: lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M),
-    lambda: through_tracker(fast=False, csr=False),
-    lambda: through_tracker(fast=False, csr=True),
-    lambda: through_tracker(fast=True, csr=False),
+# The Silverman-bandwidth paths smooth a 3000-particle bunch by 0.21 sigma, which lowers the kick by a few percent.
+@pytest.mark.parametrize("kick,tolerance", [
+    (lambda: lsc_delta_kick(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M), 0.06),
+    (lambda: lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M), 0.01),
+    (lambda: through_tracker(fast=False, csr=False), 0.06),
+    (lambda: through_tracker(fast=False, csr=True), 0.06),
+    (lambda: through_tracker(fast=True, csr=False), 0.01),
 ], ids=["pairwise", "fast", "tracker", "tracker-joint-csr", "tracker-fast"])
-def test_lsc_kick_has_the_sign_of_the_free_space_coulomb_field(kick):
-    got = kick()
+def test_lsc_kick_without_a_pipe_is_the_free_space_coulomb_field(kick, tolerance):
     radius = 1.7 * 0.5 * (X.std() + Y.std()).item()
-    for offset in (-1.0, 1.0):
-        tau = offset * SIGMA_M
-        reference = free_space_energy_gain_eV(tau, radius) / ENERGY_EV
-        assert reference * offset < 0  # the reference itself: head gains, tail loses
-        near = (TAU - tau).abs() < 0.05 * SIGMA_M
-        assert got[near].mean().item() * reference > 0
+    assert against_free_space(TAU, kick(), radius) < tolerance
+
+
+@pytest.mark.parametrize("energy_eV,sigma_m,size_m", [(35e6, 300e-6, 500e-6), (190e6, 100e-6, 100e-6), (1e9, 20e-6, 50e-6)])
+def test_free_space_lsc_follows_energy_length_and_radius(energy_eV, sigma_m, size_m):
+    tau = gaussian_quantiles(sigma_m)
+    x, y = gaussian_quantiles(size_m, seed=1), gaussian_quantiles(size_m, seed=2)
+    got = lsc_delta_kick_fast(tau, CHARGE_C / N, x, y, torch.tensor(energy_eV, dtype=F64), MC2, LENGTH_M)
+    radius = 1.7 * 0.5 * (x.std() + y.std()).item()
+    assert against_free_space(tau, got, radius, sigma_m, energy_eV) < 0.01
+
+
+@pytest.mark.parametrize("kick", [lsc_delta_kick, lsc_delta_kick_fast])
+def test_free_space_lsc_is_linear_in_charge_and_length_and_exchanges_no_net_energy(kick):
+    base = kick(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M)
+    torch.testing.assert_close(kick(TAU, 2 * CHARGE_C / N, X, Y, ENERGY, MC2, 3 * LENGTH_M), 6 * base, rtol=1e-12, atol=0)
+    assert base.sum().abs().item() < 1e-9 * base.abs().sum().item()  # the field of each pair of bins is equal and opposite
+
+
+@pytest.mark.parametrize("kick", [lsc_delta_kick, lsc_delta_kick_fast])
+def test_free_space_lsc_float32_agrees_with_float64(kick):
+    double = kick(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M)
+    single = kick(TAU.float(), CHARGE_C / N, X.float(), Y.float(), ENERGY.float(), MC2.float(), LENGTH_M)
+    assert single.dtype == torch.float32
+    assert ((single.double() - double).abs().max() / double.abs().max()).item() < 2e-4
+
+
+def test_free_space_lsc_per_particle_charge_and_batches_match_single_bunches():
+    single = lsc_delta_kick(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M)
+    vector = lsc_delta_kick(TAU, torch.full((N,), CHARGE_C / N, dtype=F64), X, Y, ENERGY, MC2, LENGTH_M)
+    torch.testing.assert_close(vector, single, rtol=1e-12, atol=0)
+    batch = lsc_delta_kick(torch.stack([TAU, 2 * TAU]), CHARGE_C / N, torch.stack([X, X]), torch.stack([Y, Y]), ENERGY, MC2, LENGTH_M)
+    torch.testing.assert_close(batch[0], single, rtol=1e-12, atol=0)
+    torch.testing.assert_close(batch[1], lsc_delta_kick(2 * TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M), rtol=1e-12, atol=0)
+
+
+def test_silverman_smoothing_is_refused_with_a_pipe_radius():
+    with pytest.raises(ValueError, match="pipe_radius_b_m"):
+        lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M, pipe_radius_b_m=PIPE_RADIUS_M, smooth_passes=None)
 
 
 @pytest.mark.parametrize("kick", [lsc_delta_kick, lsc_delta_kick_fast])

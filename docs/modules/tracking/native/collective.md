@@ -4,15 +4,18 @@
 
 ## Physics
 
-Implements local long-wavelength 1D LSC and steady-state 1D CSR momentum kicks. LSC uses the line-density derivative and the `1/gamma^2` suppression, with optional pipe logarithm. CSR is directional in late-positive tau. KDE, block-multipole and fixed-grid paths trade cost, smoothing and approximation.
+Implements 1D longitudinal space charge (LSC) and steady-state 1D CSR momentum kicks. LSC is the free-space on-axis field of a uniform cylinder or, when a pipe radius is given, the long-wavelength pipe formula. CSR is directional in late-positive tau. KDE, block-multipole and fixed-grid paths trade cost, smoothing and approximation.
 
 ### Limits and conventions
 
-- LSC is a local model rather than elegant's full nonlocal LSCDRIFT implementation.
-- Without `pipe_radius_b_m` the LSC geometry factor is 1, which is not the free-space limit (the pipe formula with
-  `b = a`). For a Gaussian bunch on a straight drift the free-space on-axis kick is larger by about
-  `2 ln(gamma sigma_tau / a)`: 7 to 15 times in tests with `gamma sigma_tau / a` from 22 to 880
-  ([issue 54](https://github.com/astec-stfc/slipstream/issues/54)).
+- LSC changes `delta` only, with one field per longitudinal position: the on-axis value of a uniform cylinder of radius
+  `radius_factor` times the mean rms transverse size, for ultrarelativistic motion. There is no transverse variation. The
+  radius factor is a model parameter, as in elegant's `LSCKICK`.
+- `pipe_radius_b_m` selects the long-wavelength formula with `F = 1 + 2 ln(b/a)`. It holds while `b` is much smaller than
+  `gamma` times the length of the density structure and overestimates the field beyond that. Leave it `None` for free space.
+- `LinacTracker` applies one LSC kick per element, at its exit. Split long drifts along which the bunch or the dispersion
+  changes.
+- The smoothing of the line density limits the resolution: see [`lsc_delta_kick_fast`](#lsc_delta_kick_fast).
 - Pairwise CSR contains no entrance transient, shielding or drift propagation. The fixed-grid path adds an entrance transient
   (`slippage_m`), a closed-form drift model (`csr_drift_delta_kick_fast`) and a retarded-field drift kernel
   (`csr_drift_delta_kick_retarded`); shielding by a conducting pipe is not modelled (the shielding parameter
@@ -158,21 +161,38 @@ earlier call, including the warm-up passes, does.
 
 ### `_LSCFastGraph`
 
-CUDA-graph capture of the fixed-bin-grid LSC kernel's tensor math,
-for one fixed ``(n, n_bins, smooth_passes, dtype, device,
-pipe_radius_b_m, radius_factor)` -- collapses `smooth_passes``
-(default 512) sequential dependent tiny kernel launches into one
-`graph.replay()`, the same trick `_KDEWindowedGraph` above already
-uses for the reference kernel. **Never keyed on anything
-element/lattice-specific** (`length_m`/`energy_eV` are applied
-after `run()` returns, in plain eager Python -- see
-`lsc_delta_kick_fast`) -- so one graph is reused across every
-LSC-active element of every lattice sharing this key: a true
-compile-once block. The graph is forward-only: `lsc_delta_kick_fast`
-does not use it when a differentiated input requires grad, and the same
-tensor math then runs eagerly and is differentiable. The pipe form
-factor divides a Python float by a tensor so that nothing is copied from
-host to device inside a capture.
+CUDA-graph capture of `_lsc_fast_field`, for one fixed ``(n, n_bins,
+smooth_passes, dtype, device, pipe_radius_b_m, radius_factor)``: its
+many small dependent launches become one `graph.replay()`, as in
+`_KDEWindowedGraph` above. **Never keyed on anything element- or
+lattice-specific** (`length_m` and the energy are applied after `run()`
+returns or copied into the graph's inputs), so one graph is reused by
+every LSC-active element of every lattice that shares the key. The graph
+is forward-only: `lsc_delta_kick_fast` does not use it when a
+differentiated input requires grad, and the same tensor operations then
+run eagerly and are differentiable. The pipe form factor divides a
+Python float by a tensor so that nothing is copied from host to device
+inside a capture.
+
+### `_free_space_lsc_field`
+
+The field of the free-space model on the grid. In the rest frame a disk
+of radius `a` with unit charge has the on-axis field
+`(sign(v) - v / sqrt(v^2 + a^2)) / (2 pi eps0 a^2)` at distance `v`.
+The line density is linear between bin centres (the shape of the
+cloud-in-cell deposit), so the field at a bin centre from a source bin is
+that disk field integrated against a triangle. It is the second
+difference, over bin offsets, of the closed form
+`asinh(t) + t exp(-|asinh(t)|)` with `t = v / a`, divided by
+`4 pi eps0` times the rest-frame bin width. No long-wavelength
+approximation or Bessel function is needed, and the result does not
+depend on the bin width being smaller than `a / gamma`.
+
+The kernel is built in float64 because the second differences cancel;
+the FFT convolution with the density, which also applies the smoothing,
+runs in the particle dtype. Float32 agrees with float64 to 3e-5 of the
+peak field or better for 2048 and 8192 bins. The cost is O(B log B) for B
+bins, in addition to the O(N) deposit and gather.
 
 ### `_csr_fast_field`
 
@@ -196,27 +216,36 @@ def silverman_bandwidth_m(tau_m: torch.Tensor) -> torch.Tensor: ...
 def lsc_delta_kick(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, x_m: torch.Tensor, y_m: torch.Tensor, energy_eV: torch.Tensor, mc2_eV: torch.Tensor, length_m: float, pipe_radius_b_m: float | None=None, radius_factor: float=1.7, compile_chunks: bool=False) -> torch.Tensor: ...
 def csr_steady_state_delta_kick(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, rho_m: float, energy_eV: torch.Tensor, length_m: float, softening_m: float | torch.Tensor | None=None, compile_chunks: bool=False) -> torch.Tensor: ...
 def csr_steady_state_delta_kick_subquadratic(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, rho_m: float, energy_eV: torch.Tensor, length_m: float, softening_m: float | torch.Tensor | None=None, tolerance: float=0.001) -> torch.Tensor: ...
-def lsc_delta_kick_fast(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, x_m: torch.Tensor, y_m: torch.Tensor, energy_eV: torch.Tensor, mc2_eV: torch.Tensor, length_m: float, pipe_radius_b_m: float | None=None, radius_factor: float=1.7, n_bins: int=2048, smooth_passes: int=512) -> torch.Tensor: ...
+def lsc_delta_kick_fast(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, x_m: torch.Tensor, y_m: torch.Tensor, energy_eV: torch.Tensor, mc2_eV: torch.Tensor, length_m: float, pipe_radius_b_m: float | None=None, radius_factor: float=1.7, n_bins: int=2048, smooth_passes: int | None=512) -> torch.Tensor: ...
 def csr_steady_state_delta_kick_fast(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, rho_m: float, energy_eV: torch.Tensor, length_m: float, softening_m: float | torch.Tensor | None=None, n_bins: int=256, smooth_passes: int | None=None, sg_halfwidth: int=1) -> torch.Tensor: ...
 ```
 
 ### `lsc_delta_kick`
 
-Local (long-wavelength) 1D LSC kick, `delta` only: ``E_z(tau) =
-Z0/(4*pi*gamma^2) * F * c * dlambda/dtau(tau)`, `F = 1 + 2*ln(b/a)``
-(`a` = live rms beam radius x `radius_factor`, elegant's own
-`RADIUS_FACTOR=1.7` default; `b` = pipe radius, `None` -> free
-space, `F=1`). Deliberately **not** real elegant's own nonlocal
-`LSCDRIFT`/`LSCKICK` formula (histogram+FFT, no pipe radius) -- see
-docs/tracking_native.md for the model choice, the frequency-domain
-cross-check and why a live-elegant comparison only agrees to order of
-magnitude, not tight rtol.
+1D LSC kick, `delta` only: `delta += E_z(tau) * length_m / energy_eV`,
+where `E_z` is positive toward the head (decreasing `tau`), so the head
+gains energy and the tail loses it. `a` is the live rms beam radius times
+`radius_factor` (elegant's `RADIUS_FACTOR=1.7` default).
 
-Sign convention: `E_z` is positive toward the head (decreasing `tau`) and
-`delta += E_z(tau) * length_m / energy_eV`, so the head gains energy and the
-tail loses it. `compile_chunks` (default off,
-forwarded to `_gaussian_kde_density_and_deriv`) trades some speed for
-memory at large N
+- `pipe_radius_b_m=None` (default): **free space**. `E_z` is the on-axis
+  field of a uniform cylinder of radius `a`, valid at every wavelength
+  ([`_free_space_lsc_field`](#_free_space_lsc_field)). It is computed by
+  `lsc_delta_kick_fast` on 2048 bins with the Gaussian kernel of
+  Silverman's bandwidth, the density estimator of the pipe formula below.
+  A batch of bunches `(..., n)` gets one grid and radius per bunch.
+- With a pipe radius `b`: the long-wavelength formula
+  ``E_z = Z0 * F * c / (4 pi gamma^2) * dlambda/dtau``,
+  ``F = 1 + 2 ln(b/a)``, from the pairwise Gaussian kernel density.
+
+`compile_chunks` (default off, pipe formula only, forwarded to
+`_gaussian_kde_density_and_deriv`) trades some speed for memory at large
+N.
+
+Validation: `tests/test_collective_kicks.py` compares the free-space kick
+with the Coulomb integral of a uniform cylinder with a Gaussian line
+density, which uses neither the grid nor an impedance formula (CPU,
+float64, 3000 particles, 35 MeV to 1 GeV, 20 to 300 um rms length):
+within 1 % for the fast defaults and 6 % for the Silverman paths.
 
 ### `csr_steady_state_delta_kick`
 
@@ -233,28 +262,41 @@ No entrance transient, shielding, or drift propagation is included here.
 
 ### `lsc_delta_kick_fast`
 
-Fixed-bin-grid approximation of `lsc_delta_kick` -- same formula,
-conventions and citations; only `dlambda/dtau`'s estimator differs
-(CIC histogram + binomial smoothing + central differences in place of
-the reference's Gaussian KDE, O(N) instead of O(N*w)). See
-docs/tracking_native.md for the fidelity-loss discussion and measured
-agreement against the reference. `n_bins`/`smooth_passes` are the
-grid-only knobs this approximation adds -- see docs/tracking_native.md
-for why `smooth_passes` needs to be in the hundreds, not one, to
-match the reference kernel's own implicit smoothing.
+Fixed-grid LSC in O(N + B log B): a cloud-in-cell deposit on `n_bins`
+bins spanning the live bunch, `smooth_passes` binomial smoothing passes,
+then the free-space convolution or, with a pipe radius, the smoothed
+central-difference derivative, and a linear gather.
+`smooth_passes=None` (free space only) smooths with a Gaussian of
+Silverman's bandwidth instead.
 
-`@torch._dynamo.disable()` (like the reference kernels): the
-`smooth_passes`-deep sequential dependency chain is exactly what
-`LinacTracker`'s per-element `torch.compile` graph would otherwise
-have to re-trace/re-cache-lookup for every distinct element signature
-in a real lattice -- see `_LSCFastGraph`'s own docstring. On CUDA
-with a scalar charge (every real `LinacTracker` caller), this whole
-tensor computation is instead captured once into a CUDA graph, keyed
-only by ``(n, n_bins, smooth_passes, dtype, device, pipe_radius_b_m,
-radius_factor)` -- never by `length_m`` or anything else that varies
-per element -- and replayed for every call sharing that key.
-`length_m` is applied after replay, in plain eager Python (one
-multiply -- not worth graph-capturing).
+No smoothing suits every bunch. Root-mean-square error of the free-space
+kick, relative to its rms, on 2048 bins at 16 384 / 131 072 / 1 048 576
+particles (CPU, float64):
+
+| Smoothing | Gaussian, 20 um | Gaussian, 400 um | Compressed bunch with a sharp spike |
+| --- | --- | --- | --- |
+| 32 passes | 0.68 / 0.21 / 0.07 | 2.0 / 0.57 / 0.17 | 0.20 / 0.22 / 0.24 |
+| 512 passes (default) | 0.24 / 0.07 / 0.02 | 0.37 / 0.11 / 0.03 | 0.60 / 0.62 / 0.65 |
+| Silverman | 0.11 / 0.06 / 0.03 | 0.13 / 0.08 / 0.04 | 0.93 / 0.87 / 0.78 |
+
+The Gaussian references are the Coulomb integral (190 MeV, rms transverse
+size 100 um, three samples). The compressed bunch is a chicane exit at
+full compression (rms length 19 um) against 1 048 576 particles on 16 384
+bins with 16 passes. Check convergence in smoothing and particle number
+where a spike matters.
+
+Against elegant 2026.3.0 on a four-dipole compressor (CSR off, 100 pC,
+131 072 particles, CPU float64, LSC in the same drifts, kicks every
+0.01 m), the projected horizontal emittance at chicane factors 0.8,
+0.925 and 1.0 is 0.483, 0.714 and 0.567 um with the fast defaults and
+0.483, 0.710 and 0.537 um with Silverman smoothing; elegant with 100 to
+1600 `LSC_BINS` gives 0.483 to 0.485, 0.712 to 0.715 and 0.572 to
+0.578 um.
+
+`@torch._dynamo.disable()` (like the reference kernels). On CUDA with a
+scalar charge (every real `LinacTracker` caller) the field computation is
+captured once into a CUDA graph ([`_LSCFastGraph`](#_lscfastgraph)) and
+replayed. `length_m` is applied after replay, in plain eager Python.
 
 Gradients: the graph records no autograd history, so it is used only when
 no differentiated input requires grad (`_grad_live`). With `tau_m`,

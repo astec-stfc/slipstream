@@ -150,7 +150,7 @@ implemented energy-ratio convention is documented in
 
 Longitudinal wakes act on trailing particles; CSR has its own causal/sign
 convention because radiation can overtake the bunch. The linac provides
-unshielded steady-state CSR, local LSC, explicit fast-grid approximations,
+unshielded steady-state CSR, 1D LSC, explicit fast-grid approximations,
 and a single-upstream-bend drift carry. Shielding and complete overlapping
 history/transients remain outside that model. See
 [collective kernels](modules/tracking/native/collective.md).
