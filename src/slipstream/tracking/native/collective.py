@@ -426,7 +426,7 @@ def _lsc_csr_delta_kicks(
     e_field_per_length = (
         _Z0_OHM / (4.0 * math.pi * (energy_eV / mc2_eV) ** 2)
     ) * form_factor * C_LIGHT * density_deriv
-    lsc_kick = -e_field_per_length * lsc_length_m / energy_eV
+    lsc_kick = e_field_per_length * lsc_length_m / energy_eV  # E_z toward the head: the head gains energy
 
     if softening_m is None:
         softening = 0.5 * h_m
@@ -474,8 +474,7 @@ def lsc_delta_kick(
     _, dlambda_dtau = _gaussian_kde_density_and_deriv(tau_m, charge_per_particle_C, h_m, compile_chunks=compile_chunks)
 
     e_field_per_length = (_Z0_OHM / (4.0 * math.pi * (energy_eV / mc2_eV) ** 2)) * form_factor * C_LIGHT * dlambda_dtau
-    voltage_V = e_field_per_length * length_m
-    return -voltage_V / energy_eV
+    return e_field_per_length * length_m / energy_eV  # E_z toward the head: the head gains energy
 
 
 @torch._dynamo.disable()
@@ -836,8 +835,7 @@ def lsc_delta_kick_fast(
         dlambda_dtau = _gather_linear(dlambda_dtau_grid, bin_idx, interp_w, valid)
         e_field_per_length = (_Z0_OHM / (4.0 * math.pi * (energy_eV / mc2_eV) ** 2)) * form_factor * C_LIGHT * dlambda_dtau
 
-    voltage_V = e_field_per_length * length_m
-    return -voltage_V / energy_eV
+    return e_field_per_length * length_m / energy_eV  # E_z toward the head: the head gains energy
 
 
 def _csr_fast_field(

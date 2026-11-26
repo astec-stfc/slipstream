@@ -1,6 +1,8 @@
 """Longitudinal space-charge (LSC) and steady-state CSR energy kicks of a Gaussian bunch against their closed forms.
 
-LSC: ``E_z = Z0 c (1 + 2 ln(b/a)) / (4 pi gamma^2) * d(lambda)/d(tau)``, the on-axis field of a long bunch in a round pipe.
+LSC: ``E_z = Z0 c (1 + 2 ln(b/a)) / (4 pi gamma^2) * d(lambda)/d(tau)``, the on-axis field of a long bunch in a round pipe,
+positive toward the head (decreasing ``tau``): the head gains energy and the tail loses it. The sign is also checked against
+the free-space field of a uniform cylinder, integrated directly.
 CSR: the steady-state mean loss ``K Q / (4 pi eps0) rho^(-2/3) sigma^(-4/3)``, ``K = 2^(8/3) Gamma(5/6) / (8 sqrt(pi) 3^(1/3))``.
 The kernel-density versions smooth the line density with a Silverman bandwidth, so they agree to a few percent; the fixed-grid
 versions to a fraction of a percent. The block-multipole CSR sum is an approximation of the exact pairwise one.
@@ -10,6 +12,7 @@ import math
 import numpy as np
 import pytest
 import torch
+from scipy.integrate import quad
 from scipy.special import ndtri
 
 from slipstream.constants import C_LIGHT, EPS0_F_PER_M
@@ -17,6 +20,8 @@ from slipstream.tracking.native.collective import (
     csr_steady_state_delta_kick, csr_steady_state_delta_kick_fast, csr_steady_state_delta_kick_subquadratic, lsc_delta_kick,
     lsc_delta_kick_fast,
 )
+from slipstream.tracking.native.lattice_import import ElementSpec
+from slipstream.tracking.native.linac import LinacTracker
 
 F64 = torch.float64
 Z0_OHM = 376.730313668
@@ -43,8 +48,8 @@ def lsc_closed_form(pipe_radius=PIPE_RADIUS_M):
     form = 1 + 2 * math.log(pipe_radius / a_m)
     gamma = ENERGY_EV / MC2_EV
     line_density = CHARGE_C / (math.sqrt(2 * math.pi) * SIGMA_M) * torch.exp(-TAU**2 / (2 * SIGMA_M**2))
-    # kick = -V / E with V = Z0 c L F / (4 pi gamma^2) d(lambda)/d(tau) and d(lambda)/d(tau) = -tau lambda / sigma^2
-    return Z0_OHM * C_LIGHT * LENGTH_M * form / (4 * math.pi * gamma**2 * ENERGY_EV) * TAU / SIGMA_M**2 * line_density
+    # kick = +E_z L / E with E_z = Z0 c F / (4 pi gamma^2) d(lambda)/d(tau) and d(lambda)/d(tau) = -tau lambda / sigma^2
+    return -Z0_OHM * C_LIGHT * LENGTH_M * form / (4 * math.pi * gamma**2 * ENERGY_EV) * TAU / SIGMA_M**2 * line_density
 
 
 @pytest.mark.parametrize("kick,tolerance", [(lsc_delta_kick, 0.06), (lsc_delta_kick_fast, 0.01)])
@@ -53,7 +58,7 @@ def test_lsc_kick_of_a_gaussian_bunch_is_the_derivative_of_its_line_density(kick
     expected = lsc_closed_form()
     core = TAU.abs() < 1.5 * SIGMA_M
     assert ((got - expected).abs()[core].max() / expected.abs().max()).item() < tolerance
-    assert got[TAU > 0].min() > 0 > got[TAU < 0].max()  # the sign of the chirp: positive tau gains, negative tau loses
+    assert got[TAU < 0].min() > 0 > got[TAU > 0].max()  # the head (negative tau) gains energy, the tail loses it
     assert got.sum().abs().item() < 1e-3 * got.abs().sum().item()  # a conservative force: no net energy change
 
 
@@ -62,10 +67,57 @@ def test_lsc_kick_scales_with_charge_length_and_inverse_energy_squared_and_the_p
     twice = lsc_delta_kick_fast(TAU, 2 * CHARGE_C / N, X, Y, ENERGY, MC2, 3 * LENGTH_M, pipe_radius_b_m=PIPE_RADIUS_M)
     torch.testing.assert_close(twice, 6 * base, rtol=1e-12, atol=0)
     stiff = lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, 2 * ENERGY, MC2, LENGTH_M, pipe_radius_b_m=PIPE_RADIUS_M)
-    torch.testing.assert_close(stiff, base / 8, rtol=1e-12, atol=0)  # kick = -V/E and V ~ 1/gamma^2
+    torch.testing.assert_close(stiff, base / 8, rtol=1e-12, atol=0)  # kick = E_z L / E and E_z ~ 1/gamma^2
     a_m = 1.7 * 0.5 * (X.std() + Y.std()).item()
     bare = lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M)  # no pipe: form factor one
     torch.testing.assert_close(base, bare * (1 + 2 * math.log(PIPE_RADIUS_M / a_m)), rtol=1e-12, atol=0)
+
+
+def free_space_energy_gain_eV(tau_m, radius_m):
+    """On-axis energy gain per electron over ``LENGTH_M`` from a uniform cylinder of radius ``radius_m`` with a Gaussian
+    line density, as a sum of charged-disk fields in the rest frame (no long-wavelength or impedance approximation)."""
+    gamma = ENERGY_EV / MC2_EV
+    sigma = gamma * SIGMA_M
+
+    def density(z):
+        return CHARGE_C / (math.sqrt(2 * math.pi) * sigma) * math.exp(-0.5 * (z / sigma) ** 2)
+
+    z = -gamma * tau_m  # toward the head
+
+    def integrand(w):  # u = radius sinh(w) removes the near-cancellation of the disk integral
+        return math.exp(-w) * (density(z - radius_m * math.sinh(w)) - density(z + radius_m * math.sinh(w)))
+
+    top = math.asinh(20 * sigma / radius_m)
+    value = quad(integrand, 0.0, top, limit=200, points=[math.asinh(max(abs(z), radius_m) / radius_m)])[0]
+    return value / (2 * math.pi * EPS0_F_PER_M * radius_m) * LENGTH_M
+
+
+def through_tracker(fast, csr):
+    """The LSC part of a ``LinacTracker`` pass through one drift (``csr=True`` takes the joint exact LSC+CSR path)."""
+    bunch = torch.zeros((N, 6), dtype=F64)
+    bunch[:, 0], bunch[:, 2], bunch[:, 4] = X, Y, TAU
+    kw = dict(energy_eV=ENERGY_EV, device="cpu", bunch_charge_C=CHARGE_C, fast_collective_effects=fast, always_change_p0=False)
+    spec = ElementSpec("D", "bend" if csr else "drift", LENGTH_M, angle=1e-9 if csr else 0.0, csr=csr)
+    on = LinacTracker([spec], lsc=True, csr=csr, **kw).track(bunch)[0][:, 5]
+    return on - LinacTracker([spec], lsc=False, csr=csr, **kw).track(bunch)[0][:, 5]
+
+
+@pytest.mark.parametrize("kick", [
+    lambda: lsc_delta_kick(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M),
+    lambda: lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M),
+    lambda: through_tracker(fast=False, csr=False),
+    lambda: through_tracker(fast=False, csr=True),
+    lambda: through_tracker(fast=True, csr=False),
+], ids=["pairwise", "fast", "tracker", "tracker-joint-csr", "tracker-fast"])
+def test_lsc_kick_has_the_sign_of_the_free_space_coulomb_field(kick):
+    got = kick()
+    radius = 1.7 * 0.5 * (X.std() + Y.std()).item()
+    for offset in (-1.0, 1.0):
+        tau = offset * SIGMA_M
+        reference = free_space_energy_gain_eV(tau, radius) / ENERGY_EV
+        assert reference * offset < 0  # the reference itself: head gains, tail loses
+        near = (TAU - tau).abs() < 0.05 * SIGMA_M
+        assert got[near].mean().item() * reference > 0
 
 
 @pytest.mark.parametrize("kick", [lsc_delta_kick, lsc_delta_kick_fast])
