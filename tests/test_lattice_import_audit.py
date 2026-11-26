@@ -1,5 +1,6 @@
 """Import safety must identify changed models without changing legacy maps."""
 import json
+import warnings
 
 import pytest
 
@@ -70,3 +71,18 @@ def test_beamline_facade_forwards_import_policy(tmp_path):
         study = BeamlineStudy.from_lattice_file(path, 'R', 5e6, device='cpu', import_audit=audit)
     assert study.specs[0].kind == 'drift'
     assert audit[0]['element'] == 'S'
+
+
+@pytest.mark.parametrize('line, flagged', [
+    ('Q,D', True), ('M,D', True), ('W,Z,D', True), ('INNER,D', True),
+    ('D,M', False), ('T,D', False), ('D', False),
+])
+def test_dropped_zero_length_element_ahead_of_the_first_spec_flags_the_entrance_match(tmp_path, line, flagged):
+    # elegant (always_change_p0) re-matches the momentum after every element but TRCOUNT, including dropped ones.
+    definitions = ['Q: CHARGE, TOTAL=1e-10', 'M: MARK', 'W: WATCH, FILENAME="w"', 'Z: DRIFT, L=0', 'T: TRCOUNT',
+                   'D: DRIFT, L=1', 'INNER: LINE=(M)', f'R: LINE=({line},D)']
+    path = lattice(tmp_path, '\n'.join(definitions))
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', UserWarning)
+        specs = parse_elegant_lattice(path, 'R')
+    assert [s.match_p0_at_entrance for s in specs] == [flagged] + [False] * (len(specs) - 1)

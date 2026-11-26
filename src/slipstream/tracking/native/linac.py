@@ -223,7 +223,9 @@ def _track_one_element(
     radiation_generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """One element's worth of work -- transport, then (if active) the collective kick, then (if
-    ``always_change_p0``) recentering."""
+    ``always_change_p0``) recentering. ``p.match_p0_at_entrance`` also recentres first."""
+    if always_change_p0 and p.match_p0_at_entrance:
+        particles6, energy_eV = _match_energy_to_centroid(particles6, energy_eV, mc2_eV)
     if p.radiation_substeps:
         for before, after in p.radiation_substeps:
             particles6, energy_eV = _apply_one_element(particles6, before, energy_eV, mc2_eV)
@@ -364,6 +366,8 @@ class LinacTracker:
             change_p0_override=False if always_change_p0 else None,
             allow_local_radiation=True,
         )
+        if effective_specs and effective_specs[0].match_p0_at_entrance:
+            self._element_params[0] = self._element_params[0]._replace(match_p0_at_entrance=True)
         for i, spec in enumerate(effective_specs):
             if not (spec.synch_rad or spec.isr):
                 continue

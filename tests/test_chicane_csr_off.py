@@ -45,9 +45,9 @@ def _lattice(path: Path, lsc_bins: int) -> Path:
     return path
 
 
-def _native(lattice: Path, particles: np.ndarray) -> np.ndarray:
+def _native(lattice: Path, particles: np.ndarray, energy_eV: float = ENERGY_EV) -> np.ndarray:
     # The importer does not set the bend integration: n_kicks_bend=8 matches the deck's N_SLICES=8.
-    tracker = LinacTracker(parse_elegant_lattice(lattice, "CHICANE"), energy_eV=ENERGY_EV, device="cpu", dtype=torch.float64,
+    tracker = LinacTracker(parse_elegant_lattice(lattice, "CHICANE"), energy_eV=energy_eV, device="cpu", dtype=torch.float64,
                            n_kicks_bend=8)
     out = tracker.track(torch.tensor(particles, dtype=torch.float64))[0].numpy()
     out[:, 4] -= out[0, 4]  # elegant's time is absolute: compare arrival relative to the first particle
@@ -91,9 +91,9 @@ def _elegant_exe() -> Path | None:
     return exe if exe.exists() else None
 
 
-def _elegant(exe: Path, work: Path, particles: np.ndarray, lsc_bins: int) -> np.ndarray:
+def _elegant(exe: Path, work: Path, particles: np.ndarray, lsc_bins: int, deck=_lattice) -> np.ndarray:
     work.mkdir()
-    _lattice(work / "chicane.lte", lsc_bins)
+    deck(work / "chicane.lte", lsc_bins)
     p = torch.tensor(particles, dtype=torch.float64)
     xp, yp, _ = _slopes_from_canonical(p[:, 1], p[:, 3], p[:, 5])
     columns = {"x": (particles[:, 0], "m"), "xp": (xp.numpy(), ""), "y": (particles[:, 2], "m"), "yp": (yp.numpy(), ""),
@@ -140,8 +140,6 @@ def test_live_elegant_csrdrift_lsc_bins_explains_csr_off_emittance(tmp_path):
     rng = np.random.default_rng(20)
     particles = rng.standard_normal((20000, 6)) * [1e-4, 2e-5, 1e-4, 2e-5, 4e-4, 1e-4]
     particles[:, 5] += 17.0 * particles[:, 4]  # chirp that compresses in the chicane
-    # Zero mean: with always_change_p0, elegant also re-matches the momentum on the zero-length CHARGE element before
-    # B1, which the importer drops. See docs/modules/tracking/native/linac.md.
     particles -= particles.mean(0)
 
     native = _native(_lattice(tmp_path / "native.lte", 0), particles)
@@ -153,3 +151,40 @@ def test_live_elegant_csrdrift_lsc_bins_explains_csr_off_emittance(tmp_path):
     # Same elegant deck with only LSC_BINS changed, CSR still 0: energies move and the emittance grows (0.746 to 0.879 um).
     assert np.abs(shipped[:, 5] - off[:, 5]).max() > 1e-5
     assert _emittance_um(shipped) > 1.1 * _emittance_um(off)
+
+
+@pytest.mark.filterwarnings("ignore:.*ignored attributes")
+def test_leading_charge_makes_every_magnet_follow_the_bunch_momentum(tmp_path):
+    """Issue #55: a bunch 1e-3 above ``energy_eV`` must track as the same bunch referenced to its own momentum."""
+    delta0 = 1e-3
+    shifted = INPUT.copy()
+    shifted[:, 5] += delta0
+    out = _native(_lattice(tmp_path / "chicane.lte", 0), shifted)
+
+    # The same beam written against its own mean momentum: px scales by P_old / P_new.
+    centred = INPUT.copy()
+    centred[:, [1, 3]] /= 1 + delta0
+    centred[:, 5] /= 1 + delta0
+    energy = ELECTRON_MASS_EV * math.sqrt((P0 * (1 + delta0)) ** 2 + 1)
+    expected = _native(tmp_path / "chicane.lte", centred, energy_eV=energy)
+    np.testing.assert_allclose(out, expected, rtol=0, atol=1e-12)
+
+
+@pytest.mark.filterwarnings("ignore:.*ignored attributes")
+@pytest.mark.parametrize("head", ["CHARGE, TOTAL=1e-10", "MARK", 'WATCH, FILENAME="w.sdds"', "DRIFT", None])
+def test_live_elegant_off_momentum_bunch_with_each_leading_element(tmp_path, head):
+    exe = _elegant_exe()
+    if exe is None:
+        pytest.skip("no elegant binary found")
+    pytest.importorskip("sdds")
+    particles = INPUT.copy()
+    particles[:, 5] += 1e-3
+
+    def deck(path, lsc_bins):
+        text = _lattice(path, lsc_bins).read_text().replace("Q: CHARGE, TOTAL=1e-10", f"Q: {head}" if head else "")
+        path.write_text(text if head else text.replace("LINE=(Q,", "LINE=("))
+        return path
+
+    native = _native(deck(tmp_path / "native.lte", 0), particles)
+    reference = _elegant(exe, tmp_path / "elegant", particles, 0, deck=deck)
+    np.testing.assert_allclose(native, reference, rtol=0, atol=1e-9)
