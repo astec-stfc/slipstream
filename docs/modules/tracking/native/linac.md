@@ -26,10 +26,10 @@ For a comparison with collective effects off:
   other elements, and switch `ISR` and `SYNCH_RAD` off in both codes.
 - Match the bend integration. The importer does not set it, so pass `n_kicks_bend` equal to the deck's `N_SLICES`
   (the default is 4).
-- With `always_change_p0`, give the incoming bunch zero mean `delta` relative to `energy_eV`. elegant re-matches the
-  momentum after each element other than a diagnostic, including a zero-length `CHARGE` ahead of the first magnet. The
-  importer drops zero-length elements, so that magnet keeps `energy_eV`. In the chicane below, a mean `delta` of 0.001
-  with `CHARGE` first moved the exit position by 0.6 mm between the codes.
+- Reference momentum needs no special setting. With `always_change_p0`, elegant matches it to the bunch after every
+  element except `TRCOUNT`, so also ahead of the first magnet when the beamline starts with `CHARGE`, `MARK`, `WATCH`
+  or another zero-length element. The importer drops those and sets `ElementSpec.match_p0_at_entrance` on the first
+  spec, and `LinacTracker` matches there. This matters when the incoming mean `delta` is not zero.
 
 Validated by `tests/test_chicane_csr_off.py` against elegant 2026.3.0 (CPU, float64): a synthetic chicane of four
 0.2 m, 0.13 rad dipoles with edges and fringe field at 190 MeV, `n_kicks_bend=8`, 20000 particles compressed from 398
@@ -47,7 +47,8 @@ genuinely different physics regime, not a special case of a ring with
 - No periodicity -- one pass through an ordered element list, no turns.
 - The reference energy continuously tracks the beam's own centroid
   (`always_change_p0`, elegant's own run-level convention): after every
-  non-diagnostic element, not just RF cavities with `CHANGE_P0=1`. This
+  element, not just RF cavities with `CHANGE_P0=1`, and before the first one
+  if its spec has `match_p0_at_entrance`. This
   generalizes the per-cavity `change_p0` this module already has
   (`elements._rf_cavity_kick`) via the shared
   `elements._match_energy_to_centroid`.
@@ -194,6 +195,8 @@ beam whose energy errs carries that error in `delta` (dispersion, R56 arrival-ti
 path-length effects are then real). What a jitter/error study needs -- `always_change_p0`
 would re-scale every magnet to the jittered beam and absorb the error. `tau` is then the
 arrival time relative to the *design* particle. Eager (no `torch.compile` variant of this loop).
+The profile does not record an entrance match (`match_p0_at_entrance`), so take it from a
+nominal bunch with zero mean `delta`.
 
 ## Usage
 
@@ -256,6 +259,10 @@ element's own `ElementSpec.change_p0` is overridden to `False`
 that same element). `always_change_p0=False` instead honors each RF
 element's own real `CHANGE_P0` value, identical to
 `NativeTracker(rf="per_element")`'s per-cavity model without turns.
+
+If the first spec has `match_p0_at_entrance` (set by the elegant importer, see [lattice import](lattice_import.md)),
+`True` also matches before that element, so every magnet has the same reference. Entry 0 of the returned
+`energy_trajectory` stays the constructor's `energy_eV`, the reference of the input particles.
 
 `n_kicks`/`n_kicks_bend`/`integration_order`/`compile`/
 `compile_mode` mirror `NativeTracker`'s own constructor parameters.

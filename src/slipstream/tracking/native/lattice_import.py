@@ -116,6 +116,9 @@ class ElementSpec:
     """``kind="vkick"`` only, elegant's ``VKICK``'s own ``KICK=``."""
     synch_rad: bool = False
     isr: bool = False
+    match_p0_at_entrance: bool = False
+    """``LinacTracker(always_change_p0=True)`` also matches the reference momentum to the bunch before this element. The importer sets it on the
+    first spec when it dropped a zero-length element ahead of it: elegant matches after every element (except ``TRCOUNT``), those included."""
 
 
 def slice_count(
@@ -188,7 +191,7 @@ def parse_elegant_lattice(
     elements: dict[str, ElementSpec] = {}
     lines: dict[str, list[str]] = {}
     issues: dict[str, dict[str, object]] = {}
-    declared: set[str] = set()
+    declared: dict[str, str] = {}  # name -> element type
 
     for name, rest in _split_statements(text):
         name = name.upper()
@@ -204,7 +207,7 @@ def parse_elegant_lattice(
         body = after_type.lstrip(",")
         params = _parse_params(body)
         length = _float(params, "L")
-        declared.add(name)
+        declared[name] = etype
         issues.pop(name, None)
         ignored = {key: value for key, value in params.items() if key not in _IMPORTED_PARAMS.get(etype, {"L"})}
         reasons = []
@@ -295,11 +298,12 @@ def parse_elegant_lattice(
     occurrence_counts: dict[str, int] = {}
     warned: set[str] = set()
 
-    def expand(name: str, _seen: frozenset[str] = frozenset()) -> list[ElementSpec]:
+    def expand(name: str, _seen: frozenset[str] = frozenset()) -> list[ElementSpec | None]:
+        """Specs in beamline order; ``None`` marks a dropped element after which elegant matches the momentum."""
         if name in _seen:
             raise ValueError(f"circular line reference at {name!r}")
         if name in lines:
-            out: list[ElementSpec] = []
+            out: list[ElementSpec | None] = []
             for token in lines[name]:
                 out.extend(expand(token, _seen | {name}))
             return out
@@ -319,10 +323,14 @@ def parse_elegant_lattice(
                 warnings.warn(message, UserWarning, stacklevel=2)
                 warned.add(name)
         if spec is None:
-            return []
+            return [None] if declared.get(name, "TRCOUNT") != "TRCOUNT" else []
         return [replace(spec, occurrence=occurrence_counts[name])]
 
-    return _apply_csrdrift_carry(expand(root_name.upper()))
+    expanded = expand(root_name.upper())
+    specs = [spec for spec in expanded if spec is not None]
+    if specs and expanded[0] is None:
+        specs[0] = replace(specs[0], match_p0_at_entrance=True)
+    return _apply_csrdrift_carry(specs)
 
 
 def _apply_csrdrift_carry(elements: list[ElementSpec]) -> list[ElementSpec]:

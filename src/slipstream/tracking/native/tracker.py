@@ -124,6 +124,8 @@ class _ElementParams(NamedTuple):
     phase_shift_rad: float = 0.0
     """RF-kind (and TDC) only: subtracted from ``phase_rad`` when the cavity is applied. ``LinacTracker.with_settings`` sets it to the fiducial shift
     so that a tensor ``phase_rad`` is read, unmodified, at every call (a shift applied once at construction would go stale in a replayed CUDA graph)."""
+    match_p0_at_entrance: bool = False
+    """``ElementSpec.match_p0_at_entrance`` of the first element, read only by ``LinacTracker(always_change_p0=True)``."""
 
 
 def _build_params(

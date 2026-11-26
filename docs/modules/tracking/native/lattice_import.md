@@ -78,6 +78,10 @@ meters, roll in radians). `occurrence`: 1-based count of this
 `name` seen so far in beamline order (elegant's `ElementOccurence`
 convention) -- used for error matching, see `errors.py`.
 
+`match_p0_at_entrance`: set on the first spec when the importer dropped a zero-length element ahead of it (any type
+but `TRCOUNT`). `LinacTracker(always_change_p0=True)` then matches the reference momentum to the bunch before that
+element, as elegant does after the dropped one. Ring trackers and hand-built specs ignore it unless set.
+
 `kind="tdc"` (elegant's `RFDF` and `RFTM110`): a thin transverse deflecting cavity (see `elements._tdc_kick`) with `VOLTAGE`, `FREQUENCY`,
 `PHASE` (degrees) and `TILT` (the deflection plane: 0 is `x`, pi/2 is `y`); other attributes are reported as ignored. Elegant's own sign and phase
 conventions for these two types were not checked against elegant output.
