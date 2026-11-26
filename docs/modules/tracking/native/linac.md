@@ -16,6 +16,26 @@ ISR for aligned pure dipoles with a fixed reference (`always_change_p0=False`).
 - Misaligned bends retain a lumped exit collective kick instead of subcycling.
 - Changing a source reference energy must refresh energy-dependent bend offsets.
 
+### Comparing transport with elegant
+
+For a comparison with collective effects off:
+
+- Set `LSC_BINS=0` on every `CSRDRIFT` as well as `CSR=0`. elegant applies longitudinal space charge in a `CSRDRIFT`
+  whenever `LSC_BINS > 0`, whatever its `CSR` flag (`track_through_driftCSR` in `csbend.c`). The lattice importer does
+  not read `LSC_BINS`; Slipstream applies LSC only with `LinacTracker(lsc=True)`. Also set `LSC=0` on `LSCDRIFT` and
+  other elements, and switch `ISR` and `SYNCH_RAD` off in both codes.
+- Match the bend integration. The importer does not set it, so pass `n_kicks_bend` equal to the deck's `N_SLICES`
+  (the default is 4).
+- With `always_change_p0`, give the incoming bunch zero mean `delta` relative to `energy_eV`. elegant re-matches the
+  momentum after each element other than a diagnostic, including a zero-length `CHARGE` ahead of the first magnet. The
+  importer drops zero-length elements, so that magnet keeps `energy_eV`. In the chicane below, a mean `delta` of 0.001
+  with `CHARGE` first moved the exit position by 0.6 mm between the codes.
+
+Validated by `tests/test_chicane_csr_off.py` against elegant 2026.3.0 (CPU, float64): a synthetic chicane of four
+0.2 m, 0.13 rad dipoles with edges and fringe field at 190 MeV, `n_kicks_bend=8`, 20000 particles compressed from 398
+to 22 µm rms length. With `LSC_BINS=0` every particle agrees to 1e-12 m in `x` and `y` and 1e-10 m in `tau`, and the
+projected normalised emittance is 0.746 µm in both codes. With only `LSC_BINS=20` changed, elegant gives 0.879 µm.
+
 ### `Model and numerical conventions`
 
 Single-pass linac/FEL tracking. Distinct from `NativeTracker` (ring:

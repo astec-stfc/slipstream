@@ -19,7 +19,7 @@ import pytest
 
 TIERS = {
     "physics": """
-        analysis_slices apertures beamline_radiation collective_gradients collective_kicks corrector
+        analysis_slices apertures beamline_radiation chicane_csr_off collective_gradients collective_kicks corrector
         csr_transient_drift distributions double_single generator_ellipse ibs injector_crest
         injector_emission_step injector_ibs injector_ibs_warp injector_screen injector_wake linac_setup
         linac_twiss magnet_fields multilayer_impedance native_bend_radiation native_drift_reference
