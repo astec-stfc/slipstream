@@ -107,11 +107,22 @@ Limits to know before relying on a gradient:
   `with_wake_windows(..., deposit="cic")` (below) gives both a gradient to `tau`. RF phase,
   voltage and magnet strengths are Python floats unless set as tensors with `with_settings` (below), so no gradient reaches them otherwise.
 - The grid origin and spacing of the binned kernels follow the live extremes of `tau`.
-- Float32 gradients through CSR stay within 1 % of float64 per particle when the bins hold about
-  128 particles each. In the test chicane (16384 particles, 128 bins, smooth image-like loss) the
-  worst of eight bunches was 0.74 % in `x`, `px`, `tau` and `delta`, on CPU and CUDA; at 256 bins it
-  was 2.4 % (`delta`). Gradients with respect to beam parameters (scales of `x`, `px`, `tau`, `delta`
-  and an energy chirp) agreed to 0.07 % of the largest in every case tried. A loss with pixel edges
+- Float32 gradients through CSR depend on the bin count and the particle number. Largest per-particle
+  difference from float64 in `x`, `px`, `tau` or `delta`, in the test chicane with a smooth image-like
+  loss (worst of eight bunches, CUDA):
+
+  | Particles | 64 bins | 128 bins | 256 bins | 512 bins |
+  | --- | --- | --- | --- | --- |
+  | 4096 | 0.40 % | 2.2 % | 3.1 % | 5.3 % |
+  | 16384 | 0.27 % | 0.74 % | 2.4 % | 5.8 % |
+  | 65536 | 0.15 % | 0.28 % | 1.9 % | 3.4 % |
+  | 131072 | 0.15 % | 0.30 % | 0.87 % | 3.4 % |
+
+  So on this chicane 128 bins stay within 1 % for 16384 to 131072 particles (0.73 % on CPU at
+  16384), and 4096 particles need 64 bins. A fixed number of particles per bin is not the rule: 128
+  per bin gave 0.74 % with 128 bins and 3.4 % with 512.
+- Float32 gradients with respect to beam parameters (scales of `x`, `px`, `tau`, `delta` and an
+  energy chirp) agreed to 0.07 % of the largest in every case tried. A loss with pixel edges
   adds float32 noise of its own, about 2 % in one test with CSR off. Set the bins with
   `ElementSpec.csr_bins` (elegant `BINS`). Fewer bins also change the CSR kick: for a Gaussian bunch
   of 16384 particles its rms error against the analytic steady-state wake was 5 % at 128 bins and

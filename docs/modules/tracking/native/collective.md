@@ -317,7 +317,8 @@ and the kick is differentiable, with a scalar charge, on every device;
 the derivative is that of the discretised model, including the grid
 origin and spacing, which follow the live minimum and maximum of `tau_m`.
 The float32 gradient of a binned density derivative is sensitive to small
-errors in `tau`; for CSR keep about 128 particles per bin and see the
+errors in `tau`; for CSR it depends on the bin count and the particle
+number, see the
 [measured limits](../../../tracking_native.md#gradients-through-a-linac-pass).
 
 ### `csr_steady_state_delta_kick_fast`
