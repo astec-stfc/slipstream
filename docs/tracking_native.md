@@ -107,11 +107,16 @@ Limits to know before relying on a gradient:
   `with_wake_windows(..., deposit="cic")` (below) gives both a gradient to `tau`. RF phase,
   voltage and magnet strengths are Python floats unless set as tensors with `with_settings` (below), so no gradient reaches them otherwise.
 - The grid origin and spacing of the binned kernels follow the live extremes of `tau`.
-- Float32 gradients of a binned density derivative are rough: in the test chicane
-  (16384 particles, 256 bins) they differ from float64 by 8-18 % in `x`, `tau` and `delta`,
-  against 1e-6 without CSR. Compare with float64 for the bin count, smoothing and particle
-  count in use; `torch.use_deterministic_algorithms(True)` removes the run-to-run noise of
-  float32 scatter but not that difference.
+- Float32 gradients through CSR stay within 1 % of float64 per particle when the bins hold about
+  128 particles each. In the test chicane (16384 particles, 128 bins, smooth image-like loss) the
+  worst of eight bunches was 0.74 % in `x`, `px`, `tau` and `delta`, on CPU and CUDA; at 256 bins it
+  was 2.4 % (`delta`). Gradients with respect to beam parameters (scales of `x`, `px`, `tau`, `delta`
+  and an energy chirp) agreed to 0.07 % of the largest in every case tried. A loss with pixel edges
+  adds float32 noise of its own, about 2 % in one test with CSR off. Set the bins with
+  `ElementSpec.csr_bins` (elegant `BINS`). Fewer bins also change the CSR kick: for a Gaussian bunch
+  of 16384 particles its rms error against the analytic steady-state wake was 5 % at 128 bins and
+  10 % at 256. Check the combination in use against float64;
+  `torch.use_deterministic_algorithms(True)` removes the run-to-run noise of float32 scatter.
 
 The step is launch-bound, so a fixed-shape forward and backward can be captured in one CUDA
 graph (measured 5.7 to 15 times faster than eager on a 15-element chicane with CSR). Warm up
