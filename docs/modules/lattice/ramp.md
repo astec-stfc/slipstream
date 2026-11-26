@@ -8,7 +8,8 @@ Interpolates supplied RF/energy programs and scales fixed-geometry radiation par
 
 ### Limits and conventions
 
-- The supplied phase/voltage program already embodies energy-balance choices.
+- The supplied phase/voltage program already embodies energy-balance choices: the RF kick is `Vrf*sin(phase + omega*tau) - U0(E)` and the reference energy rises by the ramp, so a table that keeps the synchronous particle in place has `Vrf*sin(phase) = U0 + dE/turn` (`U0` scales as `E^4`).
+- The RF phase is measured from the reference particle, which is an RF locked to the revolution of the reference; the frequency column only sets `omega` in `omega*tau`.
 - Scaling keeps geometric optics and momentum compaction fixed; it does not rematch the lattice.
 
 ### `Model and numerical conventions`

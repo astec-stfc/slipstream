@@ -10,6 +10,7 @@ Native ring kicks apply sinusoidal RF, radiation damping/excitation and effectiv
 
 - This module is independent of historical development trackers.
 - Its RF tau units differ from the canonical transport tau units.
+- `rf_kick` returns `(V sin(phi + omega tau) - U0) / E0`. Without `U0_eV` the loss is `V sin(phi_s)`, which balances it in a fixed-energy ring (`phi_s` is derived from `U0`). A ramp's phase is a table value, so ramped tracking passes the energy loss per turn itself (`U0_eV`, scaled as E^4).
 
 ## Usage
 
@@ -18,7 +19,7 @@ Native ring kicks apply sinusoidal RF, radiation damping/excitation and effectiv
 ### API reference
 
 ```python
-def rf_kick(tau: torch.Tensor, params: 'Lattice', Vrf_V: torch.Tensor | float | None=None, omega_rf: torch.Tensor | float | None=None, phi_s: torch.Tensor | float | None=None, E0_eV: torch.Tensor | float | None=None) -> torch.Tensor: ...
+def rf_kick(tau: torch.Tensor, params: 'Lattice', Vrf_V: torch.Tensor | float | None=None, omega_rf: torch.Tensor | float | None=None, phi_s: torch.Tensor | float | None=None, E0_eV: torch.Tensor | float | None=None, U0_eV: torch.Tensor | float | None=None) -> torch.Tensor: ...
 def damping_excitation(delta: torch.Tensor, params: 'Lattice', generator: torch.Generator | None=None, tau_z_eff_s: torch.Tensor | None=None, sigma_delta0_eff: torch.Tensor | None=None, noise: torch.Tensor | None=None, tau_z_noise_s: torch.Tensor | None=None) -> torch.Tensor: ...
 def transverse_damping_excitation(up: torch.Tensor, tau_plane_s: float, eps_m: float, beta_m: float, alpha: float, T0_s: float, generator: torch.Generator | None=None, tau_eff_s: torch.Tensor | None=None, eps_eff_m: torch.Tensor | None=None, noise: torch.Tensor | None=None, tau_noise_s: torch.Tensor | None=None) -> torch.Tensor: ...
 def ibs_effective_taus(tau_z_sr, tau_x_sr, tau_y_sr, rates: 'IBSGrowthRates'): ...

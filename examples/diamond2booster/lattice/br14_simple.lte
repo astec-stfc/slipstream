@@ -1,0 +1,84 @@
+!!! Use <filename>=<timeName>+<ratioName> syntax
+!!! Use more exact rf frequency
+!!! Set VOLT=1, so we can give actual voltage instead of the ratio
+!!! Set PHASE=0, so we can give actual phase instead of offset
+!!! Set FREQ=1, so we can give actual frequency instead of ratio
+
+CAVRAMP  :RAMPRF,L=1e-6,VOLT=1, PHASE=0, FREQ=1, VOLT_WAVEFORM="", &
+	PHASE_WAVEFORM="", FREQ_WAVEFORM=""
+RAMP :RAMPP, WAVEFORM=""
+CAVDRIFT: DRIFT, L=0.9;
+CAVD: line = (CAVDRIFT, CAVDRIFT)
+
+drift8:DRIFT,L=0.0869;
+drift6:DRIFT,L=0.125;
+drift5:DRIFT,L=0.15;
+drift1:DRIFT,L=0.2;
+drift10:DRIFT,L=0.2131;
+drift2:DRIFT,L=0.3;
+drift9:DRIFT,L=0.35;
+drift0:DRIFT,L=0.44573875;
+drift14:DRIFT,L=0.5575;
+drift4:DRIFT,L=0.605;
+drift7:DRIFT,L=0.6741;
+drift11:DRIFT,L=0.811;
+drift12:DRIFT,L=0.8575;
+drift3:DRIFT,L=1.5000218777463;
+drift15:DRIFT,L=3.08823875;
+drift13:DRIFT,L=3.2339775;
+!!W1:Watch,FILENAME="%s-%03ld.w1";
+QS2m:KQUAD,L=0.45,K1=-2.140460189684;
+Q2m:KQUAD,L=0.45,K1=-0.579474351249;
+QS3m:KQUAD,L=0.45,K1=0.90157567533;
+QS1m:KQUAD,L=0.45,K1=1.428529833308;
+Q1m:KQUAD,L=0.45,K1=1.982182914075;
+SS1:KSEXT,L=0.05,K2=0;
+SS2:KSEXT,L=0.05,K2=0;
+BB:CSBEN,L=1.25,ANGLE=0.102101761241668,K1=0,K2=0,E1=0.0510508806208342,&
+E2=0.0510508806208342;
+BD:CSBEN,L=1.3,ANGLE=0.109955742875643,K1=-0.705562702538,K2=-7.72289269900799,&
+E1=0.0549778714378214,E2=0.0549778714378214;
+BF:CSBEN,L=1.3,ANGLE=0.0471238898038469,K1=0.966136633178,K2=6.40922487945514,&
+E1=0.0235619449019235,E2=0.0235619449019235;
+CAV:RFCA,L=1.8,VOLT=2e6,FREQ=4.995106397999981e8,END1_FOCUS=1,END2_FOCUS=1;
+ring: Line = (drift0,QS1m,drift1,QS2m,drift2,QS3m,drift3,BB,drift1,Q2m,&
+drift4,SS1,drift5,SS1,drift6,Q1m,drift6,SS1,drift7,SS2,drift8,BD,drift9,BF,&
+drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,&
+drift8,BD,drift9,BF,drift9,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,&
+drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,&
+drift8,BD,drift9,BF,drift9,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,&
+drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,&
+drift8,BD,drift9,BF,drift9,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,&
+drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,&
+drift8,BD,drift11,SS1,drift6,Q1m,drift6,SS1,drift5,SS1,drift4,Q2m,drift1,BB,&
+drift3,QS3m,drift2,QS2m,drift1,QS1m,drift12,CAV,drift13,QS1m,drift1,QS2m,&
+drift2,QS3m,drift3,BB,drift1,Q2m,drift4,SS1,drift5,SS1,drift6,Q1m,drift6,SS1,&
+drift7,SS2,drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,&
+drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift9,BD,drift9,BF,&
+drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,&
+drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift9,BD,drift9,BF,&
+drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,&
+drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift9,BD,drift9,BF,&
+drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift9,BF,drift10,SS2,&
+drift8,BD,drift9,BF,drift10,SS2,drift8,BD,drift11,SS1,drift6,Q1m,drift6,SS1,&
+drift5,SS1,drift4,Q2m,drift1,BB,drift3,QS3m,drift2,QS2m,drift1,QS1m,drift14,&
+CAVD,drift15)
+
+
+!!! Add Q
+Q: CHARGE
+
+!!! Add Cleaner - 3*500MHZ Bucket width
+cleaner: CLEAN, tlimit=3e-9, mode=absdeviation;
+
+!!! Add watch points
+w1: watch,filename="",mode="parameters",interval=10, FLUSH_INTERVAL=10;
+w2: watch,filename="",mode="coord",interval=10000;
+
+!!! Add IBS Scattering Element - MUST go at end of line
+!IBS: IBSCATTER, nslice=32, force_matched_twiss=0, isring=1, bunched_beam_mode=0, filename="scatt.ibs",&
+!smooth=1, DO_X=0, DO_Y=0, DO_Z=0, INTERVAL=100;
+
+!!!Define Ring
+BOOST: Line = (Q,ring)
+
