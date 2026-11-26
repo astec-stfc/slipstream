@@ -105,14 +105,16 @@ def against_free_space(tau, got, radius_m, sigma_m=SIGMA_M, energy_eV=ENERGY_EV)
     return np.abs(values - expected).max() / np.abs(expected).max()
 
 
-def through_tracker(fast, csr):
-    """The LSC part of a ``LinacTracker`` pass through one drift (``csr=True`` takes the joint exact LSC+CSR path)."""
+def through_tracker(fast, csr, bend=False, **settings):
+    """The LSC part of a ``LinacTracker`` pass through one drift, or an almost straight bend (``csr=True`` with the default
+    kernels takes the joint exact LSC+CSR path)."""
     bunch = torch.zeros((N, 6), dtype=F64)
     bunch[:, 0], bunch[:, 2], bunch[:, 4] = X, Y, TAU
     kw = dict(energy_eV=ENERGY_EV, device="cpu", bunch_charge_C=CHARGE_C, fast_collective_effects=fast, always_change_p0=False)
-    spec = ElementSpec("D", "bend" if csr else "drift", LENGTH_M, angle=1e-9 if csr else 0.0, csr=csr)
-    on = LinacTracker([spec], lsc=True, csr=csr, **kw).track(bunch)[0][:, 5]
-    return on - LinacTracker([spec], lsc=False, csr=csr, **kw).track(bunch)[0][:, 5]
+    curved = csr or bend
+    spec = ElementSpec("D", "bend" if curved else "drift", LENGTH_M, angle=1e-9 if curved else 0.0, csr=csr)
+    on = LinacTracker([spec], lsc=True, csr=csr, **kw, **settings).track(bunch)[0][:, 5]
+    return on - LinacTracker([spec], lsc=False, csr=csr, **kw, **settings).track(bunch)[0][:, 5]
 
 
 # The Silverman-bandwidth paths smooth a 3000-particle bunch by 0.21 sigma, which lowers the kick by a few percent.
@@ -164,6 +166,57 @@ def test_free_space_lsc_per_particle_charge_and_batches_match_single_bunches():
 def test_silverman_smoothing_is_refused_with_a_pipe_radius():
     with pytest.raises(ValueError, match="pipe_radius_b_m"):
         lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M, pipe_radius_b_m=PIPE_RADIUS_M, smooth_passes=None)
+
+
+@pytest.mark.parametrize("fast,csr,settings,kernel", [
+    (True, False, {"lsc_bins": 256, "lsc_smooth_passes": 64}, {"n_bins": 256, "smooth_passes": 64}),
+    (False, False, {"lsc_bins": 32}, {"n_bins": 32, "smooth_passes": None}),
+    (False, True, {"lsc_smooth_passes": 32}, {"smooth_passes": 32}),
+    (True, False, {"lsc_bins": 256, "lsc_smooth_passes": 64, "pipe_radius_b_m": PIPE_RADIUS_M},
+     {"n_bins": 256, "smooth_passes": 64, "pipe_radius_b_m": PIPE_RADIUS_M}),
+    (True, False, {"lsc_bins": 256, "lsc_smooth_passes": 64, "bend": True, "dipole_collective_subcycle": True},
+     {"n_bins": 256, "smooth_passes": 64}),
+], ids=["fast", "default", "default-joint-csr", "fast-pipe", "subcycled-dipole"])
+def test_linac_tracker_lsc_grid_settings_reach_the_kernel(fast, csr, settings, kernel):
+    got = through_tracker(fast, csr, **settings)
+    expected = lsc_delta_kick_fast(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M, **kernel)
+    scale = expected.abs().max().item()
+    torch.testing.assert_close(got, expected, rtol=0, atol=1e-4 * scale)
+    default = through_tracker(fast, csr, pipe_radius_b_m=settings.get("pipe_radius_b_m"))
+    assert (got - default).abs().max().item() > 1e-3 * scale  # the settings change the result
+
+
+@pytest.mark.parametrize("settings,match", [
+    ({"lsc_bins": 1}, "lsc_bins"),
+    ({"lsc_bins": 256.0}, "lsc_bins"),
+    ({"lsc_smooth_passes": -1}, "lsc_smooth_passes"),
+    ({"lsc_bins": 256, "pipe_radius_b_m": PIPE_RADIUS_M}, "fast_collective_effects"),
+])
+def test_linac_tracker_refuses_unusable_lsc_grid_settings(settings, match):
+    with pytest.raises(ValueError, match=match):
+        LinacTracker([ElementSpec("D", "drift", LENGTH_M)], ENERGY_EV, device="cpu", lsc=True, **settings)
+
+
+def test_pairwise_pipe_formula_refuses_grid_settings():
+    with pytest.raises(ValueError, match="no grid"):
+        lsc_delta_kick(TAU, CHARGE_C / N, X, Y, ENERGY, MC2, LENGTH_M, pipe_radius_b_m=PIPE_RADIUS_M, n_bins=256)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_free_space_lsc_cuda_graph_survives_many_other_grid_settings():
+    """A CUDA graph holds the addresses of the cached grid constants, so the caches must never evict them."""
+    tau, x, y, energy, mc2 = (value.cuda() for value in (TAU, X, Y, ENERGY, MC2))
+
+    def kick(bins, passes):
+        return lsc_delta_kick_fast(tau, CHARGE_C / N, x, y, energy, mc2, LENGTH_M, n_bins=bins, smooth_passes=passes)
+
+    first = kick(512, 32)
+    for i in range(1, 25):
+        kick(512 + 8 * i, 32 + i)
+    # fill whatever was freed
+    junk = [torch.full((size,), 1e30, dtype=F64, device="cuda") for size in (257, 513, 514, 1025, 1026) for _ in range(40)]
+    torch.testing.assert_close(kick(512, 32), first, rtol=1e-12, atol=0)
+    assert junk
 
 
 @pytest.mark.parametrize("kick", [lsc_delta_kick, lsc_delta_kick_fast])

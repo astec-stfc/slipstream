@@ -395,6 +395,8 @@ def _lsc_csr_delta_kicks(
     radius_factor: float,
     softening_m: float | torch.Tensor | None,
     compile_chunks: bool,
+    n_bins: int | None = None,
+    smooth_passes: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute exact LSC and CSR together, sharing one KDE evaluation."""
     n = tau_m.shape[-1]
@@ -418,7 +420,7 @@ def _lsc_csr_delta_kicks(
 
     if pipe_radius_b_m is None:
         lsc_kick = lsc_delta_kick(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV, lsc_length_m,
-                                  radius_factor=radius_factor)
+                                  radius_factor=radius_factor, n_bins=n_bins, smooth_passes=smooth_passes)
     else:
         a_m = torch.clamp(radius_factor * 0.5 * (x_m.std() + y_m.std()), min=tiny)
         form_factor = 1.0 + 2.0 * torch.log(pipe_radius_b_m / a_m)
@@ -453,8 +455,12 @@ def lsc_delta_kick(
     pipe_radius_b_m: float | None = None,
     radius_factor: float = 1.7,
     compile_chunks: bool = False,
+    n_bins: int | None = None,
+    smooth_passes: int | None = None,
 ) -> torch.Tensor:
     """Compute lsc delta kick; see the module documentation for details."""
+    if pipe_radius_b_m is not None and (n_bins is not None or smooth_passes is not None):
+        raise ValueError("n_bins and smooth_passes are for the free-space kernel: the pipe formula here has no grid")
     n = tau_m.shape[-1]
     if n < 2 or length_m <= 0.0:
         return torch.zeros_like(tau_m)
@@ -462,11 +468,13 @@ def lsc_delta_kick(
         if tau_m.ndim > 1:  # a batch of bunches: one grid each
             charge = torch.as_tensor(charge_per_particle_C, dtype=tau_m.dtype, device=tau_m.device).broadcast_to(tau_m.shape)
             return torch.stack([
-                lsc_delta_kick(t, q, x, y, energy_eV, mc2_eV, length_m, radius_factor=radius_factor)
+                lsc_delta_kick(t, q, x, y, energy_eV, mc2_eV, length_m, radius_factor=radius_factor, n_bins=n_bins,
+                               smooth_passes=smooth_passes)
                 for t, q, x, y in zip(tau_m, charge, x_m, y_m)
             ])
+        grid = {} if n_bins is None else {"n_bins": n_bins}
         return lsc_delta_kick_fast(tau_m, charge_per_particle_C, x_m, y_m, energy_eV, mc2_eV, length_m,
-                                   radius_factor=radius_factor, smooth_passes=None)
+                                   radius_factor=radius_factor, smooth_passes=smooth_passes, **grid)
     # Clamped, not branched: torch.compile graph-breaks on a Python `if`
     # over a live tensor value.
     tiny = torch.finfo(tau_m.dtype).tiny ** 0.5
@@ -694,7 +702,8 @@ _DENSE_SMOOTH_MIN_PASSES = 8
 _DENSE_SMOOTH_MAX_BINS = 4096
 
 
-@functools.lru_cache(maxsize=8)
+# Never evicted (here and for the two caches below): a CUDA graph holds the address of each tensor it read at capture.
+@functools.lru_cache(maxsize=None)
 def _dense_smoother(n: int, passes: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     """``T**passes`` for the zero-padded ``(1,2,1)/4`` smoother ``T``, built in float64 on first use. ``T`` is a Dirichlet tridiagonal
     Toeplitz matrix with eigenvectors ``sin(pi j k / (n + 1))`` and eigenvalues ``cos(pi k / (2 (n + 1)))**2``. Build it outside a
@@ -736,14 +745,14 @@ def _gather_linear(field: torch.Tensor, bin_idx: torch.Tensor, interp_w: torch.T
     return torch.where(valid, gathered, torch.zeros_like(gathered))
 
 
-@functools.lru_cache(maxsize=16)
+@functools.lru_cache(maxsize=None)
 def _binomial_transfer(size: int, passes: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     """Fourier transfer function of ``passes`` ``(1,2,1)/4`` smoothing passes on a periodic grid of ``size`` bins. Never modify it."""
     k = torch.arange(size // 2 + 1, dtype=torch.float64, device=device)
     return (torch.cos(k * (math.pi / size)) ** (2 * passes)).to(dtype)
 
 
-@functools.lru_cache(maxsize=16)
+@functools.lru_cache(maxsize=None)
 def _free_space_constants(nb: int, dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     """Bin offsets ``-nb .. nb`` (float64) and the squared wavenumbers (rad^2 per bin^2) of the ``2 nb`` transform. Never modify
     them."""

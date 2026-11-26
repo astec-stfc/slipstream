@@ -91,7 +91,7 @@ def read_config(path, *, overrides: dict[str, object] | None = None):
     numeric_options = {
         "bunch_charge_C", "pipe_radius_b_m", "lsc_radius_factor", "csr_softening_m",
     }
-    int_options = {"n_kicks", "n_kicks_bend", "integration_order", "n_slices"}
+    int_options = {"n_kicks", "n_kicks_bend", "integration_order", "n_slices", "lsc_bins", "lsc_smooth_passes"}
     tracker = _mapping(cfg.get("tracker", {}), "tracker", bool_options | numeric_options | int_options | {
         "device", "dtype", "compile_mode", "csr_drift_model",
     })
@@ -104,7 +104,10 @@ def read_config(path, *, overrides: dict[str, object] | None = None):
             continue
         _number(tracker[name], f"tracker.{name}", positive=name != "bunch_charge_C")
     for name in int_options & tracker.keys():
-        _number(tracker[name], f"tracker.{name}", integer=True, minimum=1)
+        if name in {"lsc_bins", "lsc_smooth_passes"} and tracker[name] is None:
+            continue
+        _number(tracker[name], f"tracker.{name}", integer=True,
+                minimum={"lsc_bins": 2, "lsc_smooth_passes": 0}.get(name, 1))
     if tracker.get("csr_drift_model", "overtaking") not in ("overtaking", "stupakov", "retarded"):
         raise ValueError("tracker.csr_drift_model must be overtaking, stupakov or retarded")
     if tracker.get("csr_transient", False) or tracker.get("csr_drift_model", "overtaking") != "overtaking":

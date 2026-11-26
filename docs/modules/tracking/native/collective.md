@@ -213,7 +213,7 @@ Use `lsc_delta_kick`, `csr_steady_state_delta_kick`, its subquadratic variant or
 
 ```python
 def silverman_bandwidth_m(tau_m: torch.Tensor) -> torch.Tensor: ...
-def lsc_delta_kick(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, x_m: torch.Tensor, y_m: torch.Tensor, energy_eV: torch.Tensor, mc2_eV: torch.Tensor, length_m: float, pipe_radius_b_m: float | None=None, radius_factor: float=1.7, compile_chunks: bool=False) -> torch.Tensor: ...
+def lsc_delta_kick(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, x_m: torch.Tensor, y_m: torch.Tensor, energy_eV: torch.Tensor, mc2_eV: torch.Tensor, length_m: float, pipe_radius_b_m: float | None=None, radius_factor: float=1.7, compile_chunks: bool=False, n_bins: int | None=None, smooth_passes: int | None=None) -> torch.Tensor: ...
 def csr_steady_state_delta_kick(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, rho_m: float, energy_eV: torch.Tensor, length_m: float, softening_m: float | torch.Tensor | None=None, compile_chunks: bool=False) -> torch.Tensor: ...
 def csr_steady_state_delta_kick_subquadratic(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, rho_m: float, energy_eV: torch.Tensor, length_m: float, softening_m: float | torch.Tensor | None=None, tolerance: float=0.001) -> torch.Tensor: ...
 def lsc_delta_kick_fast(tau_m: torch.Tensor, charge_per_particle_C: torch.Tensor | float, x_m: torch.Tensor, y_m: torch.Tensor, energy_eV: torch.Tensor, mc2_eV: torch.Tensor, length_m: float, pipe_radius_b_m: float | None=None, radius_factor: float=1.7, n_bins: int=2048, smooth_passes: int | None=512) -> torch.Tensor: ...
@@ -232,6 +232,8 @@ gains energy and the tail loses it. `a` is the live rms beam radius times
   ([`_free_space_lsc_field`](#_free_space_lsc_field)). It is computed by
   `lsc_delta_kick_fast` on 2048 bins with the Gaussian kernel of
   Silverman's bandwidth, the density estimator of the pipe formula below.
+  `n_bins` and `smooth_passes` replace the bin count and, with binomial
+  passes, the smoothing; both raise `ValueError` with a pipe radius.
   A batch of bunches `(..., n)` gets one grid and radius per bunch.
 - With a pipe radius `b`: the long-wavelength formula
   ``E_z = Z0 * F * c / (4 pi gamma^2) * dlambda/dtau``,
@@ -267,7 +269,8 @@ bins spanning the live bunch, `smooth_passes` binomial smoothing passes,
 then the free-space convolution or, with a pipe radius, the smoothed
 central-difference derivative, and a linear gather.
 `smooth_passes=None` (free space only) smooths with a Gaussian of
-Silverman's bandwidth instead.
+Silverman's bandwidth instead. `LinacTracker` passes its `lsc_bins` and
+`lsc_smooth_passes` to these two arguments.
 
 No smoothing suits every bunch. Root-mean-square error of the free-space
 kick, relative to its rms, on 2048 bins at 16 384 / 131 072 / 1 048 576
@@ -293,10 +296,19 @@ Against elegant 2026.3.0 on a four-dipole compressor (CSR off, 100 pC,
 1600 `LSC_BINS` gives 0.483 to 0.485, 0.712 to 0.715 and 0.572 to
 0.578 um.
 
+Less smoothing removes most of the gap at factor 1.0. With the default
+path and `lsc_smooth_passes` of 32, 128 and 512 on 2048 bins the
+emittance is 0.577, 0.574 and 0.567 um (0.573, 0.571 and 0.564 um with
+524 288 particles, where Silverman smoothing gives 0.546 um). At factor
+0.925 the same settings give 0.714 to 0.716 um.
+
 `@torch._dynamo.disable()` (like the reference kernels). On CUDA with a
 scalar charge (every real `LinacTracker` caller) the field computation is
 captured once into a CUDA graph ([`_LSCFastGraph`](#_lscfastgraph)) and
 replayed. `length_m` is applied after replay, in plain eager Python.
+The cached tensors a graph reads (the grid constants and smoothers) are
+never evicted, so each distinct bin count and number of passes keeps its
+own memory until the process ends.
 
 Gradients: the graph records no autograd history, so it is used only when
 no differentiated input requires grad (`_grad_live`). With `tau_m`,
